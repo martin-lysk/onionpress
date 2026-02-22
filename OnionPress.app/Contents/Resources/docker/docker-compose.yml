@@ -30,7 +30,6 @@ services:
           define('WP_HOME', $$scheme . '://' . $$_SERVER['HTTP_HOST']);
           define('WP_SITEURL', $$scheme . '://' . $$_SERVER['HTTP_HOST']);
           define('FORCE_SSL_ADMIN', false);
-          defined('WP_ALLOW_MULTISITE') or define('WP_ALLOW_MULTISITE', true);
           define('COOKIE_DOMAIN', $$_SERVER['HTTP_HOST']);
     volumes:
       - wordpress-data:/var/www/html
