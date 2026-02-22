@@ -237,9 +237,8 @@ echo \$c;
 }
 
 get_last_poll_duration() {
-    # Extract last poll pass duration from onionpress log
-    docker_cmd exec onionpress-wordpress \
-        sh -c "grep 'poll pass complete' /var/log/onionpress.log 2>/dev/null | tail -1 | sed 's/.*in //;s/s$//' || echo '?'" | tr -d ' \n\r'
+    # Extract last poll pass duration from onionpress log (on host, not in container)
+    grep 'poll pass complete' "$DATA_DIR/onionpress.log" 2>/dev/null | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r'
 }
 
 get_system_mem_pct() {
