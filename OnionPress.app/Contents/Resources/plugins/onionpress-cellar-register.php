@@ -84,6 +84,45 @@ function onionpress_cellar_handle_register() {
         return;
     }
 
+    // Validate key sizes
+    $sk_len = strlen($secret_key);
+    if ($sk_len !== 64) {
+        onionpress_cellar_respond(400, [
+            'error' => "Invalid secret_key length: expected 64 bytes, got $sk_len",
+        ]);
+        return;
+    }
+
+    $pk_len = strlen($public_key);
+    if ($pk_len === 64) {
+        // 32-byte Tor header + 32-byte raw key — strip header
+        $raw_pubkey = substr($public_key, 32);
+    } elseif ($pk_len === 32) {
+        // Raw 32-byte ed25519 public key
+        $raw_pubkey = $public_key;
+    } else {
+        onionpress_cellar_respond(400, [
+            'error' => "Invalid public_key length: expected 32 or 64 bytes, got $pk_len",
+        ]);
+        return;
+    }
+
+    // Verify content_address matches public_key (Tor v3 address derivation)
+    if (in_array('sha3-256', hash_algos())) {
+        $checksum_input = ".onion checksum" . $raw_pubkey . "\x03";
+        $checksum = substr(hash('sha3-256', $checksum_input, true), 0, 2);
+        $addr_bytes = $raw_pubkey . $checksum . "\x03";
+        $derived_address = strtolower(onionpress_base32_encode($addr_bytes)) . '.onion';
+
+        if ($derived_address !== $content_address) {
+            onionpress_cellar_respond(400, [
+                'error' => 'content_address does not match public_key',
+                'expected' => $derived_address,
+            ]);
+            return;
+        }
+    }
+
     // Store keys on disk (encrypted)
     $cellar_dir = '/var/lib/onionpress/cellar';
     $keys_dir = "$cellar_dir/keys/$content_address";
@@ -166,6 +205,22 @@ function onionpress_cellar_handle_register() {
         'content_address' => $content_address,
         'message' => $found ? 'Registration updated' : 'Registration created',
     ]);
+}
+
+/**
+ * RFC 4648 base32 encode (no padding). PHP has no built-in base32.
+ */
+function onionpress_base32_encode($data) {
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    $binary = '';
+    for ($i = 0; $i < strlen($data); $i++) {
+        $binary .= str_pad(decbin(ord($data[$i])), 8, '0', STR_PAD_LEFT);
+    }
+    $result = '';
+    for ($i = 0; $i + 5 <= strlen($binary); $i += 5) {
+        $result .= $alphabet[bindec(substr($binary, $i, 5))];
+    }
+    return $result;
 }
 
 /**

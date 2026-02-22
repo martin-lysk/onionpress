@@ -212,10 +212,13 @@ def register_with_cellar(app):
                     "cellar_address": CELLAR_ADDRESS,
                 })
                 return
+            # Server returned a structured error (e.g. key validation failure)
+            error_msg = resp.get("error", "unknown error")
+            app.log(f"OnionCellar: registration rejected: {error_msg}")
         except json.JSONDecodeError:
             pass
 
-    app.log("OnionCellar: registration failed (will retry on next startup)")
+    app.log(f"OnionCellar: registration failed (will retry on next startup) — response: {output!r}")
     _save_registration_status(app, {
         "registered": False,
         "last_attempt": datetime.now(timezone.utc).isoformat(),
