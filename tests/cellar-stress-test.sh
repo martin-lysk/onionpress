@@ -554,6 +554,77 @@ wait_for_takeover() {
     return 1
 }
 
+# ── Phase 5b: Verify takeover redirects to Wayback Machine ────────────────────
+# After takeover, the cellar serves 302 redirects to the Wayback Machine.
+# Access each taken-over .onion address and verify the redirect.
+
+WAYBACK_ONION="archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
+
+verify_takeover_redirects() {
+    local fail_start="$1"
+    local fail_count="$2"
+
+    log "Phase 5b: Verifying takeover redirects to Wayback Machine..."
+    log "  (Waiting 60s for Tor descriptor publication...)"
+    sleep 60
+
+    local verified=0
+    local errors=0
+    local retries=3
+
+    for i in $(seq "$fail_start" $((fail_start + fail_count - 1))); do
+        local content_addr
+        content_addr=$(cat "${OUTPUT_DIR}/worker${i}.content_addr" | tr -d '\r\n ')
+
+        local attempt=0
+        local success=false
+
+        while [ "$attempt" -lt "$retries" ]; do
+            attempt=$((attempt + 1))
+
+            # Use wget inside tor container to fetch the taken-over address
+            # --max-redirect=0 prevents following the redirect so we can inspect it
+            # wget returns exit code 8 for server error responses (3xx counts)
+            local output
+            output=$(docker_cmd exec onionpress-tor \
+                wget -q -S --max-redirect=0 -O /dev/null \
+                "http://${content_addr}/" 2>&1) || true
+
+            # Check for 302 redirect
+            if echo "$output" | grep -q "302 Found"; then
+                # Verify Location header points to Wayback Machine
+                local location
+                location=$(echo "$output" | grep -i "Location:" | tr -d '\r' | sed 's/.*Location: *//')
+
+                if echo "$location" | grep -q "$WAYBACK_ONION"; then
+                    log "  Worker ${i}: 302 → Wayback Machine OK"
+                    log "    Location: ${location}"
+                    verified=$((verified + 1))
+                    success=true
+                    log_json "\"event\":\"verify_redirect\",\"worker\":${i},\"address\":\"${content_addr}\",\"ok\":true,\"location\":\"${location}\""
+                    break
+                else
+                    log "  Worker ${i}: 302 but wrong Location: ${location}"
+                fi
+            else
+                log "  Worker ${i}: attempt ${attempt}/${retries} — no 302 yet (descriptor may not be published)"
+                if [ "$attempt" -lt "$retries" ]; then
+                    sleep 30
+                fi
+            fi
+        done
+
+        if [ "$success" != true ]; then
+            errors=$((errors + 1))
+            log "  Worker ${i}: FAILED to verify redirect after ${retries} attempts"
+            log_json "\"event\":\"verify_redirect\",\"worker\":${i},\"address\":\"${content_addr}\",\"ok\":false"
+        fi
+    done
+
+    log "Phase 5b: Redirect verification: ${verified} OK, ${errors} failed"
+    return 0
+}
+
 # ── Phase 6: Recovery test ────────────────────────────────────────────────────
 
 restart_responders_for_workers() {
@@ -733,6 +804,10 @@ run_worker() {
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened, continuing anyway..."
         fi
+        echo ""
+
+        # Phase 5b: Verify takeover serves Wayback Machine redirects
+        verify_takeover_redirects "$fail_start" "$FAILING"
         echo ""
 
         # Phase 6: Recovery — restart the failed workers' responders

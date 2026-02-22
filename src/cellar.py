@@ -30,7 +30,7 @@ CELLAR_REGISTRY_FILE = f"{CELLAR_DATA_DIR}/registry.json"
 CELLAR_KEYS_DIR = f"{CELLAR_DATA_DIR}/keys"
 
 # Healthcheck intervals (seconds)
-HEALTHY_INTERVAL = 300       # 5 minutes when healthy
+HEALTHY_INTERVAL = 60        # 1 minute when healthy (short while bringing system up)
 FAST_POLL_INTERVAL = 15      # 15 seconds after recent failure/recovery
 LONG_FAIL_INTERVAL = 1800    # 30 minutes after prolonged failure
 
