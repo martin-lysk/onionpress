@@ -257,8 +257,7 @@ get_system_mem_pct() {
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 print_dashboard() {
-    local reg_size reg_count tor_mem wp_mem torrc_svcs fail_count takeover_count healthy_count mem_pct poll_dur
-    reg_size=$(get_registry_size)
+    local reg_count tor_mem wp_mem torrc_svcs fail_count takeover_count healthy_count mem_pct poll_dur
     reg_count=$(get_registry_count)
     tor_mem=$(get_container_mem_mb onionpress-tor)
     wp_mem=$(get_container_mem_mb onionpress-wordpress)
@@ -269,22 +268,12 @@ print_dashboard() {
     mem_pct=$(get_system_mem_pct)
     poll_dur=$(get_last_poll_duration)
 
-    # Human-readable registry size
-    local reg_size_h
-    if [ "$reg_size" -gt 1048576 ] 2>/dev/null; then
-        reg_size_h="$((reg_size / 1048576))MB"
-    elif [ "$reg_size" -gt 1024 ] 2>/dev/null; then
-        reg_size_h="$((reg_size / 1024))KB"
-    else
-        reg_size_h="${reg_size}B"
-    fi
-
-    log "Registry: ${reg_count} entries (${reg_size_h}) | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
+    log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
     echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | Torrc services: ${torrc_svcs} | VM mem: ${mem_pct}%"
     echo "           Last poll pass: ${poll_dur}s"
 
     # JSON log
-    log_json "\"registry_count\":${reg_count},\"registry_bytes\":${reg_size},\"tor_mem_mb\":${tor_mem},\"wp_mem_mb\":${wp_mem},\"torrc_services\":${torrc_svcs},\"healthy\":${healthy_count},\"failing\":${fail_count},\"takeovers\":${takeover_count},\"vm_mem_pct\":${mem_pct},\"poll_duration\":\"${poll_dur}\""
+    log_json "\"registry_count\":${reg_count},\"tor_mem_mb\":${tor_mem},\"wp_mem_mb\":${wp_mem},\"torrc_services\":${torrc_svcs},\"healthy\":${healthy_count},\"failing\":${fail_count},\"takeovers\":${takeover_count},\"vm_mem_pct\":${mem_pct},\"poll_duration\":\"${poll_dur}\""
 }
 
 # ── Phase 1: Create real onion services ──────────────────────────────────────
