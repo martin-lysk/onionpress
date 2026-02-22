@@ -290,7 +290,7 @@ setup_onion_services() {
         awk '
         /^# stress-test:/ { skip=1; next }
         /^HiddenServiceDir.*stress-test/ { skip=1; next }
-        skip && /^HiddenServicePort/ { skip=0; next }
+        skip && /^(HiddenServicePort|HiddenServiceNumIntroductionPoints)/ { next }
         { skip=0; print }
         ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
     " 2>/dev/null || true
@@ -316,9 +316,11 @@ setup_onion_services() {
 # stress-test: worker${i}-content
 HiddenServiceDir ${content_dir}
 HiddenServicePort 80 127.0.0.1:${content_port}
+HiddenServiceNumIntroductionPoints 3
 # stress-test: worker${i}-healthcheck
 HiddenServiceDir ${hc_dir}
-HiddenServicePort 80 127.0.0.1:${hc_port}"
+HiddenServicePort 80 127.0.0.1:${hc_port}
+HiddenServiceNumIntroductionPoints 3"
     done
 
     # Append to torrc
@@ -741,7 +743,7 @@ echo \"Kept \" . count(\$cleaned) . \" entries, removed \" . (count(\$r) - count
         awk '
         /^# stress-test:/ { skip=1; next }
         /^HiddenServiceDir.*stress-test/ { skip=1; next }
-        skip && /^HiddenServicePort/ { skip=0; next }
+        skip && /^(HiddenServicePort|HiddenServiceNumIntroductionPoints)/ { next }
         { skip=0; print }
         ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
     " 2>/dev/null || true
@@ -933,7 +935,7 @@ echo \"Kept \" . count(\$cleaned) . \" entries, removed \" . (count(\$r) - count
         awk '
         /^# stress-test:/ { skip=1; next }
         /^HiddenServiceDir.*stress-test/ { skip=1; next }
-        skip && /^HiddenServicePort/ { skip=0; next }
+        skip && /^(HiddenServicePort|HiddenServiceNumIntroductionPoints)/ { next }
         { skip=0; print }
         ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
     " 2>/dev/null || true
