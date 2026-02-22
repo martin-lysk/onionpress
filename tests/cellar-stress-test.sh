@@ -317,9 +317,11 @@ get_container_mem_mb() {
     fi
 }
 
+CELLAR_DB_PHP="/var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php"
+
 get_registry_count() {
     docker_cmd exec onionpress-wordpress \
-        sh -c "grep -c 'content_address' /var/lib/onionpress/cellar/registry.json 2>/dev/null || echo 0" | tr -d ' \n\r'
+        php "$CELLAR_DB_PHP" count "" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_torrc_service_count() {
@@ -329,40 +331,17 @@ get_torrc_service_count() {
 
 get_stress_fail_count() {
     docker_cmd exec onionpress-wordpress \
-        sh -c "php -r '
-\$r = json_decode(file_get_contents(\"/var/lib/onionpress/cellar/registry.json\"), true);
-if (!is_array(\$r)) { echo 0; exit; }
-\$c = 0;
-foreach (\$r as \$e) { if ((\$e[\"version\"] ?? \"\") === \"stress-test\" && (\$e[\"status\"] ?? \"\") === \"failing\") \$c++; }
-echo \$c;
-' 2>/dev/null || echo 0" | tr -d ' \n\r'
+        php "$CELLAR_DB_PHP" count "WHERE version='stress-test' AND status='failing'" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_takeover_count() {
     docker_cmd exec onionpress-wordpress \
-        sh -c "php -r '
-\$r = json_decode(file_get_contents(\"/var/lib/onionpress/cellar/registry.json\"), true);
-if (!is_array(\$r)) { echo 0; exit; }
-\$c = 0;
-foreach (\$r as \$e) { if (!empty(\$e[\"takeover_active\"])) \$c++; }
-echo \$c;
-' 2>/dev/null || echo 0" | tr -d ' \n\r'
+        php "$CELLAR_DB_PHP" count "WHERE takeover_active=1" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_healthy_count() {
     docker_cmd exec onionpress-wordpress \
-        sh -c "php -r '
-\$r = json_decode(file_get_contents(\"/var/lib/onionpress/cellar/registry.json\"), true);
-if (!is_array(\$r)) { echo 0; exit; }
-\$c = 0;
-foreach (\$r as \$e) {
-    if ((\$e[\"version\"] ?? \"\") !== \"stress-test\") continue;
-    if ((\$e[\"status\"] ?? \"\") !== \"healthy\") continue;
-    if (empty(\$e[\"last_healthcheck\"])) continue;
-    \$c++;
-}
-echo \$c;
-' 2>/dev/null || echo 0" | tr -d ' \n\r'
+        php "$CELLAR_DB_PHP" count "WHERE version='stress-test' AND status='healthy' AND last_healthcheck IS NOT NULL" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_last_poll_duration() {
@@ -750,14 +729,8 @@ cleanup_stress_test() {
     log "  Removed worker Tor container"
 
     # Remove stress-test entries from cellar registry
-    docker_cmd exec onionpress-wordpress sh -c "php -r '
-\$f = \"/var/lib/onionpress/cellar/registry.json\";
-\$r = json_decode(file_get_contents(\$f), true);
-if (!is_array(\$r)) { echo \"No registry found\"; exit; }
-\$cleaned = array_values(array_filter(\$r, function(\$e) { return (\$e[\"version\"] ?? \"\") !== \"stress-test\"; }));
-file_put_contents(\$f, json_encode(\$cleaned, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-echo \"Kept \" . count(\$cleaned) . \" entries, removed \" . (count(\$r) - count(\$cleaned));
-'" 2>/dev/null || true
+    docker_cmd exec onionpress-wordpress \
+        php "$CELLAR_DB_PHP" delete-by-version stress-test 2>/dev/null || true
     log "  Cleaned registry"
 
     # Remove encrypted key directories for stress-test addresses
@@ -912,11 +885,8 @@ run_cleanup() {
 
     # Get list of stress-test addresses from registry
     local stress_addrs
-    stress_addrs=$(docker_cmd exec onionpress-wordpress sh -c "php -r '
-\$r = json_decode(file_get_contents(\"/var/lib/onionpress/cellar/registry.json\"), true);
-if (!is_array(\$r)) exit;
-foreach (\$r as \$e) { if ((\$e[\"version\"] ?? \"\") === \"stress-test\") echo \$e[\"content_address\"] . \"\\n\"; }
-'" 2>/dev/null) || true
+    stress_addrs=$(docker_cmd exec onionpress-wordpress \
+        php "$CELLAR_DB_PHP" query-addresses "WHERE version='stress-test'" 2>/dev/null) || true
 
     local count
     count=$(echo "$stress_addrs" | grep -c '\.onion' 2>/dev/null || true)
@@ -928,16 +898,10 @@ foreach (\$r as \$e) { if ((\$e[\"version\"] ?? \"\") === \"stress-test\") echo 
         return
     fi
 
-    # Filter registry.json — remove stress-test entries
-    log "Filtering registry.json..."
-    docker_cmd exec onionpress-wordpress sh -c "php -r '
-\$f = \"/var/lib/onionpress/cellar/registry.json\";
-\$r = json_decode(file_get_contents(\$f), true);
-if (!is_array(\$r)) { echo \"No registry found\"; exit; }
-\$cleaned = array_values(array_filter(\$r, function(\$e) { return (\$e[\"version\"] ?? \"\") !== \"stress-test\"; }));
-file_put_contents(\$f, json_encode(\$cleaned, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-echo \"Kept \" . count(\$cleaned) . \" entries, removed \" . (count(\$r) - count(\$cleaned));
-'"
+    # Delete stress-test entries from SQLite registry
+    log "Cleaning registry..."
+    docker_cmd exec onionpress-wordpress \
+        php "$CELLAR_DB_PHP" delete-by-version stress-test 2>/dev/null || true
 
     # Remove encrypted key directories
     log "Removing key directories..."

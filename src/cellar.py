@@ -26,8 +26,8 @@ WAYBACK_ONION = "archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion
 
 # Paths inside containers
 CELLAR_DATA_DIR = "/var/lib/onionpress/cellar"
-CELLAR_REGISTRY_FILE = f"{CELLAR_DATA_DIR}/registry.json"
 CELLAR_KEYS_DIR = f"{CELLAR_DATA_DIR}/keys"
+CELLAR_DB_PHP = "/var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php"
 
 # Healthcheck intervals (seconds)
 HEALTHY_INTERVAL = 15        # 15 seconds between polls
@@ -253,51 +253,53 @@ def _is_cellar_unlocked(app):
     return ok
 
 
-def _read_registry(app):
-    """Read the cellar registry from the wordpress container.
-    Handles corruption from partial writes by trying to salvage
-    valid JSON from the beginning of the file."""
+def _cellar_db_init(app):
+    """Initialize the cellar SQLite database (schema + JSON migration)."""
     ok, output = _run_docker(app, [
         "exec", "onionpress-wordpress",
-        "cat", CELLAR_REGISTRY_FILE
+        "php", CELLAR_DB_PHP, "init"
+    ])
+    if ok and output:
+        try:
+            result = json.loads(output)
+            migrated = result.get("migrated", 0)
+            if migrated > 0:
+                app.log(f"OnionCellar: migrated {migrated} entries from JSON to SQLite")
+            return True
+        except json.JSONDecodeError:
+            pass
+    app.log(f"OnionCellar: DB init output: {output!r}")
+    return ok
+
+
+def _read_registry(app):
+    """Read the cellar registry from SQLite via PHP CLI."""
+    ok, output = _run_docker(app, [
+        "exec", "onionpress-wordpress",
+        "php", CELLAR_DB_PHP, "read-all"
     ])
     if ok and output:
         try:
             return json.loads(output)
         except json.JSONDecodeError:
-            # Try to salvage: find end of first valid JSON array
-            depth = 0
-            end = 0
-            for i, c in enumerate(output):
-                if c == '[':
-                    depth += 1
-                elif c == ']':
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-            if end > 0:
-                try:
-                    result = json.loads(output[:end])
-                    app.log(f"OnionCellar: WARNING — salvaged {len(result)} entries from corrupted registry")
-                    return result
-                except json.JSONDecodeError:
-                    pass
-            app.log("OnionCellar: WARNING — registry is corrupted and unsalvageable")
+            app.log(f"OnionCellar: failed to parse registry JSON: {output[:200]!r}")
     return []
 
 
-def _write_registry(app, registry):
-    """Write the cellar registry to the wordpress container.
-    Uses atomic write (temp file + mv) to avoid corruption from
-    concurrent writes by the PHP /register endpoint."""
-    registry_json = json.dumps(registry, indent=2)
-    tmp_file = f"{CELLAR_REGISTRY_FILE}.tmp"
-    # Write to temp file then atomically rename to avoid partial-write corruption
-    _run_docker(app, [
-        "exec", "onionpress-wordpress",
-        "sh", "-c", f"mkdir -p {CELLAR_DATA_DIR} && cat > {tmp_file} << 'REGEOF'\n{registry_json}\nREGEOF\nmv {tmp_file} {CELLAR_REGISTRY_FILE}"
-    ])
+def _write_poll_updates(app, entries):
+    """Write poll results to SQLite via PHP CLI (batch update).
+    Only updates poll-related fields (status, last_healthcheck,
+    fail_count, takeover_active, fast_poll_remaining).
+    Uses a heredoc to safely pass JSON without shell quoting issues."""
+    if not entries:
+        return
+    payload = json.dumps(entries)
+    ok, output = _run_docker(app, [
+        "exec", "-i", "onionpress-wordpress",
+        "sh", "-c", f"cat << 'POLLEOF' | php {CELLAR_DB_PHP} batch-upsert-poll\n{payload}\nPOLLEOF"
+    ], timeout=30)
+    if not ok:
+        app.log(f"OnionCellar: batch poll update failed: {output!r}")
 
 
 def _check_healthcheck(app, healthcheck_address):
@@ -374,7 +376,7 @@ def _poll_entry(app, entry):
     hc_addr = entry.get("healthcheck_address", "")
     fail_count = entry.get("fail_count", 0)
     takeover_active = entry.get("takeover_active", False)
-    fast_poll_remaining = entry.get("_fast_poll_remaining", 0)
+    fast_poll_remaining = entry.get("fast_poll_remaining", 0)
 
     if not content_addr or not hc_addr:
         return entry, False, HEALTHY_INTERVAL
@@ -393,13 +395,13 @@ def _poll_entry(app, entry):
             entry["takeover_active"] = False
             entry["status"] = "healthy"
             entry["fail_count"] = 0
-            entry["_fast_poll_remaining"] = FAST_POLL_COUNT
+            entry["fast_poll_remaining"] = FAST_POLL_COUNT
             modified = True
         elif fail_count > 0:
             # Was failing, now recovering
             entry["fail_count"] = 0
             entry["status"] = "healthy"
-            entry["_fast_poll_remaining"] = FAST_POLL_COUNT
+            entry["fast_poll_remaining"] = FAST_POLL_COUNT
             modified = True
         else:
             entry["status"] = "healthy"
@@ -408,7 +410,7 @@ def _poll_entry(app, entry):
         new_fail_count = fail_count + 1
         entry["fail_count"] = new_fail_count
         entry["status"] = "failing"
-        entry["_fast_poll_remaining"] = FAST_POLL_COUNT
+        entry["fast_poll_remaining"] = FAST_POLL_COUNT
         modified = True
 
         if new_fail_count >= FAIL_THRESHOLD and not takeover_active:
@@ -437,7 +439,7 @@ def _poll_entry(app, entry):
     # Determine sleep interval for this entry
     sleep_interval = HEALTHY_INTERVAL
     if fast_poll_remaining > 0:
-        entry["_fast_poll_remaining"] = fast_poll_remaining - 1
+        entry["fast_poll_remaining"] = fast_poll_remaining - 1
         sleep_interval = FAST_POLL_INTERVAL
         modified = True
     elif takeover_active:
@@ -451,12 +453,19 @@ def cellar_poller(app):
     Main cellar polling loop. Monitors registered instances and manages takeover/release.
     Runs as a background thread on the cellar instance.
     Uses a thread pool to check entries in parallel.
+
+    With SQLite, we only UPDATE the rows we polled — no merge logic needed.
+    New registrations go through PHP's cellar_db_upsert_register() on separate
+    columns, so there are no read-modify-write races.
     """
     app.log("OnionCellar: healthcheck poller started")
 
     # Wait for services to be ready
     while not app.is_ready:
         time.sleep(10)
+
+    # Initialize the DB (schema + JSON migration) on first run
+    _cellar_db_init(app)
 
     while True:
         try:
@@ -466,7 +475,7 @@ def cellar_poller(app):
                 continue
 
             pass_start = time.monotonic()
-            any_modified = False
+            modified_entries = []
             min_sleep = HEALTHY_INTERVAL
             workers = min(MAX_POLL_WORKERS, len(registry))
 
@@ -477,9 +486,9 @@ def cellar_poller(app):
                 }
                 for future in as_completed(futures):
                     try:
-                        _entry, modified, sleep_interval = future.result()
+                        entry, modified, sleep_interval = future.result()
                         if modified:
-                            any_modified = True
+                            modified_entries.append(entry)
                         min_sleep = min(min_sleep, sleep_interval)
                     except Exception as e:
                         app.log(f"OnionCellar: entry poll error: {e}")
@@ -487,30 +496,8 @@ def cellar_poller(app):
             elapsed = time.monotonic() - pass_start
             app.log(f"OnionCellar: poll pass complete — {len(registry)} entries in {elapsed:.1f}s")
 
-            if any_modified:
-                # Re-read registry to merge with any new registrations that
-                # happened during this poll cycle (avoids clobbering new entries)
-                fresh = _read_registry(app)
-                if not fresh and registry:
-                    # Fresh read returned empty but we had entries — registry
-                    # is corrupted or was cleared. Write back our polled data
-                    # to avoid losing all entries.
-                    app.log("OnionCellar: WARNING — fresh registry empty, writing back polled data")
-                    _write_registry(app, registry)
-                elif fresh:
-                    polled_addrs = {e.get("content_address"): e for e in registry}
-                    merged = []
-                    # Update existing entries with poll results, preserve new entries
-                    for entry in fresh:
-                        addr = entry.get("content_address")
-                        if addr in polled_addrs:
-                            merged.append(polled_addrs[addr])
-                        else:
-                            # New entry added during poll cycle — keep it
-                            merged.append(entry)
-                    # Don't restore polled entries missing from fresh — they were
-                    # intentionally deleted (e.g. by cleanup)
-                    _write_registry(app, merged)
+            if modified_entries:
+                _write_poll_updates(app, modified_entries)
 
             time.sleep(min_sleep)
 

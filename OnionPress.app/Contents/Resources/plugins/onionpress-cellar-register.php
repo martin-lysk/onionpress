@@ -11,8 +11,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// Load crypto helper
+// Load crypto helper and DB layer
 require_once __DIR__ . '/onionpress-cellar-crypto.php';
+require_once __DIR__ . '/onionpress-cellar-db.php';
 
 /**
  * Intercept POST /register early in the WordPress lifecycle.
@@ -160,49 +161,20 @@ function onionpress_cellar_handle_register() {
     file_put_contents("$keys_dir/hostname", $content_address . "\n");
     chmod("$keys_dir/hostname", 0600);
 
-    // Update registry
-    $registry_file = "$cellar_dir/registry.json";
-    $registry = [];
-    if (file_exists($registry_file)) {
-        $existing = json_decode(file_get_contents($registry_file), true);
-        if (is_array($existing)) {
-            $registry = $existing;
-        }
-    }
+    // Update registry (SQLite — concurrent-safe, no more JSON corruption)
+    $db = cellar_db_connect();
+    cellar_db_ensure_schema($db);
 
-    // Find existing entry or create new one
-    $found = false;
-    $now = gmdate('Y-m-d\TH:i:s\Z');
-    foreach ($registry as &$entry) {
-        if ($entry['content_address'] === $content_address) {
-            // Update existing entry
-            $entry['healthcheck_address'] = $healthcheck_address;
-            $entry['registered_at'] = $now;
-            $entry['version'] = $version;
-            $found = true;
-            break;
-        }
-    }
-    unset($entry);
+    // Check if entry already exists
+    $existing = $db->prepare('SELECT 1 FROM registry WHERE content_address = ?');
+    $existing->execute([$content_address]);
+    $found = (bool)$existing->fetchColumn();
 
-    if (!$found) {
-        $registry[] = [
-            'content_address' => $content_address,
-            'healthcheck_address' => $healthcheck_address,
-            'registered_at' => $now,
-            'version' => $version,
-            'status' => 'healthy',
-            'last_healthcheck' => null,
-            'fail_count' => 0,
-            'takeover_active' => false,
-        ];
-    }
-
-    // Atomic write: temp file + rename to avoid corruption from concurrent
-    // writes by the Python cellar poller
-    $tmp_file = $registry_file . '.php_tmp';
-    file_put_contents($tmp_file, json_encode($registry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-    rename($tmp_file, $registry_file);
+    cellar_db_upsert_register($db, [
+        'content_address' => $content_address,
+        'healthcheck_address' => $healthcheck_address,
+        'version' => $version,
+    ]);
 
     onionpress_cellar_respond(200, [
         'registered' => true,

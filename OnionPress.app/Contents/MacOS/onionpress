@@ -885,6 +885,18 @@ install_cellar_plugin() {
         fi
     fi
 
+    # Install cellar SQLite DB access layer
+    if [ -f "$plugins_dir/onionpress-cellar-db.php" ]; then
+        if docker cp "$plugins_dir/onionpress-cellar-db.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php >> "$LOG_FILE" 2>&1
+            log "✓ onionpress-cellar-db.php installed"
+        else
+            log "WARNING: Failed to copy onionpress-cellar-db.php"
+        fi
+    fi
+
     # Create cellar data directory inside containers
     docker exec onionpress-wordpress mkdir -p \
         /var/lib/onionpress/cellar/keys >> "$LOG_FILE" 2>&1
