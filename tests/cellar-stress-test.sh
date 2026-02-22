@@ -286,11 +286,12 @@ setup_onion_services() {
     log "Phase 1: Creating ${TOTAL} workers (${TOTAL} content + ${TOTAL} healthcheck onion services)..."
 
     # Clean any leftover stress-test entries from torrc (prevents duplicates)
+    # Skip comment lines, HiddenServiceDir, and ALL following HiddenService* directives
     docker_cmd exec onionpress-tor sh -c "
         awk '
         /^# stress-test:/ { skip=1; next }
         /^HiddenServiceDir.*stress-test/ { skip=1; next }
-        skip && /^(HiddenServicePort|HiddenServiceNumIntroductionPoints)/ { next }
+        skip && /^HiddenService/ { next }
         { skip=0; print }
         ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
     " 2>/dev/null || true
@@ -304,15 +305,17 @@ setup_onion_services() {
         || docker_cmd exec onionpress-tor chown -R tor:tor "$STRESS_DIR" 2>/dev/null \
         || true
 
-    # Build all HiddenServiceDir entries in one batch
-    local torrc_additions=""
+    # Build all HiddenServiceDir entries in one batch — write to temp file to avoid
+    # shell escaping issues with docker exec sh -c and heredocs
+    local torrc_tmp="${OUTPUT_DIR}/torrc-additions.tmp"
+    : > "$torrc_tmp"
     for i in $(seq 0 $((TOTAL - 1))); do
         local content_port=$((BASE_PORT + i * 2))
         local hc_port=$((BASE_PORT + i * 2 + 1))
         local content_dir="${STRESS_DIR}/worker${i}-content"
         local hc_dir="${STRESS_DIR}/worker${i}-healthcheck"
 
-        torrc_additions="${torrc_additions}
+        cat >> "$torrc_tmp" << EOF
 # stress-test: worker${i}-content
 HiddenServiceDir ${content_dir}
 HiddenServicePort 80 127.0.0.1:${content_port}
@@ -320,13 +323,14 @@ HiddenServiceNumIntroductionPoints 3
 # stress-test: worker${i}-healthcheck
 HiddenServiceDir ${hc_dir}
 HiddenServicePort 80 127.0.0.1:${hc_port}
-HiddenServiceNumIntroductionPoints 3"
+HiddenServiceNumIntroductionPoints 3
+EOF
     done
 
-    # Append to torrc
-    docker_cmd exec onionpress-tor sh -c "cat >> /etc/tor/torrc << 'TORRC_EOF'
-${torrc_additions}
-TORRC_EOF"
+    # Copy additions into container and append to torrc
+    docker_cmd cp "$torrc_tmp" onionpress-tor:/tmp/torrc-stress-additions
+    docker_cmd exec onionpress-tor sh -c "cat /tmp/torrc-stress-additions >> /etc/tor/torrc && rm /tmp/torrc-stress-additions"
+    rm -f "$torrc_tmp"
 
     # SIGHUP Tor to pick up new services
     log "Sending SIGHUP to Tor (generating keys for ${TOTAL} workers)..."
@@ -743,7 +747,7 @@ echo \"Kept \" . count(\$cleaned) . \" entries, removed \" . (count(\$r) - count
         awk '
         /^# stress-test:/ { skip=1; next }
         /^HiddenServiceDir.*stress-test/ { skip=1; next }
-        skip && /^(HiddenServicePort|HiddenServiceNumIntroductionPoints)/ { next }
+        skip && /^HiddenService/ { next }
         { skip=0; print }
         ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
     " 2>/dev/null || true
@@ -935,7 +939,7 @@ echo \"Kept \" . count(\$cleaned) . \" entries, removed \" . (count(\$r) - count
         awk '
         /^# stress-test:/ { skip=1; next }
         /^HiddenServiceDir.*stress-test/ { skip=1; next }
-        skip && /^(HiddenServicePort|HiddenServiceNumIntroductionPoints)/ { next }
+        skip && /^HiddenService/ { next }
         { skip=0; print }
         ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
     " 2>/dev/null || true

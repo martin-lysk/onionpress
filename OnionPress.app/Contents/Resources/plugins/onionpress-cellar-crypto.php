@@ -2,7 +2,7 @@
 /**
  * OnionPress Cellar Crypto Helper
  *
- * Encrypts OnionCellar keys at rest using AES-256-GCM with a master key
+ * Encrypts OnionCellar keys at rest using AES-256-CBC with a master key
  * protected by LUKS-style per-admin key slots.
  *
  * Included by onionpress-cellar-register.php — not loaded standalone.
@@ -98,55 +98,54 @@ function cellar_crypto_decrypt_slot($slot_data, $derived_key) {
 
 /**
  * Encrypt a key file (e.g., hs_ed25519_secret_key) with the master key.
- * Output format: [12-byte IV][16-byte tag][ciphertext]
+ * Output format: [16-byte IV][ciphertext with PKCS7 padding]
+ *
+ * Uses AES-256-CBC because the decryptor runs in a minimal Alpine container
+ * where only `openssl enc` is available (which does not support AEAD ciphers
+ * like AES-GCM). CBC with PKCS7 padding is fully supported by `openssl enc`.
  *
  * @param string $plaintext   Raw key file contents
  * @param string $master_key  32-byte master key
  * @return string|false       Binary encrypted data or false on failure
  */
 function cellar_crypto_encrypt_key($plaintext, $master_key) {
-    $iv = random_bytes(12);
+    $iv = random_bytes(16);
     $ciphertext = openssl_encrypt(
         $plaintext,
-        'aes-256-gcm',
+        'aes-256-cbc',
         $master_key,
         OPENSSL_RAW_DATA,
-        $iv,
-        $tag,
-        '',
-        16
+        $iv
     );
 
     if ($ciphertext === false) {
         return false;
     }
 
-    return $iv . $tag . $ciphertext;
+    return $iv . $ciphertext;
 }
 
 /**
  * Decrypt a key file encrypted with cellar_crypto_encrypt_key().
  *
- * @param string $encrypted   Binary: [12-byte IV][16-byte tag][ciphertext]
+ * @param string $encrypted   Binary: [16-byte IV][ciphertext]
  * @param string $master_key  32-byte master key
  * @return string|false       Plaintext key data or false on failure
  */
 function cellar_crypto_decrypt_key($encrypted, $master_key) {
-    if (strlen($encrypted) < 28) {
+    if (strlen($encrypted) < 17) {
         return false;
     }
 
-    $iv = substr($encrypted, 0, 12);
-    $tag = substr($encrypted, 12, 16);
-    $ciphertext = substr($encrypted, 28);
+    $iv = substr($encrypted, 0, 16);
+    $ciphertext = substr($encrypted, 16);
 
     return openssl_decrypt(
         $ciphertext,
-        'aes-256-gcm',
+        'aes-256-cbc',
         $master_key,
         OPENSSL_RAW_DATA,
-        $iv,
-        $tag
+        $iv
     );
 }
 

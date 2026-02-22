@@ -41,8 +41,8 @@ fi
 # Create a safe directory name from the address (use the address itself)
 SERVICE_DIR="${CELLAR_SERVICES_DIR}/${CONTENT_ADDRESS}"
 
-# Decrypt an .enc file using the master key (AES-256-GCM).
-# Format: [12-byte IV][16-byte tag][ciphertext]
+# Decrypt an .enc file using the master key (AES-256-CBC).
+# Format: [16-byte IV][ciphertext with PKCS7 padding]
 # Writes decrypted output to $2.
 decrypt_file() {
     local enc_file="$1"
@@ -51,21 +51,18 @@ decrypt_file() {
 
     master_key_hex=$(od -A n -t x1 "$CELLAR_UNLOCKED_FILE" | tr -d ' \n')
 
-    local file_size
+    # Extract IV (first 16 bytes)
+    local iv_hex
+    iv_hex=$(dd if="$enc_file" bs=1 count=16 2>/dev/null | od -A n -t x1 | tr -d ' \n')
+
+    # Ciphertext starts at byte 16
+    local file_size ct_size
     file_size=$(wc -c < "$enc_file")
-
-    # Extract IV (first 12 bytes), tag (next 16 bytes), ciphertext (rest)
-    local iv_hex tag_hex
-    iv_hex=$(dd if="$enc_file" bs=1 count=12 2>/dev/null | od -A n -t x1 | tr -d ' \n')
-    tag_hex=$(dd if="$enc_file" bs=1 skip=12 count=16 2>/dev/null | od -A n -t x1 | tr -d ' \n')
-
-    # ciphertext starts at byte 28
-    local ct_size=$((file_size - 28))
-    dd if="$enc_file" bs=1 skip=28 count="$ct_size" 2>/dev/null | \
-        openssl enc -d -aes-256-gcm \
+    ct_size=$((file_size - 16))
+    dd if="$enc_file" bs=1 skip=16 count="$ct_size" 2>/dev/null | \
+        openssl enc -d -aes-256-cbc \
             -K "$master_key_hex" \
             -iv "$iv_hex" \
-            -tag "$tag_hex" \
             -out "$out_file" 2>/dev/null
 
     if [ $? -ne 0 ]; then
@@ -139,7 +136,7 @@ ${marker}
 HiddenServiceDir ${SERVICE_DIR}
 HiddenServiceVersion 3
 HiddenServicePort 80 127.0.0.1:${REDIRECT_PORT}
-HiddenServiceNumIntroductionPoints 1
+HiddenServiceNumIntroductionPoints 3
 EOF
         echo "Added HiddenServiceDir for ${CONTENT_ADDRESS}"
     fi
