@@ -54,8 +54,14 @@ while [ $# -gt 0 ]; do
 done
 
 # ── Docker helper ─────────────────────────────────────────────────────────────
+# Prefer the docker bundled with OnionPress.app
+DOCKER_BIN="docker"
+if [ -x "/Applications/OnionPress.app/Contents/Resources/bin/docker" ]; then
+    DOCKER_BIN="/Applications/OnionPress.app/Contents/Resources/bin/docker"
+fi
+
 docker_cmd() {
-    DOCKER_HOST="$DOCKER_HOST_SOCK" docker "$@"
+    DOCKER_HOST="$DOCKER_HOST_SOCK" "$DOCKER_BIN" "$@"
 }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
