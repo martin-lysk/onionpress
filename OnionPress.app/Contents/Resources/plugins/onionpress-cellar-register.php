@@ -198,7 +198,11 @@ function onionpress_cellar_handle_register() {
         ];
     }
 
-    file_put_contents($registry_file, json_encode($registry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    // Atomic write: temp file + rename to avoid corruption from concurrent
+    // writes by the Python cellar poller
+    $tmp_file = $registry_file . '.php_tmp';
+    file_put_contents($tmp_file, json_encode($registry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    rename($tmp_file, $registry_file);
 
     onionpress_cellar_respond(200, [
         'registered' => true,

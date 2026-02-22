@@ -254,7 +254,9 @@ def _is_cellar_unlocked(app):
 
 
 def _read_registry(app):
-    """Read the cellar registry from the wordpress container."""
+    """Read the cellar registry from the wordpress container.
+    Handles corruption from partial writes by trying to salvage
+    valid JSON from the beginning of the file."""
     ok, output = _run_docker(app, [
         "exec", "onionpress-wordpress",
         "cat", CELLAR_REGISTRY_FILE
@@ -263,17 +265,38 @@ def _read_registry(app):
         try:
             return json.loads(output)
         except json.JSONDecodeError:
-            pass
+            # Try to salvage: find end of first valid JSON array
+            depth = 0
+            end = 0
+            for i, c in enumerate(output):
+                if c == '[':
+                    depth += 1
+                elif c == ']':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            if end > 0:
+                try:
+                    result = json.loads(output[:end])
+                    app.log(f"OnionCellar: WARNING — salvaged {len(result)} entries from corrupted registry")
+                    return result
+                except json.JSONDecodeError:
+                    pass
+            app.log("OnionCellar: WARNING — registry is corrupted and unsalvageable")
     return []
 
 
 def _write_registry(app, registry):
-    """Write the cellar registry to the wordpress container."""
+    """Write the cellar registry to the wordpress container.
+    Uses atomic write (temp file + mv) to avoid corruption from
+    concurrent writes by the PHP /register endpoint."""
     registry_json = json.dumps(registry, indent=2)
-    # Write via sh -c with heredoc to avoid escaping issues
+    tmp_file = f"{CELLAR_REGISTRY_FILE}.tmp"
+    # Write to temp file then atomically rename to avoid partial-write corruption
     _run_docker(app, [
         "exec", "onionpress-wordpress",
-        "sh", "-c", f"mkdir -p {CELLAR_DATA_DIR} && cat > {CELLAR_REGISTRY_FILE} << 'REGEOF'\n{registry_json}\nREGEOF"
+        "sh", "-c", f"mkdir -p {CELLAR_DATA_DIR} && cat > {tmp_file} << 'REGEOF'\n{registry_json}\nREGEOF\nmv {tmp_file} {CELLAR_REGISTRY_FILE}"
     ])
 
 
@@ -468,20 +491,26 @@ def cellar_poller(app):
                 # Re-read registry to merge with any new registrations that
                 # happened during this poll cycle (avoids clobbering new entries)
                 fresh = _read_registry(app)
-                polled_addrs = {e.get("content_address"): e for e in registry}
-                merged = []
-                seen = set()
-                # Update existing entries with poll results, preserve new entries
-                for entry in fresh:
-                    addr = entry.get("content_address")
-                    if addr in polled_addrs:
-                        merged.append(polled_addrs[addr])
-                    else:
-                        # New entry added during poll cycle — keep it
-                        merged.append(entry)
-                # Don't restore polled entries missing from fresh — they were
-                # intentionally deleted (e.g. by cleanup)
-                _write_registry(app, merged)
+                if not fresh and registry:
+                    # Fresh read returned empty but we had entries — registry
+                    # is corrupted or was cleared. Write back our polled data
+                    # to avoid losing all entries.
+                    app.log("OnionCellar: WARNING — fresh registry empty, writing back polled data")
+                    _write_registry(app, registry)
+                elif fresh:
+                    polled_addrs = {e.get("content_address"): e for e in registry}
+                    merged = []
+                    # Update existing entries with poll results, preserve new entries
+                    for entry in fresh:
+                        addr = entry.get("content_address")
+                        if addr in polled_addrs:
+                            merged.append(polled_addrs[addr])
+                        else:
+                            # New entry added during poll cycle — keep it
+                            merged.append(entry)
+                    # Don't restore polled entries missing from fresh — they were
+                    # intentionally deleted (e.g. by cleanup)
+                    _write_registry(app, merged)
 
             time.sleep(min_sleep)
 
