@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 CELLAR_ADDRESS = "ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
 
 # Wayback Machine .onion address
-WAYBACK_ONION = "archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
+WAYBACK_ONION = "web.archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
 
 # Paths inside containers
 CELLAR_DATA_DIR = "/var/lib/onionpress/cellar"
@@ -254,9 +254,10 @@ def _is_cellar_unlocked(app):
 
 
 def _cellar_db_init(app):
-    """Initialize the cellar SQLite database (schema + JSON migration)."""
+    """Initialize the cellar SQLite database (schema + JSON migration).
+    Runs as www-data so DB files are owned by the web server user."""
     ok, output = _run_docker(app, [
-        "exec", "onionpress-wordpress",
+        "exec", "--user", "www-data", "onionpress-wordpress",
         "php", CELLAR_DB_PHP, "init"
     ])
     if ok and output:
@@ -275,7 +276,7 @@ def _cellar_db_init(app):
 def _read_registry(app):
     """Read the cellar registry from SQLite via PHP CLI."""
     ok, output = _run_docker(app, [
-        "exec", "onionpress-wordpress",
+        "exec", "--user", "www-data", "onionpress-wordpress",
         "php", CELLAR_DB_PHP, "read-all"
     ])
     if ok and output:
@@ -295,7 +296,7 @@ def _write_poll_updates(app, entries):
         return
     payload = json.dumps(entries)
     ok, output = _run_docker(app, [
-        "exec", "-i", "onionpress-wordpress",
+        "exec", "-i", "--user", "www-data", "onionpress-wordpress",
         "sh", "-c", f"cat << 'POLLEOF' | php {CELLAR_DB_PHP} batch-upsert-poll\n{payload}\nPOLLEOF"
     ], timeout=30)
     if not ok:

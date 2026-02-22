@@ -578,7 +578,7 @@ wait_for_takeover() {
 # ── Phase 5b: Verify takeover redirects to Wayback Machine ────────────────────
 # Uses curl in wordpress container through cellar's SOCKS proxy to check redirects.
 
-WAYBACK_ONION="archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
+WAYBACK_ONION="web.archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
 
 verify_takeover_redirects() {
     local fail_start="$1"
@@ -607,8 +607,8 @@ verify_takeover_redirects() {
             http_code=$(docker_cmd exec onionpress-wordpress \
                 curl -s -o /dev/null -w "%{http_code}" \
                 --socks5-hostname onionpress-tor:9050 \
-                --max-time 15 \
-                "http://${content_addr}/" 2>&1) || true
+                --max-time 30 \
+                "http://${content_addr}/" 2>/dev/null) || true
 
             if [ "$http_code" = "302" ]; then
                 # Verify Location header
@@ -616,8 +616,8 @@ verify_takeover_redirects() {
                 headers=$(docker_cmd exec onionpress-wordpress \
                     curl -s -D - -o /dev/null \
                     --socks5-hostname onionpress-tor:9050 \
-                    --max-time 15 \
-                    "http://${content_addr}/" 2>&1) || true
+                    --max-time 30 \
+                    "http://${content_addr}/" 2>/dev/null) || true
 
                 local location
                 location=$(echo "$headers" | grep -i "^Location:" | tr -d '\r' | sed 's/^[Ll]ocation: *//')
