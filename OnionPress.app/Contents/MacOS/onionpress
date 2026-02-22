@@ -99,6 +99,12 @@ detect_cellar_mode() {
     if [ "$our_address" = "$cellar_address" ]; then
         export ONIONPRESS_CELLAR="1"
         log "OnionCellar mode activated (address: $our_address)"
+        # Start cellar redirect service inside the tor container (port 8082)
+        # This runs post-startup since ONIONPRESS_CELLAR wasn't set at container boot
+        docker compose exec -T tor mkdir -p /var/lib/tor/hidden_service/cellar 2>/dev/null
+        docker compose exec -T tor chown -R tor:tor /var/lib/tor/hidden_service/cellar 2>/dev/null
+        docker compose exec -d -T tor /cellar-redirect.sh 2>/dev/null
+        log "OnionCellar: started redirect service on port 8082"
         return 0
     fi
     return 1

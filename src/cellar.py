@@ -30,12 +30,12 @@ CELLAR_REGISTRY_FILE = f"{CELLAR_DATA_DIR}/registry.json"
 CELLAR_KEYS_DIR = f"{CELLAR_DATA_DIR}/keys"
 
 # Healthcheck intervals (seconds)
-HEALTHY_INTERVAL = 60        # 1 minute when healthy (short while bringing system up)
+HEALTHY_INTERVAL = 15        # 15 seconds between polls
 FAST_POLL_INTERVAL = 15      # 15 seconds after recent failure/recovery
 LONG_FAIL_INTERVAL = 1800    # 30 minutes after prolonged failure
 
 # Thresholds
-FAIL_THRESHOLD = 3           # consecutive failures before takeover
+FAIL_THRESHOLD = 10          # consecutive failures before takeover (needs to survive Tor propagation delay)
 FAST_POLL_COUNT = 20         # how many fast polls before slowing down
 
 # Parallel polling
@@ -278,22 +278,29 @@ def _write_registry(app, registry):
 
 
 def _check_healthcheck(app, healthcheck_address):
-    """Check if a healthcheck .onion address is reachable. Returns True if healthy."""
+    """Check if a healthcheck .onion address is reachable. Returns True if healthy.
+    Uses curl in the wordpress container through Tor's SOCKS proxy, since wget
+    in the tor container cannot resolve .onion addresses (no SOCKS support)."""
     ok, _ = _run_docker(app, [
-        "exec", "onionpress-tor",
-        "wget", "-q", "-O", "/dev/null", "--timeout=10",
+        "exec", "onionpress-wordpress",
+        "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+        "--socks5-hostname", "onionpress-tor:9050",
+        "--max-time", "15",
         f"http://{healthcheck_address}/"
-    ], timeout=20)
+    ], timeout=25)
     return ok
 
 
 def _check_content(app, content_address):
-    """Check if a content .onion address is reachable. Returns True if reachable."""
+    """Check if a content .onion address is reachable. Returns True if reachable.
+    Uses curl in the wordpress container through Tor's SOCKS proxy."""
     ok, _ = _run_docker(app, [
-        "exec", "onionpress-tor",
-        "wget", "-q", "-O", "/dev/null", "--timeout=10",
+        "exec", "onionpress-wordpress",
+        "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+        "--socks5-hostname", "onionpress-tor:9050",
+        "--max-time", "15",
         f"http://{content_address}/"
-    ], timeout=20)
+    ], timeout=25)
     return ok
 
 
@@ -400,8 +407,9 @@ def _poll_entry(app, entry):
                         entry["status"] = "takeover_failed"
                     modified = True
 
-    # Update timestamp
+    # Update timestamp (always mark modified so it gets persisted)
     entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
+    modified = True
 
     # Determine sleep interval for this entry
     sleep_interval = HEALTHY_INTERVAL
@@ -457,7 +465,23 @@ def cellar_poller(app):
             app.log(f"OnionCellar: poll pass complete — {len(registry)} entries in {elapsed:.1f}s")
 
             if any_modified:
-                _write_registry(app, registry)
+                # Re-read registry to merge with any new registrations that
+                # happened during this poll cycle (avoids clobbering new entries)
+                fresh = _read_registry(app)
+                polled_addrs = {e.get("content_address"): e for e in registry}
+                merged = []
+                seen = set()
+                # Update existing entries with poll results, preserve new entries
+                for entry in fresh:
+                    addr = entry.get("content_address")
+                    if addr in polled_addrs:
+                        merged.append(polled_addrs[addr])
+                    else:
+                        # New entry added during poll cycle — keep it
+                        merged.append(entry)
+                # Don't restore polled entries missing from fresh — they were
+                # intentionally deleted (e.g. by cleanup)
+                _write_registry(app, merged)
 
             time.sleep(min_sleep)
 
