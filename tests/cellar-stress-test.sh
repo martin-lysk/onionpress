@@ -3,21 +3,21 @@
 # Tests how many onion addresses a single OnionCellar instance can handle.
 #
 # Two modes:
-#   --mode coordinator  (default) Generates fake addresses, distributes to workers or registers directly
-#   --mode worker       Receives address batches from coordinator, registers them with the cellar
+#   --mode worker       (default) Generates fake addresses locally and registers them with the cellar
+#   --mode coordinator  Monitor-only dashboard — reads registry.json and prints metrics
 #
 # Usage:
-#   # Quick test — register 10 addresses directly (no workers needed)
+#   # Quick test — register 10 addresses
 #   ./cellar-stress-test.sh --total 10
 #
-#   # Ramp-up until failure
+#   # Ramp-up until failure (unlimited)
 #   ./cellar-stress-test.sh
 #
-#   # With remote workers
-#   ./cellar-stress-test.sh --workers abc...xyz.onion,def...uvw.onion --total 100
+#   # Specify cellar address explicitly
+#   ./cellar-stress-test.sh --total 50 --cellar-addr abc...xyz.onion
 #
-#   # Worker mode (run on worker machines)
-#   ./cellar-stress-test.sh --mode worker --cellar-addr abc...xyz.onion
+#   # Monitor dashboard (run on the cellar machine)
+#   ./cellar-stress-test.sh --mode coordinator
 #
 #   # Clean up stress-test entries
 #   ./cellar-stress-test.sh --cleanup
@@ -25,10 +25,8 @@
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-MODE="coordinator"
+MODE="worker"
 TOTAL=0           # 0 = unlimited ramp-up
-BATCH_SIZE=10
-WORKERS=""        # comma-separated healthcheck .onion addresses
 CELLAR_ADDR=""    # auto-detect from local tor container
 DELAY=1           # seconds between registrations (worker mode)
 OUTPUT_DIR="./cellar-stress-results"
@@ -41,14 +39,12 @@ DOCKER_HOST_SOCK="unix://${DATA_DIR}/colima/default/docker.sock"
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
     case "$1" in
-        --mode)       MODE="$2"; shift 2 ;;
-        --total)      TOTAL="$2"; shift 2 ;;
-        --batch-size) BATCH_SIZE="$2"; shift 2 ;;
-        --workers)    WORKERS="$2"; shift 2 ;;
+        --mode)        MODE="$2"; shift 2 ;;
+        --total)       TOTAL="$2"; shift 2 ;;
         --cellar-addr) CELLAR_ADDR="$2"; shift 2 ;;
-        --delay)      DELAY="$2"; shift 2 ;;
-        --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-        --cleanup)    CLEANUP=true; shift ;;
+        --delay)       DELAY="$2"; shift 2 ;;
+        --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
+        --cleanup)     CLEANUP=true; shift ;;
         -h|--help)
             sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
             exit 0
@@ -91,12 +87,6 @@ preflight() {
             exit 1
         fi
     done
-
-    # Cellar unlocked?
-    if ! docker_cmd exec onionpress-tor test -f /var/lib/onionpress/cellar/.master-key-unlocked 2>/dev/null; then
-        echo "ERROR: Cellar is locked — log in to WordPress to unlock it first"
-        exit 1
-    fi
 
     log "Preflight OK"
 }
@@ -217,12 +207,26 @@ except: print(0)
 \" 2>/dev/null || echo 0" | tr -d ' \n\r'
 }
 
+get_healthy_count() {
+    docker_cmd exec onionpress-wordpress \
+        sh -c "python3 -c \"
+import json,sys
+try:
+    r=json.load(open('/var/lib/onionpress/cellar/registry.json'))
+    print(sum(1 for e in r if e.get('status')=='healthy'))
+except: print(0)
+\" 2>/dev/null || echo 0" | tr -d ' \n\r'
+}
+
+get_last_poll_duration() {
+    # Extract last poll pass duration from onionpress log
+    docker_cmd exec onionpress-wordpress \
+        sh -c "grep 'poll pass complete' /var/log/onionpress.log 2>/dev/null | tail -1 | sed 's/.*in //;s/s$//' || echo '?'" | tr -d ' \n\r'
+}
+
 get_system_mem_pct() {
-    # Colima VM memory usage as percentage (via docker info)
-    local total used
-    total=$(docker_cmd info --format '{{.MemTotal}}' 2>/dev/null || echo 0)
-    # docker stats gives container-level; use /proc/meminfo inside tor container for VM-level
-    local avail
+    # Colima VM memory usage as percentage
+    local avail total used
     avail=$(docker_cmd exec onionpress-tor sh -c "awk '/MemAvailable/{print \$2}' /proc/meminfo 2>/dev/null" | tr -d ' \n\r')
     total=$(docker_cmd exec onionpress-tor sh -c "awk '/MemTotal/{print \$2}' /proc/meminfo 2>/dev/null" | tr -d ' \n\r')
     if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null; then
@@ -235,10 +239,7 @@ get_system_mem_pct() {
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 print_dashboard() {
-    local registered="$1"
-    local total_label="$2"
-
-    local reg_size reg_count tor_mem wp_mem torrc_svcs fail_count takeover_count mem_pct
+    local reg_size reg_count tor_mem wp_mem torrc_svcs fail_count takeover_count healthy_count mem_pct poll_dur
     reg_size=$(get_registry_size)
     reg_count=$(get_registry_count)
     tor_mem=$(get_container_mem_mb onionpress-tor)
@@ -246,7 +247,9 @@ print_dashboard() {
     torrc_svcs=$(get_torrc_service_count)
     fail_count=$(get_stress_fail_count)
     takeover_count=$(get_takeover_count)
+    healthy_count=$(get_healthy_count)
     mem_pct=$(get_system_mem_pct)
+    poll_dur=$(get_last_poll_duration)
 
     # Human-readable registry size
     local reg_size_h
@@ -258,41 +261,16 @@ print_dashboard() {
         reg_size_h="${reg_size}B"
     fi
 
-    printf "\r\033[K"
-    log "Registered: ${registered}/${total_label} | Registry: ${reg_size_h} (${reg_count} entries) | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
-    echo "           Failing: ${fail_count} | Takeovers: ${takeover_count} | Torrc services: ${torrc_svcs} | VM mem: ${mem_pct}%"
+    log "Registry: ${reg_count} entries (${reg_size_h}) | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
+    echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | Torrc services: ${torrc_svcs} | VM mem: ${mem_pct}%"
+    echo "           Last poll pass: ${poll_dur}s"
 
     # JSON log
-    log_json "\"registered\":${registered},\"total\":\"${total_label}\",\"registry_bytes\":${reg_size},\"registry_count\":${reg_count},\"tor_mem_mb\":${tor_mem},\"wp_mem_mb\":${wp_mem},\"torrc_services\":${torrc_svcs},\"failing\":${fail_count},\"takeovers\":${takeover_count},\"vm_mem_pct\":${mem_pct}"
-
-    # Return non-zero if memory exceeds 80%
-    if [ "$mem_pct" -gt 80 ] 2>/dev/null; then
-        log "WARNING: VM memory usage at ${mem_pct}% — stopping ramp-up"
-        return 1
-    fi
-    return 0
+    log_json "\"registry_count\":${reg_count},\"registry_bytes\":${reg_size},\"tor_mem_mb\":${tor_mem},\"wp_mem_mb\":${wp_mem},\"torrc_services\":${torrc_svcs},\"healthy\":${healthy_count},\"failing\":${fail_count},\"takeovers\":${takeover_count},\"vm_mem_pct\":${mem_pct},\"poll_duration\":\"${poll_dur}\""
 }
 
-# ── Send batch to a worker via its healthcheck endpoint ───────────────────────
-send_batch_to_worker() {
-    local worker_addr="$1"
-    shift
-    # Remaining args are JSON address objects
-    local addresses_json="$1"
-
-    local payload
-    payload=$(printf '{"type":"stress_test_batch","addresses":%s}' "$addresses_json")
-
-    # POST to the worker's healthcheck endpoint via Tor
-    docker_cmd exec onionpress-tor \
-        wget -q -O /dev/null --timeout=30 \
-        --header="Content-Type: application/json" \
-        --post-data="$payload" \
-        "http://${worker_addr}/" 2>/dev/null
-}
-
-# ── Coordinator mode ──────────────────────────────────────────────────────────
-run_coordinator() {
+# ── Worker mode (default) ────────────────────────────────────────────────────
+run_worker() {
     preflight
     detect_cellar_addr
     mkdir -p "$OUTPUT_DIR"
@@ -304,23 +282,14 @@ run_coordinator() {
         total_label="unlimited"
     fi
 
-    log "=== OnionCellar Stress Test (coordinator) ==="
-    log "Total: ${total_label} | Batch size: ${BATCH_SIZE} | Workers: ${WORKERS:-none (direct)}"
+    log "=== OnionCellar Stress Test (worker) ==="
+    log "Cellar: ${CELLAR_ADDR} | Total: ${total_label} | Delay: ${DELAY}s"
     log "Output: ${OUTPUT_DIR}"
     echo ""
 
-    # Split workers into array
-    local -a worker_list=()
-    if [ -n "$WORKERS" ]; then
-        IFS=',' read -ra worker_list <<< "$WORKERS"
-        log "Workers: ${#worker_list[@]} — ${worker_list[*]}"
-    fi
-
     local registered=0
     local errors=0
-    local batch_num=0
     local last_dashboard=0
-    local worker_idx=0
 
     while true; do
         # Check total limit
@@ -329,190 +298,76 @@ run_coordinator() {
             break
         fi
 
-        # Build a batch
-        local -a batch_addrs=()
-        local batch_json="["
-        local first=true
-        local i=0
-        while [ "$i" -lt "$BATCH_SIZE" ]; do
-            if [ "$TOTAL" -gt 0 ] && [ "$((registered + i))" -ge "$TOTAL" ]; then
+        # Generate fake address + keys
+        local content_addr hc_addr keys secret_key public_key
+        content_addr=$(generate_fake_address)
+        hc_addr=$(generate_fake_address)
+        keys=$(generate_fake_keys)
+        secret_key=$(echo "$keys" | awk '{print $1}')
+        public_key=$(echo "$keys" | awk '{print $2}')
+
+        # Register with cellar
+        local start_ts end_ts
+        start_ts=$(date +%s%N 2>/dev/null || date +%s)
+
+        if register_address "$content_addr" "$hc_addr" "$secret_key" "$public_key"; then
+            registered=$((registered + 1))
+            end_ts=$(date +%s%N 2>/dev/null || date +%s)
+            log "Registered ${content_addr} (${registered}/${total_label})"
+            log_json "\"event\":\"register\",\"address\":\"${content_addr}\",\"ok\":true,\"elapsed_ns\":$((end_ts - start_ts))"
+            errors=0  # reset consecutive error count on success
+        else
+            end_ts=$(date +%s%N 2>/dev/null || date +%s)
+            errors=$((errors + 1))
+            log "ERROR registering ${content_addr} (${errors} consecutive errors)"
+            log_json "\"event\":\"register\",\"address\":\"${content_addr}\",\"ok\":false,\"elapsed_ns\":$((end_ts - start_ts))"
+
+            if [ "$errors" -ge 5 ] && [ "$TOTAL" -eq 0 ]; then
+                log "Too many consecutive errors — stopping ramp-up"
                 break
             fi
-
-            local content_addr hc_addr keys secret_key public_key
-            content_addr=$(generate_fake_address)
-            hc_addr=$(generate_fake_address)
-            keys=$(generate_fake_keys)
-            secret_key=$(echo "$keys" | awk '{print $1}')
-            public_key=$(echo "$keys" | awk '{print $2}')
-
-            if [ "$first" = true ]; then
-                first=false
-            else
-                batch_json="${batch_json},"
-            fi
-            batch_json="${batch_json}{\"content_address\":\"${content_addr}\",\"healthcheck_address\":\"${hc_addr}\",\"secret_key\":\"${secret_key}\",\"public_key\":\"${public_key}\"}"
-
-            batch_addrs+=("${content_addr}|${hc_addr}|${secret_key}|${public_key}")
-            i=$((i + 1))
-        done
-        batch_json="${batch_json}]"
-        batch_num=$((batch_num + 1))
-
-        if [ ${#batch_addrs[@]} -eq 0 ]; then
-            break
-        fi
-
-        # Distribute batch
-        if [ ${#worker_list[@]} -gt 0 ]; then
-            # Send to next worker (round-robin)
-            local target_worker="${worker_list[$worker_idx]}"
-            worker_idx=$(( (worker_idx + 1) % ${#worker_list[@]} ))
-
-            log "Sending batch #${batch_num} (${#batch_addrs[@]} addrs) to worker ${target_worker}"
-            if send_batch_to_worker "$target_worker" "$batch_json"; then
-                registered=$((registered + ${#batch_addrs[@]}))
-            else
-                log "ERROR: Failed to send batch to worker ${target_worker}"
-                errors=$((errors + 1))
-                if [ "$errors" -ge 5 ] && [ "$TOTAL" -eq 0 ]; then
-                    log "Too many errors — stopping ramp-up"
-                    break
-                fi
-            fi
-        else
-            # Direct registration (no workers)
-            for entry in "${batch_addrs[@]}"; do
-                IFS='|' read -r ca ha sk pk <<< "$entry"
-                if register_address "$ca" "$ha" "$sk" "$pk"; then
-                    registered=$((registered + 1))
-                else
-                    log "ERROR: Registration failed for ${ca}"
-                    errors=$((errors + 1))
-                    if [ "$errors" -ge 5 ] && [ "$TOTAL" -eq 0 ]; then
-                        log "Too many consecutive HTTP errors — stopping ramp-up"
-                        break 2
-                    fi
-                fi
-                sleep "$DELAY"
-            done
         fi
 
         # Dashboard every 30 seconds
         local now
         now=$(date +%s)
         if [ $((now - last_dashboard)) -ge 30 ]; then
-            if ! print_dashboard "$registered" "$total_label"; then
-                break  # memory limit hit
-            fi
+            print_dashboard
             last_dashboard=$now
         fi
 
-        # Check Tor container is still running (unlimited mode safety valve)
-        if [ "$TOTAL" -eq 0 ]; then
+        # Safety valve: check Tor container is still running (unlimited mode)
+        if [ "$TOTAL" -eq 0 ] && [ $((registered % 10)) -eq 0 ]; then
             if ! docker_cmd inspect --format='{{.State.Running}}' onionpress-tor 2>/dev/null | grep -q true; then
                 log "ERROR: Tor container crashed — stopping ramp-up"
                 break
             fi
         fi
+
+        sleep "$DELAY"
     done
 
     echo ""
     log "=== Final metrics ==="
-    print_dashboard "$registered" "$total_label" || true
+    print_dashboard
     echo ""
     log "Total registered: ${registered} | Errors: ${errors}"
     log "Results saved to: ${OUTPUT_DIR}/metrics.jsonl"
 }
 
-# ── Worker mode ───────────────────────────────────────────────────────────────
-run_worker() {
-    detect_cellar_addr
+# ── Coordinator mode (monitor-only dashboard) ────────────────────────────────
+run_coordinator() {
+    preflight
     mkdir -p "$OUTPUT_DIR"
 
-    log "=== OnionCellar Stress Test (worker) ==="
-    log "Cellar: ${CELLAR_ADDR} | Delay: ${DELAY}s"
-    log "Polling healthcheck messages for stress-test batches..."
+    log "=== OnionCellar Stress Test (coordinator — monitor only) ==="
+    log "Output: ${OUTPUT_DIR}"
+    log "Press Ctrl-C to stop"
     echo ""
 
-    local registered=0
-    local errors=0
-
     while true; do
-        # Poll healthcheck messages via GET to our own healthcheck
-        local messages
-        messages=$(docker_cmd exec onionpress-tor \
-            sh -c "ls /var/lib/tor/healthcheck-messages/*.json 2>/dev/null" | head -20) || true
-
-        if [ -z "$messages" ]; then
-            sleep 5
-            continue
-        fi
-
-        # Process each message file
-        local found_batch=false
-        for msgfile in $messages; do
-            local content
-            content=$(docker_cmd exec onionpress-tor cat "$msgfile" 2>/dev/null) || continue
-
-            # Check if it's a stress_test_batch
-            if ! echo "$content" | grep -q '"stress_test_batch"'; then
-                continue
-            fi
-            found_batch=true
-
-            # Delete message file after reading
-            docker_cmd exec onionpress-tor rm -f "$msgfile" 2>/dev/null || true
-
-            # Extract addresses using python3 (available in tor container's Alpine)
-            # Fall back to sed-based extraction if python3 unavailable
-            local addresses
-            addresses=$(echo "$content" | docker_cmd exec -i onionpress-tor sh -c "
-                python3 -c '
-import json,sys
-data = json.load(sys.stdin)
-for a in data.get(\"addresses\", []):
-    print(a[\"content_address\"], a[\"healthcheck_address\"], a[\"secret_key\"], a[\"public_key\"])
-' 2>/dev/null") || continue
-
-            if [ -z "$addresses" ]; then
-                continue
-            fi
-
-            # Register each address with the cellar
-            while IFS=' ' read -r ca ha sk pk; do
-                [ -z "$ca" ] && continue
-                local start_ts
-                start_ts=$(date +%s%N 2>/dev/null || date +%s)
-
-                # POST to cellar's /register via Tor
-                local output
-                output=$(docker_cmd exec onionpress-tor \
-                    wget -q -O - --timeout=30 \
-                    --header="Content-Type: application/json" \
-                    --post-data="{\"content_address\":\"${ca}\",\"healthcheck_address\":\"${ha}\",\"secret_key\":\"${sk}\",\"public_key\":\"${pk}\",\"version\":\"${STRESS_VERSION}\"}" \
-                    "http://${CELLAR_ADDR}/register" 2>&1) || true
-
-                local end_ts
-                end_ts=$(date +%s%N 2>/dev/null || date +%s)
-
-                if echo "$output" | grep -q '"registered".*true'; then
-                    registered=$((registered + 1))
-                    log "Registered ${ca} (${registered} total)"
-                    log_json "\"event\":\"register\",\"address\":\"${ca}\",\"ok\":true,\"elapsed_ns\":$((end_ts - start_ts))"
-                else
-                    errors=$((errors + 1))
-                    log "ERROR registering ${ca}: ${output}"
-                    log_json "\"event\":\"register\",\"address\":\"${ca}\",\"ok\":false,\"elapsed_ns\":$((end_ts - start_ts))"
-                fi
-
-                sleep "$DELAY"
-            done <<< "$addresses"
-        done
-
-        if [ "$found_batch" = false ]; then
-            sleep 5
-        fi
+        print_dashboard
+        sleep 30
     done
 }
 
@@ -624,10 +479,10 @@ if [ "$CLEANUP" = true ]; then
 fi
 
 case "$MODE" in
-    coordinator) run_coordinator ;;
     worker)      run_worker ;;
+    coordinator) run_coordinator ;;
     *)
-        echo "Unknown mode: $MODE (use 'coordinator' or 'worker')"
+        echo "Unknown mode: $MODE (use 'worker' or 'coordinator')"
         exit 1
         ;;
 esac

@@ -15,6 +15,7 @@ import os
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 # The cellar's .onion address — placeholder until a real address is generated
@@ -36,6 +37,10 @@ LONG_FAIL_INTERVAL = 1800    # 30 minutes after prolonged failure
 # Thresholds
 FAIL_THRESHOLD = 3           # consecutive failures before takeover
 FAST_POLL_COUNT = 20         # how many fast polls before slowing down
+
+# Parallel polling
+POLL_CYCLE_TARGET = 60       # target seconds per full poll pass
+MAX_POLL_WORKERS = 20        # max concurrent healthcheck threads
 
 
 def _docker_env(app):
@@ -330,10 +335,88 @@ def _do_release(app, entry):
     return ok
 
 
+def _poll_entry(app, entry):
+    """Poll a single registry entry. Returns (entry, modified_bool, sleep_interval)."""
+    content_addr = entry.get("content_address", "")
+    hc_addr = entry.get("healthcheck_address", "")
+    fail_count = entry.get("fail_count", 0)
+    takeover_active = entry.get("takeover_active", False)
+    fast_poll_remaining = entry.get("_fast_poll_remaining", 0)
+
+    if not content_addr or not hc_addr:
+        return entry, False, HEALTHY_INTERVAL
+
+    modified = False
+
+    # Check healthcheck
+    hc_ok = _check_healthcheck(app, hc_addr)
+
+    if hc_ok:
+        if takeover_active:
+            # Instance recovered — the healthcheck address is independent
+            # (not taken over), so it being reachable means the original
+            # instance is back online. Release the content address.
+            _do_release(app, entry)
+            entry["takeover_active"] = False
+            entry["status"] = "healthy"
+            entry["fail_count"] = 0
+            entry["_fast_poll_remaining"] = FAST_POLL_COUNT
+            modified = True
+        elif fail_count > 0:
+            # Was failing, now recovering
+            entry["fail_count"] = 0
+            entry["status"] = "healthy"
+            entry["_fast_poll_remaining"] = FAST_POLL_COUNT
+            modified = True
+        else:
+            entry["status"] = "healthy"
+    else:
+        # Healthcheck failed
+        new_fail_count = fail_count + 1
+        entry["fail_count"] = new_fail_count
+        entry["status"] = "failing"
+        entry["_fast_poll_remaining"] = FAST_POLL_COUNT
+        modified = True
+
+        if new_fail_count >= FAIL_THRESHOLD and not takeover_active:
+            # Check if cellar is unlocked before attempting takeover
+            if not _is_cellar_unlocked(app):
+                entry["status"] = "takeover_deferred_locked"
+                modified = True
+            else:
+                # Double-check: also test the content address
+                content_ok = _check_content(app, content_addr)
+                if not content_ok:
+                    result = _do_takeover(app, entry)
+                    if result == "ok":
+                        entry["takeover_active"] = True
+                        entry["status"] = "taken_over"
+                    elif result == "locked":
+                        entry["status"] = "takeover_deferred_locked"
+                    else:
+                        entry["status"] = "takeover_failed"
+                    modified = True
+
+    # Update timestamp
+    entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
+
+    # Determine sleep interval for this entry
+    sleep_interval = HEALTHY_INTERVAL
+    if fast_poll_remaining > 0:
+        entry["_fast_poll_remaining"] = fast_poll_remaining - 1
+        sleep_interval = FAST_POLL_INTERVAL
+        modified = True
+    elif takeover_active:
+        sleep_interval = LONG_FAIL_INTERVAL
+
+    return entry, modified, sleep_interval
+
+
 def cellar_poller(app):
     """
     Main cellar polling loop. Monitors registered instances and manages takeover/release.
     Runs as a background thread on the cellar instance.
+    Uses a thread pool to check entries in parallel.
     """
     app.log("OnionCellar: healthcheck poller started")
 
@@ -348,82 +431,29 @@ def cellar_poller(app):
                 time.sleep(HEALTHY_INTERVAL)
                 continue
 
-            modified = False
+            pass_start = time.monotonic()
+            any_modified = False
             min_sleep = HEALTHY_INTERVAL
+            workers = min(MAX_POLL_WORKERS, len(registry))
 
-            for entry in registry:
-                content_addr = entry.get("content_address", "")
-                hc_addr = entry.get("healthcheck_address", "")
-                fail_count = entry.get("fail_count", 0)
-                takeover_active = entry.get("takeover_active", False)
-                fast_poll_remaining = entry.get("_fast_poll_remaining", 0)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(_poll_entry, app, entry): i
+                    for i, entry in enumerate(registry)
+                }
+                for future in as_completed(futures):
+                    try:
+                        _entry, modified, sleep_interval = future.result()
+                        if modified:
+                            any_modified = True
+                        min_sleep = min(min_sleep, sleep_interval)
+                    except Exception as e:
+                        app.log(f"OnionCellar: entry poll error: {e}")
 
-                if not content_addr or not hc_addr:
-                    continue
+            elapsed = time.monotonic() - pass_start
+            app.log(f"OnionCellar: poll pass complete — {len(registry)} entries in {elapsed:.1f}s")
 
-                # Check healthcheck
-                hc_ok = _check_healthcheck(app, hc_addr)
-
-                if hc_ok:
-                    if takeover_active:
-                        # Instance recovered — the healthcheck address is independent
-                        # (not taken over), so it being reachable means the original
-                        # instance is back online. Release the content address.
-                        _do_release(app, entry)
-                        entry["takeover_active"] = False
-                        entry["status"] = "healthy"
-                        entry["fail_count"] = 0
-                        entry["_fast_poll_remaining"] = FAST_POLL_COUNT
-                        modified = True
-                    elif fail_count > 0:
-                        # Was failing, now recovering
-                        entry["fail_count"] = 0
-                        entry["status"] = "healthy"
-                        entry["_fast_poll_remaining"] = FAST_POLL_COUNT
-                        modified = True
-                    else:
-                        entry["status"] = "healthy"
-                else:
-                    # Healthcheck failed
-                    new_fail_count = fail_count + 1
-                    entry["fail_count"] = new_fail_count
-                    entry["status"] = "failing"
-                    entry["_fast_poll_remaining"] = FAST_POLL_COUNT
-                    modified = True
-
-                    if new_fail_count >= FAIL_THRESHOLD and not takeover_active:
-                        # Check if cellar is unlocked before attempting takeover
-                        if not _is_cellar_unlocked(app):
-                            entry["status"] = "takeover_deferred_locked"
-                            modified = True
-                        else:
-                            # Double-check: also test the content address
-                            content_ok = _check_content(app, content_addr)
-                            if not content_ok:
-                                result = _do_takeover(app, entry)
-                                if result == "ok":
-                                    entry["takeover_active"] = True
-                                    entry["status"] = "taken_over"
-                                elif result == "locked":
-                                    entry["status"] = "takeover_deferred_locked"
-                                else:
-                                    entry["status"] = "takeover_failed"
-                                modified = True
-
-                # Update timestamp
-                entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
-
-                # Determine sleep interval for this entry
-                if fast_poll_remaining > 0:
-                    entry["_fast_poll_remaining"] = fast_poll_remaining - 1
-                    min_sleep = min(min_sleep, FAST_POLL_INTERVAL)
-                    modified = True
-                elif takeover_active:
-                    min_sleep = min(min_sleep, LONG_FAIL_INTERVAL)
-                else:
-                    min_sleep = min(min_sleep, HEALTHY_INTERVAL)
-
-            if modified:
+            if any_modified:
                 _write_registry(app, registry)
 
             time.sleep(min_sleep)
