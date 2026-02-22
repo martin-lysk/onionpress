@@ -174,7 +174,9 @@ detect_container_runtime() {
             else
                 # Start Colima if stopped
                 log "Starting bundled Colima..."
-                "$BIN_DIR/colima" start >> "$LOG_FILE" 2>&1
+                "$BIN_DIR/colima" start \
+                    --mount "$DATA_DIR/shared:w" \
+                    >> "$LOG_FILE" 2>&1
                 if [ $? -eq 0 ]; then
                     echo "colima-bundled"
                     return 0
@@ -618,7 +620,7 @@ install_docker() {
         "$BIN_DIR/colima" start \
             --vm-type vz \
             --mount-type virtiofs \
-            --mount "$DATA_DIR:w" \
+            --mount "$DATA_DIR/shared:w" \
             --cpu 2 \
             --memory "$VM_MEMORY" \
             --arch "$VM_ARCH" \
@@ -629,7 +631,7 @@ install_docker() {
         "$BIN_DIR/colima" start \
             --vm-type qemu \
             --mount-type sshfs \
-            --mount "$DATA_DIR:w" \
+            --mount "$DATA_DIR/shared:w" \
             --cpu 2 \
             --memory "$VM_MEMORY" \
             --arch "$VM_ARCH" \

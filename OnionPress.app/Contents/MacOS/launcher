@@ -137,7 +137,9 @@ initialize_colima() {
     # Ensure Colima is running
     if ! "$BIN_DIR/colima" status >/dev/null 2>&1; then
         log "Starting Colima VM..."
-        "$BIN_DIR/colima" start >> "$LOG_FILE" 2>&1
+        "$BIN_DIR/colima" start \
+            --mount "$DATA_DIR/shared:w" \
+            >> "$LOG_FILE" 2>&1
     fi
 }
 
