@@ -205,35 +205,35 @@ get_torrc_service_count() {
 
 get_stress_fail_count() {
     docker_cmd exec onionpress-wordpress \
-        sh -c "python3 -c \"
-import json,sys
-try:
-    r=json.load(open('/var/lib/onionpress/cellar/registry.json'))
-    print(sum(1 for e in r if e.get('version')=='stress-test' and e.get('status')=='failing'))
-except: print(0)
-\" 2>/dev/null || echo 0" | tr -d ' \n\r'
+        sh -c "php -r '
+\$r = json_decode(file_get_contents(\"/var/lib/onionpress/cellar/registry.json\"), true);
+if (!is_array(\$r)) { echo 0; exit; }
+\$c = 0;
+foreach (\$r as \$e) { if ((\$e[\"version\"] ?? \"\") === \"stress-test\" && (\$e[\"status\"] ?? \"\") === \"failing\") \$c++; }
+echo \$c;
+' 2>/dev/null || echo 0" | tr -d ' \n\r'
 }
 
 get_takeover_count() {
     docker_cmd exec onionpress-wordpress \
-        sh -c "python3 -c \"
-import json,sys
-try:
-    r=json.load(open('/var/lib/onionpress/cellar/registry.json'))
-    print(sum(1 for e in r if e.get('takeover_active')))
-except: print(0)
-\" 2>/dev/null || echo 0" | tr -d ' \n\r'
+        sh -c "php -r '
+\$r = json_decode(file_get_contents(\"/var/lib/onionpress/cellar/registry.json\"), true);
+if (!is_array(\$r)) { echo 0; exit; }
+\$c = 0;
+foreach (\$r as \$e) { if (!empty(\$e[\"takeover_active\"])) \$c++; }
+echo \$c;
+' 2>/dev/null || echo 0" | tr -d ' \n\r'
 }
 
 get_healthy_count() {
     docker_cmd exec onionpress-wordpress \
-        sh -c "python3 -c \"
-import json,sys
-try:
-    r=json.load(open('/var/lib/onionpress/cellar/registry.json'))
-    print(sum(1 for e in r if e.get('version')=='stress-test' and e.get('status')=='healthy'))
-except: print(0)
-\" 2>/dev/null || echo 0" | tr -d ' \n\r'
+        sh -c "php -r '
+\$r = json_decode(file_get_contents(\"/var/lib/onionpress/cellar/registry.json\"), true);
+if (!is_array(\$r)) { echo 0; exit; }
+\$c = 0;
+foreach (\$r as \$e) { if ((\$e[\"version\"] ?? \"\") === \"stress-test\" && (\$e[\"status\"] ?? \"\") === \"healthy\") \$c++; }
+echo \$c;
+' 2>/dev/null || echo 0" | tr -d ' \n\r'
 }
 
 get_last_poll_duration() {
@@ -297,7 +297,20 @@ STRESS_DIR="/var/lib/tor/hidden_service/stress-test"
 setup_onion_services() {
     log "Phase 1: Creating ${TOTAL} workers (${TOTAL} content + ${TOTAL} healthcheck onion services)..."
 
-    # Create stress-test directory
+    # Clean any leftover stress-test entries from torrc (prevents duplicates)
+    docker_cmd exec onionpress-tor sh -c "
+        awk '
+        /^# stress-test:/ { skip=1; next }
+        /^HiddenServiceDir.*stress-test/ { skip=1; next }
+        skip && /^HiddenServicePort/ { skip=0; next }
+        { skip=0; print }
+        ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
+    " 2>/dev/null || true
+
+    # Remove old stress-test service directories
+    docker_cmd exec onionpress-tor rm -rf "$STRESS_DIR" 2>/dev/null || true
+
+    # Create fresh stress-test directory
     docker_cmd exec onionpress-tor mkdir -p "$STRESS_DIR"
     docker_cmd exec onionpress-tor chown -R tor:nogroup "$STRESS_DIR" 2>/dev/null \
         || docker_cmd exec onionpress-tor chown -R tor:tor "$STRESS_DIR" 2>/dev/null \
@@ -353,8 +366,8 @@ TORRC_EOF"
 
     if [ "$all_ready" != true ]; then
         log "ERROR: Timed out waiting for Tor to generate all onion addresses"
-        log "Check Tor logs: docker exec onionpress-tor cat /var/log/tor/notices.log"
-        exit 1
+        log "Check Tor logs: docker logs onionpress-tor --tail 20"
+        exit 1  # EXIT trap will run cleanup
     fi
 
     log "All ${TOTAL} workers have onion addresses"
@@ -634,17 +647,13 @@ cleanup_stress_test() {
     log "  Killed socat responders"
 
     # Remove stress-test entries from registry
-    docker_cmd exec onionpress-wordpress sh -c "
-        python3 -c '
-import json
-try:
-    r = json.load(open(\"/var/lib/onionpress/cellar/registry.json\"))
-    cleaned = [e for e in r if e.get(\"version\") != \"stress-test\"]
-    with open(\"/var/lib/onionpress/cellar/registry.json\", \"w\") as f:
-        json.dump(cleaned, f, indent=2)
-    print(f\"Kept {len(cleaned)} entries, removed {len(r) - len(cleaned)}\")
-except Exception as ex:
-    print(f\"Error: {ex}\")
+    docker_cmd exec onionpress-wordpress sh -c "php -r '
+\$f = \"/var/lib/onionpress/cellar/registry.json\";
+\$r = json_decode(file_get_contents(\$f), true);
+if (!is_array(\$r)) { echo \"No registry found\"; exit; }
+\$cleaned = array_values(array_filter(\$r, function(\$e) { return (\$e[\"version\"] ?? \"\") !== \"stress-test\"; }));
+file_put_contents(\$f, json_encode(\$cleaned, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+echo \"Kept \" . count(\$cleaned) . \" entries, removed \" . (count(\$r) - count(\$cleaned));
 '" 2>/dev/null || true
     log "  Cleaned registry"
 
@@ -703,8 +712,9 @@ run_worker() {
     log "Output: ${OUTPUT_DIR}"
     echo ""
 
-    # Trap to ensure cleanup on exit
-    trap 'log "Interrupted — running cleanup..."; cleanup_stress_test; exit 130' INT TERM
+    # Trap to ensure cleanup on exit (INT/TERM for Ctrl-C, EXIT for errors)
+    trap 'log "Cleaning up before exit..."; cleanup_stress_test' EXIT
+    trap 'log "Interrupted..."; exit 130' INT TERM
 
     # Phase 1: Create onion services
     setup_onion_services
@@ -754,7 +764,8 @@ run_worker() {
     print_dashboard
     echo ""
 
-    # Phase 7: Cleanup
+    # Phase 7: Cleanup (disable EXIT trap since we're cleaning up explicitly)
+    trap - EXIT
     cleanup_stress_test
     echo ""
 
@@ -794,19 +805,15 @@ run_cleanup() {
 
     # 2. Get list of stress-test addresses from registry
     local stress_addrs
-    stress_addrs=$(docker_cmd exec onionpress-wordpress sh -c "
-        python3 -c '
-import json
-try:
-    r = json.load(open(\"/var/lib/onionpress/cellar/registry.json\"))
-    for e in r:
-        if e.get(\"version\") == \"stress-test\":
-            print(e[\"content_address\"])
-except: pass
-' 2>/dev/null") || true
+    stress_addrs=$(docker_cmd exec onionpress-wordpress sh -c "php -r '
+\$r = json_decode(file_get_contents(\"/var/lib/onionpress/cellar/registry.json\"), true);
+if (!is_array(\$r)) exit;
+foreach (\$r as \$e) { if ((\$e[\"version\"] ?? \"\") === \"stress-test\") echo \$e[\"content_address\"] . \"\\n\"; }
+'" 2>/dev/null) || true
 
     local count
-    count=$(echo "$stress_addrs" | grep -c '.onion' || echo 0)
+    count=$(echo "$stress_addrs" | grep -c '\.onion' 2>/dev/null || true)
+    [ -z "$count" ] && count=0
     log "Found ${count} stress-test entries to clean up"
 
     if [ "$count" -eq 0 ] && ! docker_cmd exec onionpress-tor test -d "$STRESS_DIR" 2>/dev/null; then
@@ -816,17 +823,13 @@ except: pass
 
     # 3. Filter registry.json — remove stress-test entries
     log "Filtering registry.json..."
-    docker_cmd exec onionpress-wordpress sh -c "
-        python3 -c '
-import json
-try:
-    r = json.load(open(\"/var/lib/onionpress/cellar/registry.json\"))
-    cleaned = [e for e in r if e.get(\"version\") != \"stress-test\"]
-    with open(\"/var/lib/onionpress/cellar/registry.json\", \"w\") as f:
-        json.dump(cleaned, f, indent=2)
-    print(f\"Kept {len(cleaned)} entries, removed {len(r) - len(cleaned)}\")
-except Exception as ex:
-    print(f\"Error: {ex}\")
+    docker_cmd exec onionpress-wordpress sh -c "php -r '
+\$f = \"/var/lib/onionpress/cellar/registry.json\";
+\$r = json_decode(file_get_contents(\$f), true);
+if (!is_array(\$r)) { echo \"No registry found\"; exit; }
+\$cleaned = array_values(array_filter(\$r, function(\$e) { return (\$e[\"version\"] ?? \"\") !== \"stress-test\"; }));
+file_put_contents(\$f, json_encode(\$cleaned, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+echo \"Kept \" . count(\$cleaned) . \" entries, removed \" . (count(\$r) - count(\$cleaned));
 '"
 
     # 4. Remove encrypted key directories for stress-test addresses
