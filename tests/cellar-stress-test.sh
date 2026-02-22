@@ -98,14 +98,22 @@ preflight() {
 }
 
 # ── Auto-detect cellar address ────────────────────────────────────────────────
+# Known cellar address (must match CELLAR_ADDRESS in src/cellar.py)
+KNOWN_CELLAR_ADDR="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+
 detect_cellar_addr() {
     if [ -n "$CELLAR_ADDR" ]; then
         return
     fi
-    CELLAR_ADDR=$(docker_cmd exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-    if [ -z "$CELLAR_ADDR" ]; then
-        echo "ERROR: Could not auto-detect cellar address"
-        exit 1
+    # On the cellar machine itself, auto-detect confirms we're the cellar
+    local local_addr
+    local_addr=$(docker_cmd exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
+    if [ "$local_addr" = "$KNOWN_CELLAR_ADDR" ]; then
+        CELLAR_ADDR="$KNOWN_CELLAR_ADDR"
+    else
+        # On a worker machine, use the known cellar address
+        CELLAR_ADDR="$KNOWN_CELLAR_ADDR"
+        log "Worker machine detected — targeting cellar at $CELLAR_ADDR"
     fi
     log "Cellar address: $CELLAR_ADDR"
 }
