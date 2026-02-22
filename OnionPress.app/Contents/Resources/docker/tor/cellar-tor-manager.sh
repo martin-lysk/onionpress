@@ -161,13 +161,13 @@ do_release() {
     # Remove HiddenServiceDir entry from torrc
     local marker="# cellar:${CONTENT_ADDRESS}"
     if grep -q "$marker" "$TORRC"; then
-        # Remove the marker line and the three config lines that follow it
-        # (HiddenServiceDir, HiddenServiceVersion, HiddenServicePort)
+        # Remove the marker line and the four config lines that follow it
+        # (HiddenServiceDir, HiddenServiceVersion, HiddenServicePort, HiddenServiceNumIntroductionPoints)
         # Also remove the blank line before the marker if present
         local tmp_torrc="${TORRC}.tmp"
         awk -v marker="$marker" '
         BEGIN { skip = 0 }
-        $0 == marker { skip = 3; next }
+        $0 == marker { skip = 4; next }
         skip > 0 { skip--; next }
         # Remove blank line right before marker (already printed — handled by buffering)
         { print }
