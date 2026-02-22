@@ -137,13 +137,15 @@ register_address() {
     payload=$(printf '{"content_address":"%s","healthcheck_address":"%s","secret_key":"%s","public_key":"%s","version":"%s"}' \
         "$content_addr" "$hc_addr" "$secret_key" "$public_key" "$STRESS_VERSION")
 
-    # POST via wget in the tor container — talks to local WordPress on port 80
+    # POST via curl in wordpress container through tor's SOCKS proxy
     local output
-    output=$(docker_cmd exec onionpress-tor \
-        wget -q -O - --timeout=15 \
-        --header="Content-Type: application/json" \
-        --post-data="$payload" \
-        "http://wordpress:80/register" 2>&1) || true
+    output=$(docker_cmd exec onionpress-wordpress \
+        curl -s -X POST \
+        --socks5-hostname onionpress-tor:9050 \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        --max-time 30 \
+        "http://${CELLAR_ADDR}/register" 2>&1) || true
 
     if echo "$output" | grep -q '"registered".*true'; then
         return 0
