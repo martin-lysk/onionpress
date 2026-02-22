@@ -477,7 +477,7 @@ wait_for_healthy() {
         # Dashboard every 30 seconds
         local now
         now=$(date +%s)
-        if [ $((now - last_dashboard)) -ge 30 ]; then
+        if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
             last_dashboard=$now
         fi
@@ -535,7 +535,7 @@ wait_for_takeover() {
 
         local now
         now=$(date +%s)
-        if [ $((now - last_dashboard)) -ge 30 ]; then
+        if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
             last_dashboard=$now
         fi
@@ -673,7 +673,7 @@ wait_for_recovery() {
 
         local now
         now=$(date +%s)
-        if [ $((now - last_dashboard)) -ge 30 ]; then
+        if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
             last_dashboard=$now
         fi
@@ -849,7 +849,7 @@ run_coordinator() {
 
     while true; do
         print_dashboard
-        sleep 30
+        sleep 10
     done
 }
 
