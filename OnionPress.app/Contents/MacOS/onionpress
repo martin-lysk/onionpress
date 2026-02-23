@@ -435,53 +435,6 @@ HELPEOF
         return 0
     fi
 
-    # Check if arti-state volume already exists (Docker may not be running)
-    local docker_available=false
-    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
-        docker_available=true
-        echo "An onion address key already exists."
-        echo ""
-        # Get current address from the hostname file in the vanity-keys directory
-        local current_addr
-        current_addr=$(find "$DATA_DIR/shared/vanity-keys" -name hostname -exec cat {} \; 2>/dev/null | head -1)
-        if [ -z "$current_addr" ]; then
-            # Fall back: try reading from the old tor-keys volume
-            current_addr=$(docker run --rm -v onionpress-tor-keys:/keys alpine cat /keys/wordpress/hostname 2>/dev/null)
-        fi
-        if [ -n "$current_addr" ]; then
-            echo "Current address: $current_addr"
-            echo ""
-        fi
-        echo "Importing a new key will REPLACE your current onion address."
-        echo "Your old address will stop working permanently."
-        echo ""
-        printf "Continue? [y/N] "
-        read -r confirm
-        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-            echo "Cancelled."
-            return 1
-        fi
-
-        # Stop OnionPress if running
-        echo "Stopping OnionPress..."
-        stop_containers 2>/dev/null
-        # Remove old arti-state volume
-        echo "Removing old arti-state volume..."
-        docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1
-        # Also remove old tor-keys volume if it exists (migration leftover)
-        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
-        # Remove old vanity-keys directory
-        rm -rf "$DATA_DIR/shared/vanity-keys/"
-        echo "Old keys removed."
-    elif [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-        # Docker not running but old vanity-keys exist — clean them up
-        rm -rf "$DATA_DIR/shared/vanity-keys/"
-    fi
-
-    # Mark that a key was imported so next startup removes the old arti-state volume
-    # (needed when Docker isn't running and we can't remove the volume now)
-    touch "$DATA_DIR/.import-key-pending"
-
     # Decode base32, validate length, derive public key and address — all in one python3 call
     # The public key must be derived via ed25519 scalar multiplication (not a simple slice)
     local result
@@ -571,6 +524,62 @@ print(binascii.hexlify(pubkey).decode())
         echo "ERROR: Failed to derive address from key" >&2
         return 1
     fi
+
+    # Check if this is the same key already installed
+    local current_addr
+    current_addr=$(find "$DATA_DIR/shared/vanity-keys" -name hostname -exec cat {} \; 2>/dev/null | head -1)
+    if [ "$current_addr" = "$address" ]; then
+        echo "Key already installed for: $address"
+        echo "Nothing to do."
+        return 0
+    fi
+
+    # Check if arti-state volume already exists (need to replace old key)
+    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
+        echo "An onion address key already exists."
+        echo ""
+        if [ -n "$current_addr" ]; then
+            echo "Current address: $current_addr"
+            echo ""
+        fi
+        echo "Importing a new key will REPLACE your current onion address."
+        echo "Your old address will stop working permanently."
+        echo ""
+        printf "Continue? [y/N] "
+        read -r confirm
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            echo "Cancelled."
+            return 1
+        fi
+
+        # Stop OnionPress if running
+        echo "Stopping OnionPress..."
+        stop_containers 2>/dev/null
+        # Remove old arti-state volume (must verify it's actually gone)
+        echo "Removing old arti-state volume..."
+        docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
+            echo "Volume still in use — force-removing containers..."
+            docker rm -f $(docker ps -aq --filter volume=onionpress-arti-state) >> "$LOG_FILE" 2>&1 || true
+            docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
+                echo "ERROR: Could not remove old arti-state volume. Is another Docker client using it?" >&2
+                return 1
+            fi
+        fi
+        # Also remove old tor-keys volume if it exists (migration leftover)
+        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
+        # Remove old vanity-keys directory
+        rm -rf "$DATA_DIR/shared/vanity-keys/"
+        echo "Old keys removed."
+    elif [ -d "$DATA_DIR/shared/vanity-keys" ]; then
+        # Docker not running but old vanity-keys exist — clean them up
+        rm -rf "$DATA_DIR/shared/vanity-keys/"
+    fi
+
+    # Mark that a key was imported so next startup removes the old arti-state volume
+    # (needed when Docker isn't running and we can't remove the volume now)
+    touch "$DATA_DIR/.import-key-pending"
 
     # Create output directory
     local output_dir="$DATA_DIR/shared/vanity-keys/$address"
@@ -810,6 +819,13 @@ install_docker() {
         if [ ! -z "$config_mem" ]; then
             VM_MEMORY="$config_mem"
         fi
+    fi
+
+    # Pre-check: if cellar key is imported, start with 5GB to avoid a restart
+    local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+    if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
+        log "Cellar key detected — starting VM with 5GB"
+        VM_MEMORY=5
     fi
 
     # Should not happen if launcher worked, but handle it
@@ -1120,6 +1136,14 @@ start_containers() {
     if [ -f "$DATA_DIR/.import-key-pending" ]; then
         log "Pending key import detected — removing old arti-state volume..."
         docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
+            log "Volume still in use — force-removing containers using it..."
+            docker rm -f $(docker ps -aq --filter volume=onionpress-arti-state) >> "$LOG_FILE" 2>&1 || true
+            docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
+                log "ERROR: Could not remove old arti-state volume"
+            fi
+        fi
         # Also remove old tor-keys volume if it exists (migration leftover)
         docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
         rm -f "$DATA_DIR/.import-key-pending"

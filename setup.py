@@ -42,14 +42,14 @@ OPTIONS = {
         'NSRequiresAquaSystemAppearance': False,
         'LSApplicationCategoryType': 'public.app-category.utilities',
     },
-    'packages': ['rumps', 'objc', 'AppKit', 'Quartz'],
+    'packages': ['rumps', 'objc', 'AppKit'],
     # CRITICAL: Local modules that menubar.py imports at runtime.
     # py2app cannot auto-detect these because it runs menubar.py via exec(),
     # not import. If you add a new local .py module, ADD IT HERE or the build
     # will appear to succeed but the app will crash at launch with
     # "ModuleNotFoundError".
     'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'backup_manager',
-                 'onion_proxy', 'install_native_messaging', 'setup_window', 'cellar'],
+                 'onion_proxy', 'install_native_messaging', 'cellar'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size

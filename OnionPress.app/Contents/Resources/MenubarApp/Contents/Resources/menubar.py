@@ -27,7 +27,6 @@ import key_manager
 import backup_manager
 import onion_proxy
 import install_native_messaging
-import setup_window
 import cellar
 
 
@@ -2753,22 +2752,10 @@ class OnionPressApp(rumps.App):
             except Exception:
                 pass
 
-            # First run: show welcome screen and wait for user to click Continue
+            # First run: launch splash is already showing — just run setup
             if first_run:
-                self.log("First run detected - showing welcome screen")
-                self.setup_dialog_showing = True
-
-                def on_continue():
-                    self.log("User confirmed setup - starting installation")
-                    threading.Thread(target=self._run_first_time_setup, daemon=True).start()
-
-                def on_cancel():
-                    self.log("User cancelled setup")
-                    self.menu["Starting..."].title = "Status: Stopped"
-                    setup_window.close_setup_progress()
-                    self.setup_dialog_showing = False
-
-                setup_window.show_welcome_screen(on_continue=on_continue, on_cancel=on_cancel)
+                self.log("First run detected - starting installation")
+                threading.Thread(target=self._run_first_time_setup, daemon=True).start()
                 return
 
             # Not first run: check if address prefix changed before starting
@@ -2798,83 +2785,15 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=start, daemon=True).start()
 
     def _run_first_time_setup(self):
-        """Run first-time setup with progress window: launcher, pull images, then wait for ready."""
-        progress_window = setup_window.get_setup_window()
-        # Window already transitioned to progress view by Continue button
-
+        """Run first-time setup: launcher start, pull images, then wait for ready."""
         try:
-            # Step 0: System check
-            progress_window.set_step(0, "in_progress")
-            progress_window.set_status("Checking system requirements")
-            progress_window.add_log("CHECKING MACOS VERSION...", "progress")
-            time.sleep(0.3)
-            try:
-                ver = subprocess.run(
-                    ["sw_vers", "-productVersion"],
-                    capture_output=True, text=True, timeout=5
-                )
-                progress_window.add_log(f"MACOS {ver.stdout.strip()} DETECTED", "ok")
-            except Exception:
-                progress_window.add_log("MACOS DETECTED", "ok")
-            progress_window.add_log("PYTHON 3 FOUND", "ok")
-            time.sleep(0.3)
-            progress_window.complete_step(0)
-
-            # Step 1: Runtime init
-            progress_window.set_step(1, "in_progress")
-            progress_window.set_status("Initializing container runtime")
-            progress_window.add_log("STARTING COLIMA VM...", "progress")
+            self.log("Starting Colima VM and containers...")
             subprocess.run([self.launcher_script, "start"])
-            time.sleep(1)
-            progress_window.add_log("VM INITIALIZED", "ok")
-            progress_window.complete_step(1)
-
-            # Step 2: Download images
-            progress_window.set_step(2, "in_progress")
-            progress_window.set_status("Downloading container images")
-            progress_window.add_log("FETCHING CONTAINER IMAGES...", "progress")
         except Exception as e:
             self.log(f"Error in _run_first_time_setup: {e}")
-            progress_window.add_log(f"ERROR: {e}", "error")
 
-        docker_dir = os.path.join(self.parent_resources_dir, "docker")
-        try:
-            env = os.environ.copy()
-            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
-            secrets_file = os.path.join(self.app_support, "secrets")
-            if os.path.exists(secrets_file):
-                with open(secrets_file, 'r') as sf:
-                    for line in sf:
-                        line = line.strip()
-                        if line and not line.startswith('#') and '=' in line:
-                            key, val = line.split('=', 1)
-                            env[key] = val.strip("'")
-            # Pass Cloudflare Tunnel token (avoids docker-compose warning about undefined var)
-            env.setdefault("CLOUDFLARE_TUNNEL_TOKEN", self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
-            docker_bin = os.path.join(self.bin_dir, "docker")
-            docker_log = os.path.join(self.app_support, "docker-pull.log")
-
-            def pull_and_start():
-                with open(docker_log, 'w') as log_file:
-                    result = subprocess.run(
-                        [docker_bin, "compose", "up", "-d", "wordpress", "db"],
-                        cwd=docker_dir,
-                        stdout=log_file,
-                        stderr=subprocess.STDOUT,
-                        timeout=600,
-                        env=env
-                    )
-                self.log(f"Docker compose up completed with exit code: {result.returncode}")
-                if result.returncode == 0:
-                    progress_window.set_status("Generating custom onion address")
-                    progress_window.set_detail("Finding address...")
-                    self.log("Containers started, WordPress is starting...")
-
-            threading.Thread(target=pull_and_start, daemon=True).start()
-            self.monitor_image_downloads(progress_window)
-        except Exception as e:
-            self.log(f"Error starting containers: {e}")
-            progress_window.set_status(f"Error: {e}")
+        # Monitor image downloads (logs progress to onionpress.log)
+        self.monitor_image_downloads()
 
         # Poll until WordPress is responding
         max_wait = 60
@@ -2888,32 +2807,6 @@ class OnionPressApp(rumps.App):
 
         self.check_status()
         self.start_caffeinate()
-
-        # Complete setup window when service is ready
-        def wait_for_ready():
-            for _ in range(120):
-                time.sleep(1)
-                if self.is_ready and self.onion_address and self.onion_address not in ("Starting...", "Not running", "Generating address..."):
-                    progress_window.set_step(3, "in_progress")
-                    progress_window.add_log(f"ADDRESS: {self.onion_address[:25]}...", "ok")
-                    progress_window.complete_step(3)
-                    progress_window.set_step(4, "in_progress")
-                    progress_window.set_status("Starting services")
-                    progress_window.add_log("ALL CONTAINERS RUNNING", "ok")
-                    progress_window.complete_step(4)
-                    progress_window.set_step(5, "in_progress")
-                    progress_window.set_status("Finalizing setup")
-                    progress_window.add_log("VERIFYING TOR CIRCUIT...", "progress")
-                    progress_window.add_log("ONION SERVICE PUBLISHED", "ok")
-                    progress_window.complete_step(5)
-                    progress_window.set_modem_active(False)
-                    progress_window.show_completion(self.onion_address)
-                    time.sleep(4)
-                    setup_window.close_setup_progress()
-                    self.setup_dialog_showing = False
-                    break
-
-        threading.Thread(target=wait_for_ready, daemon=True).start()
 
     @rumps.clicked("Stop")
     def stop_service(self, _):
@@ -3478,14 +3371,10 @@ class OnionPressApp(rumps.App):
             self.log("Setup dialog fallback - dialog failed to show")
 
     def dismiss_setup_dialog(self):
-        """Dismiss the setup dialog if it's showing (native alert or setup progress window)"""
+        """Dismiss the setup dialog if it's showing (native NSAlert)"""
         if self.setup_dialog_showing:
             self.setup_dialog_showing = False
             self.log("Setup dialog marked for dismissal")
-            try:
-                setup_window.hide_setup_progress()
-            except Exception:
-                pass
             try:
                 if self.setup_alert:
                     AppKit.NSApp.abortModal()
@@ -3493,10 +3382,8 @@ class OnionPressApp(rumps.App):
             except Exception as e:
                 self.log(f"Error dismissing setup dialog: {e}")
 
-    def monitor_image_downloads(self, progress_window=None):
-        """Monitor Docker image downloads and show progress notifications.
-        If progress_window is provided (first-time setup), update its log and progress bar.
-        """
+    def monitor_image_downloads(self):
+        """Monitor Docker image downloads and log progress."""
         images_to_check = {
             'wordpress': False,
             'mariadb': False,
@@ -3508,10 +3395,6 @@ class OnionPressApp(rumps.App):
         # Check for images every 3 seconds for up to 10 minutes
         for i in range(200):
             try:
-                if progress_window:
-                    estimated_progress = min(0.9, i / 60)
-                    progress_window.set_progress(estimated_progress, "DOWNLOADING")
-
                 result = subprocess.run(
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
@@ -3527,27 +3410,7 @@ class OnionPressApp(rumps.App):
                         if any(image_name in img for img in current_images):
                             images_to_check[image_name] = True
                             self.log(f"Image downloaded: {image_name}")
-                            if progress_window:
-                                if image_name == 'wordpress':
-                                    progress_window.add_log("WORDPRESS IMAGE READY", "ok")
-                                    progress_window.set_progress(0.4, "WORDPRESS OK")
-                                elif image_name == 'mariadb':
-                                    progress_window.add_log("MARIADB IMAGE READY", "ok")
-                                    progress_window.set_progress(0.7, "MARIADB OK")
-                                elif image_name == 'tor':
-                                    progress_window.add_log("TOR IMAGE READY", "ok")
-                                    progress_window.set_progress(0.95, "TOR OK")
 
-                # When using progress window, step 2 completes when wordpress + mariadb are ready (first compose only pulls those)
-                all_needed = images_to_check['wordpress'] and images_to_check['mariadb']
-                if progress_window and all_needed:
-                    self.log("Required images ready (wordpress + mariadb)")
-                    progress_window.set_progress(1.0, "COMPLETE")
-                    progress_window.add_log("ALL IMAGES DOWNLOADED", "ok")
-                    progress_window.complete_step(2)
-                    progress_window.set_status("Generating custom onion address")
-                    progress_window.add_log("GENERATING ADDRESS PREFIX...", "progress")
-                    break
                 if all(images_to_check.values()):
                     self.log("All images downloaded")
                     break
