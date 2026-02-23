@@ -1409,8 +1409,26 @@ class OnionPressApp(rumps.App):
                 return False
 
             # Check 2: Verify Tor has bootstrapped to 100%
-            result = subprocess.run(
-                [docker_bin, "logs", "--tail", "100", "onionpress-tor"],
+            # Use grep over full logs — "Bootstrapped 100%" is logged once per
+            # startup and can be pushed out of --tail 100 by HSDir query spam.
+            bootstrap_result = subprocess.run(
+                [docker_bin, "logs", "onionpress-tor"],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=10,
+                env=docker_env
+            )
+
+            if "Bootstrapped 100% (done)" not in bootstrap_result.stdout:
+                if log_result:
+                    self.log(f"✗ Tor not fully bootstrapped yet")
+                return False
+
+            # Check 3: Verify no critical errors in recent logs
+            recent_result = subprocess.run(
+                [docker_bin, "logs", "--tail", "50", "onionpress-tor"],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -1419,13 +1437,7 @@ class OnionPressApp(rumps.App):
                 env=docker_env
             )
 
-            if "Bootstrapped 100% (done)" not in result.stdout:
-                if log_result:
-                    self.log(f"✗ Tor not fully bootstrapped yet")
-                return False
-
-            # Check 3: Verify no critical errors in recent logs
-            if "ERROR" in result.stdout or "failed to publish" in result.stdout.lower():
+            if "ERROR" in recent_result.stdout or "failed to publish" in recent_result.stdout.lower():
                 if log_result:
                     self.log(f"✗ Tor errors detected in logs")
                 return False
@@ -1521,12 +1533,19 @@ class OnionPressApp(rumps.App):
             return False
 
     def _parse_bootstrap_percentage(self):
-        """Parse Tor bootstrap percentage from recent container logs.
-        Returns highest percentage found (0-100), or 0 if not parseable."""
+        """Parse Tor bootstrap percentage from full container logs.
+        Returns highest percentage found (0-100), or 0 if not parseable.
+        Uses full logs since bootstrap messages can be pushed out of --tail
+        by HSDir query spam when many onion descriptors are being fetched."""
         try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            docker_env = os.environ.copy()
+            docker_env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            docker_env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
             result = subprocess.run(
-                ["docker", "logs", "--tail", "50", "onionpress-tor"],
-                capture_output=True, text=True, timeout=5
+                [docker_bin, "logs", "onionpress-tor"],
+                capture_output=True, text=True, timeout=10,
+                env=docker_env
             )
             output = result.stdout + result.stderr
             best = 0
