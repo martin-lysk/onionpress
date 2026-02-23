@@ -236,6 +236,74 @@ generate_vanity_address() {
     VANITY_ADDRESS=$(basename "$VANITY_DIR")
     log "Generated custom address: $VANITY_ADDRESS" >&2
 
+    # Convert mkp224o C Tor format to Arti OpenSSH format
+    if [ -f "$VANITY_DIR/hs_ed25519_secret_key" ] && [ -f "$VANITY_DIR/hs_ed25519_public_key" ]; then
+        python3 -c "
+import base64, os, struct, sys
+
+secret_path = sys.argv[1]
+public_path = sys.argv[2]
+output_path = sys.argv[3]
+
+# Read C Tor format: 32-byte header + key
+with open(secret_path, 'rb') as f:
+    secret_data = f.read()
+private_key = secret_data[32:]  # 64 bytes
+
+with open(public_path, 'rb') as f:
+    public_data = f.read()
+public_key = public_data[32:]  # 32 bytes
+
+KEY_TYPE = b'ed25519-expanded@spec.torproject.org'
+MAGIC = b'openssh-key-v1\x00'
+
+def pack(data):
+    return struct.pack('>I', len(data)) + data
+
+pub_blob = pack(KEY_TYPE) + pack(public_key)
+
+check = struct.pack('>I', int.from_bytes(os.urandom(4), 'big'))
+priv_blob = (
+    check + check +
+    pack(KEY_TYPE) +
+    pack(public_key) +
+    pack(private_key) +
+    pack(b'')
+)
+pad_len = (8 - len(priv_blob) % 8) % 8
+priv_blob += bytes(range(1, pad_len + 1))
+
+binary = (
+    MAGIC +
+    pack(b'none') +
+    pack(b'none') +
+    pack(b'') +
+    struct.pack('>I', 1) +
+    pack(pub_blob) +
+    pack(priv_blob)
+)
+
+b64 = base64.b64encode(binary).decode('ascii')
+lines = [b64[i:i+70] for i in range(0, len(b64), 70)]
+pem = '-----BEGIN OPENSSH PRIVATE KEY-----\n'
+pem += '\n'.join(lines) + '\n'
+pem += '-----END OPENSSH PRIVATE KEY-----\n'
+
+with open(output_path, 'wb') as f:
+    f.write(pem.encode('utf-8'))
+os.chmod(output_path, 0o600)
+" "$VANITY_DIR/hs_ed25519_secret_key" "$VANITY_DIR/hs_ed25519_public_key" "$VANITY_DIR/ks_hs_id.ed25519_expanded_private" >> "$LOG_FILE" 2>&1
+
+        if [ $? -eq 0 ]; then
+            # Remove old C Tor format files
+            rm -f "$VANITY_DIR/hs_ed25519_secret_key" "$VANITY_DIR/hs_ed25519_public_key"
+            log "Converted vanity key to Arti OpenSSH format" >&2
+        else
+            log "ERROR: Failed to convert vanity key to Arti format" >&2
+            return 1
+        fi
+    fi
+
     # Return the directory path (only thing on stdout)
     echo "$VANITY_DIR"
     return 0
@@ -278,9 +346,8 @@ WHAT THIS COMMAND DOES:
   1. Decodes the base32 key and validates it is exactly 64 bytes
   2. Derives the .onion address from the public key portion
   3. Writes key files to ~/.onionpress/shared/vanity-keys/<address>/
-     - hs_ed25519_secret_key  (32-byte header + 64-byte key)
-     - hs_ed25519_public_key  (32-byte header + 32-byte pubkey)
-     - hostname               (the .onion address)
+     - ks_hs_id.ed25519_expanded_private  (OpenSSH PEM format for Arti)
+     - hostname                           (the .onion address)
   4. On next start, OnionPress will use this key
 
 NOTE: If an onion address already exists, you will be prompted to
@@ -291,15 +358,19 @@ HELPEOF
         return 0
     fi
 
-    # Check if tor-keys volume already exists (Docker may not be running)
+    # Check if arti-state volume already exists (Docker may not be running)
     local docker_available=false
-    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-tor-keys$'; then
+    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
         docker_available=true
         echo "An onion address key already exists."
         echo ""
-        # Get current address
+        # Get current address from the hostname file in the vanity-keys directory
         local current_addr
-        current_addr=$(docker run --rm -v onionpress-tor-keys:/keys alpine cat /keys/wordpress/hostname 2>/dev/null)
+        current_addr=$(find "$DATA_DIR/shared/vanity-keys" -name hostname -exec cat {} \; 2>/dev/null | head -1)
+        if [ -z "$current_addr" ]; then
+            # Fall back: try reading from the old tor-keys volume
+            current_addr=$(docker run --rm -v onionpress-tor-keys:/keys alpine cat /keys/wordpress/hostname 2>/dev/null)
+        fi
         if [ -n "$current_addr" ]; then
             echo "Current address: $current_addr"
             echo ""
@@ -317,9 +388,11 @@ HELPEOF
         # Stop OnionPress if running
         echo "Stopping OnionPress..."
         stop_containers 2>/dev/null
-        # Remove old volume
-        echo "Removing old tor-keys volume..."
-        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1
+        # Remove old arti-state volume
+        echo "Removing old arti-state volume..."
+        docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1
+        # Also remove old tor-keys volume if it exists (migration leftover)
+        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
         # Remove old vanity-keys directory
         rm -rf "$DATA_DIR/shared/vanity-keys/"
         echo "Old keys removed."
@@ -328,7 +401,7 @@ HELPEOF
         rm -rf "$DATA_DIR/shared/vanity-keys/"
     fi
 
-    # Mark that a key was imported so next startup removes the old tor-keys volume
+    # Mark that a key was imported so next startup removes the old arti-state volume
     # (needed when Docker isn't running and we can't remove the volume now)
     touch "$DATA_DIR/.import-key-pending"
 
@@ -426,30 +499,66 @@ print(binascii.hexlify(pubkey).decode())
     local output_dir="$DATA_DIR/shared/vanity-keys/$address"
     mkdir -p "$output_dir"
 
-    # Write hs_ed25519_secret_key: 32-byte header + 64-byte key
-    # Header: "== ed25519v1-secret: type0 ==\x00\x00\x00" (32 bytes)
+    # Write OpenSSH PEM key file for Arti (same format as key_manager.build_openssh_key)
     python3 -c "
-import binascii, sys
-header = b'== ed25519v1-secret: type0 ==\x00\x00\x00'
-key = binascii.unhexlify(sys.argv[1])
-sys.stdout.buffer.write(header + key)
-" "$hex_key" > "$output_dir/hs_ed25519_secret_key"
+import base64, binascii, os, struct, sys
 
-    # Write hs_ed25519_public_key: 32-byte header + 32-byte pubkey
-    # Header: "== ed25519v1-public: type0 ==\x00\x00\x00" (32 bytes)
-    python3 -c "
-import binascii, sys
-header = b'== ed25519v1-public: type0 ==\x00\x00\x00'
-pubkey = binascii.unhexlify(sys.argv[1])
-sys.stdout.buffer.write(header + pubkey)
-" "$hex_pubkey" > "$output_dir/hs_ed25519_public_key"
+hex_key = sys.argv[1]
+hex_pubkey = sys.argv[2]
+output_path = sys.argv[3]
+
+private_key = binascii.unhexlify(hex_key)   # 64 bytes
+public_key = binascii.unhexlify(hex_pubkey)  # 32 bytes
+
+KEY_TYPE = b'ed25519-expanded@spec.torproject.org'
+MAGIC = b'openssh-key-v1\x00'
+
+def pack(data):
+    return struct.pack('>I', len(data)) + data
+
+# Public key blob
+pub_blob = pack(KEY_TYPE) + pack(public_key)
+
+# Private key blob
+check = struct.pack('>I', int.from_bytes(os.urandom(4), 'big'))
+priv_blob = (
+    check + check +
+    pack(KEY_TYPE) +
+    pack(public_key) +
+    pack(private_key) +
+    pack(b'')  # empty comment
+)
+pad_len = (8 - len(priv_blob) % 8) % 8
+priv_blob += bytes(range(1, pad_len + 1))
+
+binary = (
+    MAGIC +
+    pack(b'none') +
+    pack(b'none') +
+    pack(b'') +
+    struct.pack('>I', 1) +
+    pack(pub_blob) +
+    pack(priv_blob)
+)
+
+b64 = base64.b64encode(binary).decode('ascii')
+lines = [b64[i:i+70] for i in range(0, len(b64), 70)]
+pem = '-----BEGIN OPENSSH PRIVATE KEY-----\n'
+pem += '\n'.join(lines) + '\n'
+pem += '-----END OPENSSH PRIVATE KEY-----\n'
+
+with open(output_path, 'wb') as f:
+    f.write(pem.encode('utf-8'))
+os.chmod(output_path, 0o600)
+" "$hex_key" "$hex_pubkey" "$output_dir/ks_hs_id.ed25519_expanded_private"
+
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to write OpenSSH key file" >&2
+        return 1
+    fi
 
     # Write hostname file
     echo "$address" > "$output_dir/hostname"
-
-    # Set restrictive permissions
-    chmod 600 "$output_dir/hs_ed25519_secret_key"
-    chmod 600 "$output_dir/hs_ed25519_public_key"
     chmod 644 "$output_dir/hostname"
 
     # Update ADDRESS_PREFIX in config to match the imported address
@@ -926,13 +1035,15 @@ start_containers() {
 
     # Handle pending key import (volume couldn't be removed when Docker wasn't running)
     if [ -f "$DATA_DIR/.import-key-pending" ]; then
-        log "Pending key import detected — removing old tor-keys volume..."
+        log "Pending key import detected — removing old arti-state volume..."
+        docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+        # Also remove old tor-keys volume if it exists (migration leftover)
         docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
         rm -f "$DATA_DIR/.import-key-pending"
     fi
 
-    # Check if this is first run (no tor keys exist)
-    if ! docker volume ls | grep -q "onionpress-tor-keys"; then
+    # Check if this is first run (no arti-state volume exists)
+    if ! docker volume ls | grep -q "onionpress-arti-state"; then
         log "First run detected - generating custom onion address..."
 
         # Read address prefix from config, default to "op2"
@@ -976,20 +1087,20 @@ start_containers() {
         fi
 
         if [ -n "$VANITY_DIR" ]; then
-            # Create volume and copy keys (works for both imported and generated keys)
-            if ! docker volume create onionpress-tor-keys >> "$LOG_FILE" 2>&1; then
-                log "ERROR: Failed to create tor-keys volume"
+            # Create arti-state volume and install OpenSSH key to Arti keystore path
+            if ! docker volume create onionpress-arti-state >> "$LOG_FILE" 2>&1; then
+                log "ERROR: Failed to create arti-state volume"
                 return 1
             fi
             if ! docker run --rm \
-                -v onionpress-tor-keys:/dest \
+                -v onionpress-arti-state:/dest \
                 --mount type=bind,source="$VANITY_DIR",target=/src \
-                alpine sh -c 'mkdir -p /dest/wordpress && cp -r /src/* /dest/wordpress/ && chown -R 100:101 /dest/wordpress && chmod 700 /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
-                log "ERROR: Failed to copy address keys to tor volume"
+                alpine sh -c 'mkdir -p /dest/state/keystore/hss/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/state/keystore/hss/wordpress/ && chown -R 100:100 /dest/state && chmod 700 /dest/state /dest/state/keystore /dest/state/keystore/hss /dest/state/keystore/hss/wordpress && chmod 600 /dest/state/keystore/hss/wordpress/*' >> "$LOG_FILE" 2>&1; then
+                log "ERROR: Failed to copy address key to arti-state volume"
                 return 1
             fi
 
-            log "Address keys installed to tor volume"
+            log "Address key installed to arti-state volume"
         else
             log "Using random onion address"
         fi
