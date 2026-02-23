@@ -539,7 +539,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.112"
+        self.version = "2.2.114"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -2076,7 +2076,8 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=self._sighup_tor, daemon=True).start()
 
     def _sighup_tor(self):
-        """Send SIGHUP to Tor container to force circuit rebuild after wake"""
+        """Send SIGHUP to Tor container to force circuit rebuild after wake.
+        If Tor hasn't bootstrapped within 2 minutes, restart the container."""
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             env = os.environ.copy()
@@ -2091,6 +2092,22 @@ class OnionPressApp(rumps.App):
                 self.log(f"Failed to SIGHUP Tor: {result.stderr.strip()}")
         except Exception as e:
             self.log(f"Failed to SIGHUP Tor: {e}")
+
+        # Wait up to 2 minutes for Tor to bootstrap; if it doesn't, restart container
+        time.sleep(120)
+        if not self.is_ready:
+            self.log("Tor still not bootstrapped 2min after SIGHUP — restarting container")
+            try:
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+                subprocess.run(
+                    [docker_bin, "restart", "onionpress-tor"],
+                    capture_output=True, text=True, env=env, timeout=30)
+                self.log("Tor container restarted")
+            except Exception as e:
+                self.log(f"Failed to restart Tor container: {e}")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
@@ -3717,7 +3734,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.112 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.114 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
