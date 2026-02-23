@@ -845,14 +845,20 @@ class OnionPressApp(rumps.App):
             return
 
         try:
-            # Start caffeinate in background
-            # -s: prevent system sleep when on AC power (battery power allows normal sleep)
+            if self.is_cellar:
+                # Cellar: prevent idle sleep so network stays active (display can sleep)
+                caff_args = ["caffeinate", "-i"]
+                caff_msg = "cellar mode — system will not idle-sleep"
+            else:
+                # Normal: prevent system sleep on AC power only
+                caff_args = ["caffeinate", "-s"]
+                caff_msg = "Mac will stay awake while plugged in"
             self.caffeinate_process = subprocess.Popen(
-                ["caffeinate", "-s"],
+                caff_args,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - Mac will stay awake while plugged in")
+            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - {caff_msg}")
         except Exception as e:
             self.log(f"Failed to start caffeinate: {e}")
 
@@ -2057,9 +2063,11 @@ class OnionPressApp(rumps.App):
         self.log("Registered for system sleep/wake notifications")
 
     def handle_sleep(self):
-        """Handle system sleep — release caffeinate so the Mac actually sleeps"""
+        """Handle system sleep — release caffeinate so the Mac actually sleeps.
+        Cellar resists sleep to keep network active."""
         self.log("System going to sleep")
-        self.stop_caffeinate()
+        if not self.is_cellar:
+            self.stop_caffeinate()
 
     def handle_wake(self):
         """Handle system wake — Tor circuits are dead, go yellow immediately"""
