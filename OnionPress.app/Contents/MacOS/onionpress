@@ -94,8 +94,15 @@ export ONIONPRESS_CELLAR="0"
 detect_cellar_mode() {
     local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
     local our_address=""
-    our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    our_address=$(echo "$our_address" | tr -d '\n\r ')
+    # Check vanity-keys directory first (works even before containers start)
+    if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
+        our_address=$(basename "$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)" 2>/dev/null)
+    fi
+    # Fall back to reading from the tor container if vanity-keys didn't work
+    if [ -z "$our_address" ] || [ "$our_address" = "." ]; then
+        our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+        our_address=$(echo "$our_address" | tr -d '\n\r ')
+    fi
     if [ "$our_address" = "$cellar_address" ]; then
         export ONIONPRESS_CELLAR="1"
         log "OnionCellar mode activated (address: $our_address)"
@@ -1454,6 +1461,8 @@ main() {
             cd "$DOCKER_DIR"
             docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor container started"
+            # Detect cellar mode and start tor-polling if applicable
+            detect_cellar_mode
             ;;
 
         import-key)

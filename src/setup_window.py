@@ -23,6 +23,28 @@ import time
 import os
 import math
 
+try:
+    from Quartz import CGColorCreateGenericRGB
+except ImportError:
+    # Fallback: create CGColor via ctypes if Quartz module is not available
+    import ctypes
+    _cg = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    _cg.CGColorCreateGenericRGB.restype = ctypes.c_void_p
+    _cg.CGColorCreateGenericRGB.argtypes = [ctypes.c_double] * 4
+    def CGColorCreateGenericRGB(r, g, b, a):
+        return objc.objc_object(c_void_p=_cg.CGColorCreateGenericRGB(r, g, b, a))
+
+
+def _cgcolor(r, g, b, a=1.0):
+    """Create a CGColor that PyObjC can manage without PyObjCPointer issues.
+
+    NSColor.CGColor() returns a raw CGColorRef that PyObjC wraps in
+    PyObjCPointer — these wrappers cause SIGSEGV during autorelease pool
+    drain because CGColor uses CoreFoundation refcounting, not ObjC.
+    Using Quartz.CGColorCreateGenericRGB avoids this entirely.
+    """
+    return CGColorCreateGenericRGB(r, g, b, a)
+
 
 # =============================================================================
 # COLOR PALETTE (info site: cream boxes, dark purple headings, orange accents)
@@ -76,6 +98,14 @@ class Colors:
     LED_GREEN = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.2, 1.0, 0.3, 1.0)
     LED_YELLOW = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.9, 0.2, 1.0)
     LED_RED = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.3, 0.2, 1.0)
+
+    # Pre-computed CGColor refs for CALayer styling.
+    # DO NOT use NSColor.CGColor() — it returns raw CGColorRef that PyObjC wraps
+    # in PyObjCPointer, causing SIGSEGV during autorelease pool drain.
+    CG_LIGHT_PANEL = _cgcolor(0.98, 0.97, 0.92)
+    CG_CREAM = _cgcolor(0.98, 0.97, 0.92)
+    CG_BORDER_BLACK = _cgcolor(0.15, 0.15, 0.15)
+    CG_LIGHT_GRAY = _cgcolor(0.7, 0.7, 0.72)
 
 
 # =============================================================================
@@ -511,10 +541,10 @@ class SetupProgressWindow(AppKit.NSObject):
 
         header_panel = NSView.alloc().initWithFrame_(NSMakeRect(16, height - 70, width - 32, 60))
         header_panel.setWantsLayer_(True)
-        header_panel.layer().setBackgroundColor_(Colors.LIGHT_PANEL.CGColor())
+        header_panel.layer().setBackgroundColor_(Colors.CG_LIGHT_PANEL)
         header_panel.layer().setCornerRadius_(8)
         header_panel.layer().setBorderWidth_(1)
-        header_panel.layer().setBorderColor_(Colors.BORDER_BLACK.CGColor())
+        header_panel.layer().setBorderColor_(Colors.CG_BORDER_BLACK)
         self.welcome_view.addSubview_(header_panel)
 
         title = NSTextField.alloc().initWithFrame_(NSMakeRect(16, 20, width - 64, 30))
@@ -552,10 +582,10 @@ class SetupProgressWindow(AppKit.NSObject):
 
         steps_panel = NSView.alloc().initWithFrame_(NSMakeRect(16, height - 380, width - 32, 160))
         steps_panel.setWantsLayer_(True)
-        steps_panel.layer().setBackgroundColor_(Colors.LIGHT_PANEL.CGColor())
+        steps_panel.layer().setBackgroundColor_(Colors.CG_LIGHT_PANEL)
         steps_panel.layer().setCornerRadius_(8)
         steps_panel.layer().setBorderWidth_(1)
-        steps_panel.layer().setBorderColor_(Colors.BORDER_BLACK.CGColor())
+        steps_panel.layer().setBorderColor_(Colors.CG_BORDER_BLACK)
         self.welcome_view.addSubview_(steps_panel)
 
         steps_header = NSTextField.alloc().initWithFrame_(NSMakeRect(16, 130, width - 64, 20))
@@ -662,10 +692,10 @@ class SetupProgressWindow(AppKit.NSObject):
     def _create_header_panel(self, content, width, y):
         panel = NSView.alloc().initWithFrame_(NSMakeRect(16, y, width - 32, 60))
         panel.setWantsLayer_(True)
-        panel.layer().setBackgroundColor_(Colors.LIGHT_PANEL.CGColor())
+        panel.layer().setBackgroundColor_(Colors.CG_LIGHT_PANEL)
         panel.layer().setCornerRadius_(8)
         panel.layer().setBorderWidth_(1)
-        panel.layer().setBorderColor_(Colors.BORDER_BLACK.CGColor())
+        panel.layer().setBorderColor_(Colors.CG_BORDER_BLACK)
         content.addSubview_(panel)
         title = NSTextField.alloc().initWithFrame_(NSMakeRect(16, 20, width - 64, 30))
         title.setStringValue_("[ ONIONPRESS SETUP SEQUENCE ]")
@@ -695,18 +725,18 @@ class SetupProgressWindow(AppKit.NSObject):
         panel_h = 150
         panel_frame = NSView.alloc().initWithFrame_(NSMakeRect(16, y, panel_w, panel_h))
         panel_frame.setWantsLayer_(True)
-        panel_frame.layer().setBackgroundColor_(Colors.CREAM.CGColor())
+        panel_frame.layer().setBackgroundColor_(Colors.CG_CREAM)
         panel_frame.layer().setCornerRadius_(8)
         content.addSubview_(panel_frame)
         # Light vertical divider between SYSTEM.LOG and LIVE LOG
         left_w = int(panel_w * 0.55)
         divider = NSView.alloc().initWithFrame_(NSMakeRect(left_w, 4, 1, 122))
         divider.setWantsLayer_(True)
-        divider.layer().setBackgroundColor_(Colors.LIGHT_GRAY.CGColor())
+        divider.layer().setBackgroundColor_(Colors.CG_LIGHT_GRAY)
         panel_frame.addSubview_(divider)
         header = NSView.alloc().initWithFrame_(NSMakeRect(0, 130, panel_w, 20))
         header.setWantsLayer_(True)
-        header.layer().setBackgroundColor_(Colors.LIGHT_PANEL.CGColor())
+        header.layer().setBackgroundColor_(Colors.CG_LIGHT_PANEL)
         panel_frame.addSubview_(header)
         header_left = NSTextField.alloc().initWithFrame_(NSMakeRect(8, 2, 120, 16))
         header_left.setStringValue_("SYSTEM.LOG")
@@ -776,10 +806,10 @@ class SetupProgressWindow(AppKit.NSObject):
         content.addSubview_(self.tor_animation_panel)
         self.tor_animation_panel.setHidden_(True)
         self.tor_animation_panel.setWantsLayer_(True)
-        self.tor_animation_panel.layer().setBackgroundColor_(Colors.CREAM.CGColor())
+        self.tor_animation_panel.layer().setBackgroundColor_(Colors.CG_CREAM)
         self.tor_animation_panel.layer().setCornerRadius_(8)
         self.tor_animation_panel.layer().setBorderWidth_(1)
-        self.tor_animation_panel.layer().setBorderColor_(Colors.BORDER_BLACK.CGColor())
+        self.tor_animation_panel.layer().setBorderColor_(Colors.CG_BORDER_BLACK)
         # PCs in upper area; status text at bottom with clear spacing
         hop_view_h = min(44, panel_h - 28)
         status_h = 14
@@ -797,10 +827,10 @@ class SetupProgressWindow(AppKit.NSObject):
     def _create_led_panel(self, content, width, y):
         panel = NSView.alloc().initWithFrame_(NSMakeRect(16, y, width - 32, 40))
         panel.setWantsLayer_(True)
-        panel.layer().setBackgroundColor_(Colors.CREAM.CGColor())
+        panel.layer().setBackgroundColor_(Colors.CG_CREAM)
         panel.layer().setCornerRadius_(6)
         panel.layer().setBorderWidth_(1)
-        panel.layer().setBorderColor_(Colors.BORDER_BLACK.CGColor())
+        panel.layer().setBorderColor_(Colors.CG_BORDER_BLACK)
         content.addSubview_(panel)
         led_labels = ["SYS", "INIT", "IMG", "ADDR", "SVC", "OK"]
         led_width = (width - 64) / len(led_labels)

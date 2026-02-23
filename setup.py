@@ -34,15 +34,15 @@ OPTIONS = {
         'CFBundleName': 'menubar',
         'CFBundleDisplayName': 'OnionPress',
         'CFBundleIdentifier': 'press.onion.app',
-        'CFBundleVersion': '2.3.6',
-        'CFBundleShortVersionString': '2.3.6',
+        'CFBundleVersion': '2.3.7',
+        'CFBundleShortVersionString': '2.3.7',
         'LSUIElement': True,  # Run as menu bar app (no dock icon)
         'LSMultipleInstancesProhibited': True,
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
         'LSApplicationCategoryType': 'public.app-category.utilities',
     },
-    'packages': ['rumps', 'objc', 'AppKit'],
+    'packages': ['rumps', 'objc', 'AppKit', 'Quartz'],
     # CRITICAL: Local modules that menubar.py imports at runtime.
     # py2app cannot auto-detect these because it runs menubar.py via exec(),
     # not import. If you add a new local .py module, ADD IT HERE or the build

@@ -539,7 +539,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.3.3"
+        self.version = "2.3.7"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -654,7 +654,6 @@ class OnionPressApp(rumps.App):
         self.cellar_messages = []          # Messages received from OnionCellar
         self._cellar_alert_shown = False   # Whether we've shown the cellar alert icon
         self.is_cellar = False             # True if this instance is the OnionCellar
-        self.cellar_locked = True          # Whether the cellar is currently locked
         self._cellar_checked = False       # Whether cellar mode has been checked
         self._cellar_registration_started = False  # Whether registration thread is running
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
@@ -1749,21 +1748,11 @@ class OnionPressApp(rumps.App):
                     self._cellar_checked = True
                     if cellar.is_cellar_instance(self.onion_address):
                         self.is_cellar = True
-                        self.log("OnionCellar mode activated")
-                        cellar.start_cellar_poller(self)
+                        self.log("OnionCellar mode activated (poller runs in tor-polling container)")
                         self.update_menu()
                     elif not self._cellar_registration_started:
                         self._cellar_registration_started = True
                         cellar.start_registration_thread(self)
-
-                # OnionCellar: poll lock status and update menu
-                if self.is_cellar and self.is_ready:
-                    was_locked = self.cellar_locked
-                    self.cellar_locked = not cellar._is_cellar_unlocked(self)
-                    if was_locked != self.cellar_locked:
-                        status = "locked" if self.cellar_locked else "unlocked"
-                        self.log(f"OnionCellar: cellar is now {status}")
-                        self.update_menu()
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
@@ -1874,8 +1863,7 @@ class OnionPressApp(rumps.App):
             if state == "available":
                 self.icon = self.icon_running
                 if self.is_cellar:
-                    lock_icon = "Locked" if self.cellar_locked else "Unlocked"
-                    self.menu["Starting..."].title = f"OnionCellar [{lock_icon}]: {self.onion_address}"
+                    self.menu["Starting..."].title = f"OnionCellar: {self.onion_address}"
                 else:
                     self.menu["Starting..."].title = f"Address: {self.onion_address}"
                 self.menu["Start"].set_callback(None)
@@ -2692,6 +2680,12 @@ class OnionPressApp(rumps.App):
         if button_index == 0:
             # User confirmed — delete old keys so launcher regenerates
             self.log("User confirmed address prefix change — deleting old keys")
+
+            # Unregister old address from OnionCellar (it will never come back)
+            try:
+                cellar.unregister_from_cellar(self, content_address=current_hostname)
+            except Exception as e:
+                self.log(f"Cellar unregister failed (continuing): {e}")
 
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
@@ -3705,6 +3699,14 @@ License: AGPL v3"""
                 self.monitoring_tor_install = False
                 self.dismiss_setup_dialog()
 
+                # Unregister from OnionCellar before stopping (needs running containers)
+                if self.is_running:
+                    self.log("Uninstall: Unregistering from OnionCellar...")
+                    try:
+                        cellar.unregister_from_cellar(self)
+                    except Exception as e:
+                        self.log(f"Uninstall: cellar unregister failed (continuing): {e}")
+
                 # Stop the service (this will cancel any startup in progress)
                 self.log("Uninstall: Stopping services...")
                 subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
@@ -3758,7 +3760,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.3.3 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.3.7 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
