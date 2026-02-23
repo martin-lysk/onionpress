@@ -1,4 +1,17 @@
 #!/bin/sh
+
+# Polling-only mode: minimal Tor instance for cellar healthchecks.
+# No hidden services, no healthcheck server — just a SOCKS proxy.
+if [ "${POLLING_ONLY}" = "1" ]; then
+    mkdir -p /var/lib/tor/data
+    cat > /etc/tor/torrc <<EOF
+SocksPort 0.0.0.0:9050
+DataDirectory /var/lib/tor/data
+EOF
+    chown -R tor:tor /var/lib/tor
+    exec su-exec tor tor
+fi
+
 # Fix ownership on mounted volume (may be root-owned from previous goldy image)
 chown -R tor:tor /var/lib/tor/hidden_service
 chmod 700 /var/lib/tor/hidden_service

@@ -105,6 +105,10 @@ detect_cellar_mode() {
         docker compose exec -T tor chown -R tor:tor /var/lib/tor/hidden_service/cellar 2>/dev/null
         docker compose exec -d -T tor /cellar-redirect.sh 2>/dev/null
         log "OnionCellar: started redirect service on port 8082"
+        # Start dedicated polling Tor container (SOCKS-only, no hidden services)
+        # This keeps HSDir lookups for 50+ addresses off the main Tor instance
+        docker compose --profile cellar up -d tor-polling >> "$LOG_FILE" 2>&1
+        log "OnionCellar: started polling Tor container (onionpress-tor-polling)"
         return 0
     fi
     return 1
@@ -1076,8 +1080,8 @@ start_containers() {
 stop_containers() {
     log "Stopping OnionPress containers..."
     cd "$DOCKER_DIR"
-    # Stop cloudflared first if running (profile containers need --profile to be addressed)
-    docker compose --profile cloudflare down 2>&1 | tee -a "$LOG_FILE"
+    # Stop profile containers first (they need --profile to be addressed)
+    docker compose --profile cloudflare --profile cellar down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
 }
 

@@ -16,6 +16,9 @@
 #   # Custom split: 3 stay healthy, 2 will fail mid-test
 #   ./cellar-stress-test.sh --healthy 3 --failing 2
 #
+#   # Large test — register in batches of 10 to avoid overwhelming Tor
+#   ./cellar-stress-test.sh --total 50 --batch-size 10
+#
 #   # Monitor dashboard (run on the cellar machine)
 #   ./cellar-stress-test.sh --mode coordinator
 #
@@ -32,6 +35,7 @@ FAILING=""        # auto: half of total
 CELLAR_ADDR=""    # auto-detect from local tor container
 OUTPUT_DIR="./cellar-stress-results"
 CLEANUP=false
+BATCH_SIZE=0          # 0 = register all at once (no batching)
 STRESS_VERSION="stress-test"   # marker for cleanup
 BASE_PORT=9100                 # port range start inside worker-tor container
 
@@ -51,6 +55,7 @@ while [ $# -gt 0 ]; do
         --failing)     FAILING="$2"; shift 2 ;;
         --cellar-addr) CELLAR_ADDR="$2"; shift 2 ;;
         --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
+        --batch-size)  BATCH_SIZE="$2"; shift 2 ;;
         --cleanup)     CLEANUP=true; shift ;;
         -h|--help)
             sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
@@ -117,6 +122,13 @@ preflight() {
             exit 1
         fi
     done
+
+    # Cellar polling container should be running on the cellar machine
+    if docker_cmd inspect --format='{{.State.Running}}' onionpress-tor-polling 2>/dev/null | grep -q true; then
+        log "  onionpress-tor-polling is running (dedicated polling Tor)"
+    else
+        log "  WARNING: onionpress-tor-polling is not running — cellar polls will use main Tor instance"
+    fi
 
     log "Preflight OK"
 }
@@ -442,13 +454,14 @@ start_responders() {
 
 # ── Phase 3: Register with cellar ────────────────────────────────────────────
 
-register_workers() {
-    log "Phase 3: Registering ${TOTAL} workers with cellar..."
-
+# Register a range of workers [start, start+count)
+register_worker_range() {
+    local start="$1"
+    local count="$2"
     local registered=0
     local errors=0
 
-    for i in $(seq 0 $((TOTAL - 1))); do
+    for i in $(seq "$start" $((start + count - 1))); do
         local content_addr hc_addr secret_key public_key
         content_addr=$(cat "${OUTPUT_DIR}/worker${i}.content_addr" | tr -d '\r\n ')
         hc_addr=$(cat "${OUTPUT_DIR}/worker${i}.hc_addr" | tr -d '\r\n ')
@@ -466,13 +479,23 @@ register_workers() {
         fi
 
         # Brief delay between registrations to avoid overwhelming Tor SOCKS
-        if [ "$i" -lt $((TOTAL - 1)) ]; then
+        if [ "$i" -lt $((start + count - 1)) ]; then
             sleep 2
         fi
     done
 
-    log "Registration complete: ${registered} OK, ${errors} errors"
+    log "  Batch registered: ${registered} OK, ${errors} errors"
     if [ "$errors" -gt 0 ] && [ "$registered" -eq 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+register_workers() {
+    log "Phase 3: Registering ${TOTAL} workers with cellar..."
+    register_worker_range 0 "$TOTAL"
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
         log "ERROR: All registrations failed — aborting"
         exit 1
     fi
@@ -783,6 +806,9 @@ run_worker() {
     log "=== OnionCellar Stress Test ==="
     log "Cellar: ${CELLAR_ADDR}"
     log "Workers: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
+    if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
+        log "Batch size: ${BATCH_SIZE} (register+stabilize in waves)"
+    fi
     log "Worker Tor container: ${WORKER_TOR_CTR}"
     log "Output: ${OUTPUT_DIR}"
     echo ""
@@ -799,13 +825,45 @@ run_worker() {
     start_responders
     echo ""
 
-    # Phase 3: Register with cellar
-    register_workers
-    echo ""
+    # Phase 3+4: Register with cellar (batched if --batch-size set)
+    if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
+        local batch_start=0
+        local batch_num=1
+        local total_registered=0
+        while [ "$batch_start" -lt "$TOTAL" ]; do
+            local batch_count=$BATCH_SIZE
+            if [ $((batch_start + batch_count)) -gt "$TOTAL" ]; then
+                batch_count=$((TOTAL - batch_start))
+            fi
 
-    # Phase 4: Wait for healthy baseline
-    if ! wait_for_healthy "$TOTAL" "Phase 4" 600; then
-        log "WARNING: Not all workers became healthy, continuing anyway..."
+            log "Phase 3: Batch ${batch_num} — registering workers ${batch_start}..$(( batch_start + batch_count - 1 ))"
+            if ! register_worker_range "$batch_start" "$batch_count"; then
+                log "ERROR: Batch ${batch_num} all registrations failed — aborting"
+                exit 1
+            fi
+            total_registered=$((total_registered + batch_count))
+            echo ""
+
+            # Wait for this batch to become healthy before registering next
+            log "Phase 4: Waiting for batch ${batch_num} (${total_registered} total) to stabilize..."
+            if ! wait_for_healthy "$total_registered" "Phase 4 (batch ${batch_num})" 600; then
+                log "WARNING: Batch ${batch_num} not fully healthy, continuing to next batch..."
+            fi
+            echo ""
+
+            batch_start=$((batch_start + batch_count))
+            batch_num=$((batch_num + 1))
+        done
+        log "All ${TOTAL} workers registered in $((batch_num - 1)) batches"
+    else
+        # Register all at once
+        register_workers
+        echo ""
+
+        # Phase 4: Wait for healthy baseline
+        if ! wait_for_healthy "$TOTAL" "Phase 4" 600; then
+            log "WARNING: Not all workers became healthy, continuing anyway..."
+        fi
     fi
     echo ""
 

@@ -57,6 +57,18 @@ services:
     networks:
       - onionpress-network
 
+  tor-polling:
+    build: ./tor
+    container_name: onionpress-tor-polling
+    environment:
+      - POLLING_ONLY=1
+      - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
+    restart: unless-stopped
+    networks:
+      - onionpress-network
+    profiles:
+      - cellar
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: onionpress-cloudflared

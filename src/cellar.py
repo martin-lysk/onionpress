@@ -305,12 +305,12 @@ def _write_poll_updates(app, entries):
 
 def _check_healthcheck(app, healthcheck_address):
     """Check if a healthcheck .onion address is reachable. Returns True if healthy.
-    Uses curl in the wordpress container through Tor's SOCKS proxy, since wget
-    in the tor container cannot resolve .onion addresses (no SOCKS support)."""
+    Uses curl in the wordpress container through the dedicated polling Tor's SOCKS
+    proxy, keeping HSDir lookups off the main Tor instance that serves our onion."""
     ok, _ = _run_docker(app, [
         "exec", "onionpress-wordpress",
         "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-        "--socks5-hostname", "onionpress-tor:9050",
+        "--socks5-hostname", "onionpress-tor-polling:9050",
         "--max-time", "15",
         f"http://{healthcheck_address}/"
     ], timeout=25)
@@ -319,11 +319,11 @@ def _check_healthcheck(app, healthcheck_address):
 
 def _check_content(app, content_address):
     """Check if a content .onion address is reachable. Returns True if reachable.
-    Uses curl in the wordpress container through Tor's SOCKS proxy."""
+    Uses curl in the wordpress container through the dedicated polling Tor's SOCKS proxy."""
     ok, _ = _run_docker(app, [
         "exec", "onionpress-wordpress",
         "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-        "--socks5-hostname", "onionpress-tor:9050",
+        "--socks5-hostname", "onionpress-tor-polling:9050",
         "--max-time", "15",
         f"http://{content_address}/"
     ], timeout=25)
