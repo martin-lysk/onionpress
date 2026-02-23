@@ -1408,9 +1408,10 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Hostname mismatch: {hostname} != {self.onion_address}")
                 return False
 
-            # Check 2: Verify Tor has bootstrapped to 100%
-            # Use grep over full logs — "Bootstrapped 100%" is logged once per
-            # startup and can be pushed out of --tail 100 by HSDir query spam.
+            # Check 2: Verify Tor has bootstrapped
+            # Use full logs — the bootstrap message is logged once per startup
+            # and can be pushed out of --tail by HSDir query spam.
+            # Arti: "Sufficiently bootstrapped", C Tor: "Bootstrapped 100% (done)"
             bootstrap_result = subprocess.run(
                 [docker_bin, "logs", "onionpress-tor"],
                 capture_output=True,
@@ -1421,24 +1422,8 @@ class OnionPressApp(rumps.App):
                 env=docker_env
             )
 
-            if "Bootstrapped 100% (done)" not in bootstrap_result.stdout:
-                if log_result:
-                    self.log(f"✗ Tor not fully bootstrapped yet")
-                return False
-
-            # Check 3: Verify no critical errors in recent logs
-            recent_result = subprocess.run(
-                [docker_bin, "logs", "--tail", "50", "onionpress-tor"],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=5,
-                env=docker_env
-            )
-
-            tor_output = result.stdout + result.stderr
-            if "Bootstrapped 100% (done)" not in tor_output and "Sufficiently bootstrapped" not in tor_output:
+            tor_output = bootstrap_result.stdout + bootstrap_result.stderr
+            if "Sufficiently bootstrapped" not in tor_output and "Bootstrapped 100% (done)" not in tor_output:
                 if log_result:
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False

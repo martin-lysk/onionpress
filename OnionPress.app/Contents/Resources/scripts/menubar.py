@@ -1402,24 +1402,29 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Hostname mismatch: {hostname} != {self.onion_address}")
                 return False
 
-            # Check 2: Verify Tor has bootstrapped to 100%
-            result = subprocess.run(
-                [docker_bin, "logs", "--tail", "100", "onionpress-tor"],
+            # Check 2: Verify Tor has bootstrapped
+            # Use full logs — the bootstrap message is logged once per startup
+            # and can be pushed out of --tail by HSDir query spam.
+            # Arti: "Sufficiently bootstrapped", C Tor: "Bootstrapped 100% (done)"
+            bootstrap_result = subprocess.run(
+                [docker_bin, "logs", "onionpress-tor"],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                timeout=5,
+                timeout=10,
                 env=docker_env
             )
 
-            if "Bootstrapped 100% (done)" not in result.stdout:
+            tor_output = bootstrap_result.stdout + bootstrap_result.stderr
+            if "Sufficiently bootstrapped" not in tor_output and "Bootstrapped 100% (done)" not in tor_output:
                 if log_result:
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False
 
             # Check 3: Verify no critical errors in recent logs
-            if "ERROR" in result.stdout or "failed to publish" in result.stdout.lower():
+            # (Arti uses "ERROR" log level normally, so check for specific failure messages)
+            if "failed to publish" in tor_output.lower():
                 if log_result:
                     self.log(f"✗ Tor errors detected in logs")
                 return False
