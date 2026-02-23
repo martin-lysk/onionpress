@@ -1150,7 +1150,7 @@ wait_for_services() {
         # so we test the actual path: tor -> wordpress via Docker network)
         if [ "$onion_ready" = false ] && [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
             # Check Tor is bootstrapped
-            if docker compose logs tor 2>/dev/null | grep -q "Bootstrapped 100% (done)"; then
+            if docker compose logs --tail 100 tor 2>/dev/null | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
                 # Check WordPress is reachable from Tor container
                 if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
                     log "✓ Onion service ready: ${onion_addr}"
