@@ -75,7 +75,8 @@ PREVENT_SLEEP=yes
 # Default: 1 (1 GB RAM for the container VM)
 #
 # The Linux VM that runs WordPress, Tor, and MariaDB containers.
-# 1 GB is sufficient for normal use. Increase if you run many plugins
+# 1 GB is sufficient for normal use. OnionCellar instances auto-increase
+# to 5 GB on first detection. Increase manually if you run many plugins
 # or experience out-of-memory issues.
 #
 # Requires restart to take effect.

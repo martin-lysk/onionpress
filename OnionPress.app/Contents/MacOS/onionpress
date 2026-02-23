@@ -99,6 +99,27 @@ detect_cellar_mode() {
     if [ "$our_address" = "$cellar_address" ]; then
         export ONIONPRESS_CELLAR="1"
         log "OnionCellar mode activated (address: $our_address)"
+
+        # Cellar needs more memory for polling, takeover services, etc.
+        # If VM_MEMORY is below 5GB, bump it so the next restart gets more RAM.
+        local current_mem
+        current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+        current_mem="${current_mem:-1}"
+        if [ "$current_mem" -lt 5 ] 2>/dev/null; then
+            log "OnionCellar: VM_MEMORY is ${current_mem}GB, increasing to 5GB for cellar workload"
+            if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
+                sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
+            else
+                echo "VM_MEMORY=5" >> "$DATA_DIR/config"
+            fi
+            # Check if the running VM actually has less than 5GB
+            local vm_mem_kb
+            vm_mem_kb=$(docker compose exec -T tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
+            vm_mem_kb="${vm_mem_kb:-0}"
+            if [ "$vm_mem_kb" -lt 4500000 ] 2>/dev/null; then
+                log "OnionCellar: WARNING — VM is running with $(( vm_mem_kb / 1024 ))MB, restart OnionPress to apply 5GB"
+            fi
+        fi
         # Start cellar redirect service inside the tor container (port 8082)
         # This runs post-startup since ONIONPRESS_CELLAR wasn't set at container boot
         docker compose exec -T tor mkdir -p /var/lib/tor/hidden_service/cellar 2>/dev/null || true
@@ -190,8 +211,17 @@ detect_container_runtime() {
             else
                 # Start Colima if stopped
                 log "Starting bundled Colima..."
+
+                # Read VM memory from config so restarts honour changes
+                _restart_mem=1
+                if [ -f "$DATA_DIR/config" ]; then
+                    _cfg_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+                    [ -n "$_cfg_mem" ] && _restart_mem="$_cfg_mem"
+                fi
+
                 "$BIN_DIR/colima" start \
                     --mount "$DATA_DIR/shared:w" \
+                    --memory "$_restart_mem" \
                     >> "$LOG_FILE" 2>&1
                 if [ $? -eq 0 ]; then
                     echo "colima-bundled"
