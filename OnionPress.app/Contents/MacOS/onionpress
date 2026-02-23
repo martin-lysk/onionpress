@@ -1116,6 +1116,10 @@ start_containers() {
     # Update images if enabled in config
     update_images
 
+    # Pull pre-built images from GHCR (avoids local build when both image: and build: are set)
+    log "Pulling pre-built images..."
+    docker compose pull wordpress tor >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
+
     # Always start WordPress and DB first
     local max_attempts=3
     local attempt=1
