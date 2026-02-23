@@ -16,10 +16,11 @@ require_once __DIR__ . '/onionpress-cellar-crypto.php';
 require_once __DIR__ . '/onionpress-cellar-db.php';
 
 /**
- * Intercept POST /register early in the WordPress lifecycle.
+ * Intercept POST /register and POST /unregister early in the WordPress lifecycle.
  * This runs as an mu-plugin so it loads before themes and regular plugins.
  */
 add_action('muplugins_loaded', 'onionpress_cellar_handle_register');
+add_action('muplugins_loaded', 'onionpress_cellar_handle_unregister');
 
 function onionpress_cellar_handle_register() {
     // Only handle POST /register
@@ -169,6 +170,9 @@ function onionpress_cellar_handle_register() {
     file_put_contents("$keys_dir/hostname", $content_address . "\n");
     chmod("$keys_dir/hostname", 0600);
 
+    // Compute key_hash for future authentication (e.g. /unregister)
+    $key_hash = hash('sha256', $secret_key);
+
     // Update registry (SQLite — concurrent-safe, no more JSON corruption)
     $db = cellar_db_connect();
     cellar_db_ensure_schema($db);
@@ -182,12 +186,115 @@ function onionpress_cellar_handle_register() {
         'content_address' => $content_address,
         'healthcheck_address' => $healthcheck_address,
         'version' => $version,
+        'key_hash' => $key_hash,
     ]);
 
     onionpress_cellar_respond(200, [
         'registered' => true,
         'content_address' => $content_address,
         'message' => $found ? 'Registration updated' : 'Registration created',
+    ]);
+}
+
+/**
+ * Handle POST /unregister — remove an entry from the cellar registry.
+ *
+ * Request body: {"content_address": "xxx.onion", "proof": "<sha256 hex>"}
+ *
+ * Local requests (127.0.0.1, ::1, Docker network 172.x) skip proof verification.
+ * Remote requests must provide proof = sha256(secret_key_bytes) matching stored key_hash.
+ */
+function onionpress_cellar_handle_unregister() {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        return;
+    }
+
+    $request_uri = strtok($_SERVER['REQUEST_URI'], '?');
+    if ($request_uri !== '/unregister') {
+        return;
+    }
+
+    // Read and validate JSON body
+    $body = file_get_contents('php://input');
+    $data = json_decode($body, true);
+
+    if (!$data) {
+        onionpress_cellar_respond(400, ['error' => 'Invalid JSON']);
+        return;
+    }
+
+    if (empty($data['content_address'])) {
+        onionpress_cellar_respond(400, ['error' => 'Missing required field: content_address']);
+        return;
+    }
+
+    $content_address = $data['content_address'];
+
+    if (!preg_match('/^[a-z2-7]{56}\.onion$/', $content_address)) {
+        onionpress_cellar_respond(400, ['error' => 'Invalid content_address format']);
+        return;
+    }
+
+    // Look up entry in registry
+    $db = cellar_db_connect();
+    cellar_db_ensure_schema($db);
+    $entry = cellar_db_get_entry($db, $content_address);
+
+    if (!$entry) {
+        onionpress_cellar_respond(404, ['error' => 'Entry not found']);
+        return;
+    }
+
+    // Determine if this is a local request (skip proof)
+    $remote_addr = $_SERVER['REMOTE_ADDR'] ?? '';
+    $is_local = ($remote_addr === '127.0.0.1'
+        || $remote_addr === '::1'
+        || strpos($remote_addr, '172.') === 0);
+
+    if (!$is_local) {
+        // Remote request — require proof
+        $proof = $data['proof'] ?? '';
+        $stored_hash = $entry['key_hash'] ?? '';
+
+        if ($stored_hash === '' || $stored_hash === null) {
+            onionpress_cellar_respond(403, [
+                'error' => 'No key_hash on file — re-register first to enable remote unregister',
+            ]);
+            return;
+        }
+
+        if ($proof === '' || !hash_equals($stored_hash, $proof)) {
+            onionpress_cellar_respond(403, ['error' => 'Invalid proof']);
+            return;
+        }
+    }
+
+    $takeover_was_active = (bool)$entry['takeover_active'];
+
+    // Remove key files from cellar storage
+    $keys_dir = '/var/lib/onionpress/cellar/keys/' . $content_address;
+    if (is_dir($keys_dir)) {
+        $files = scandir($keys_dir);
+        if ($files !== false) {
+            foreach ($files as $f) {
+                if ($f !== '.' && $f !== '..') {
+                    unlink("$keys_dir/$f");
+                }
+            }
+        }
+        rmdir($keys_dir);
+    }
+
+    // Delete registry entry
+    cellar_db_delete_entry($db, $content_address);
+
+    // Note: if takeover was active, the caller must release the Arti config
+    // in the tor container separately (this PHP code runs inside the WordPress
+    // container and cannot exec into the tor container).
+    onionpress_cellar_respond(200, [
+        'unregistered' => true,
+        'content_address' => $content_address,
+        'takeover_was_active' => $takeover_was_active,
     ]);
 }
 

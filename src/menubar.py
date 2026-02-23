@@ -2693,6 +2693,12 @@ class OnionPressApp(rumps.App):
             # User confirmed — delete old keys so launcher regenerates
             self.log("User confirmed address prefix change — deleting old keys")
 
+            # Unregister old address from OnionCellar (it will never come back)
+            try:
+                cellar.unregister_from_cellar(self, content_address=current_hostname)
+            except Exception as e:
+                self.log(f"Cellar unregister failed (continuing): {e}")
+
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
                 env = os.environ.copy()
@@ -3704,6 +3710,14 @@ License: AGPL v3"""
                 # Stop any ongoing browser monitoring
                 self.monitoring_tor_install = False
                 self.dismiss_setup_dialog()
+
+                # Unregister from OnionCellar before stopping (needs running containers)
+                if self.is_running:
+                    self.log("Uninstall: Unregistering from OnionCellar...")
+                    try:
+                        cellar.unregister_from_cellar(self)
+                    except Exception as e:
+                        self.log(f"Uninstall: cellar unregister failed (continuing): {e}")
 
                 # Stop the service (this will cancel any startup in progress)
                 self.log("Uninstall: Stopping services...")

@@ -42,8 +42,15 @@ function cellar_db_ensure_schema($db) {
         last_healthcheck    TEXT,
         fail_count          INTEGER NOT NULL DEFAULT 0,
         takeover_active     INTEGER NOT NULL DEFAULT 0,
-        fast_poll_remaining INTEGER NOT NULL DEFAULT 0
+        fast_poll_remaining INTEGER NOT NULL DEFAULT 0,
+        key_hash            TEXT
     )');
+
+    // Migration: add key_hash column to existing tables
+    $cols = $db->query('PRAGMA table_info(registry)')->fetchAll(PDO::FETCH_COLUMN, 1);
+    if (!in_array('key_hash', $cols)) {
+        $db->exec('ALTER TABLE registry ADD COLUMN key_hash TEXT');
+    }
 }
 
 /**
@@ -117,12 +124,13 @@ function cellar_db_read_all($db) {
 function cellar_db_upsert_register($db, $data) {
     $now = gmdate('Y-m-d\TH:i:s\Z');
     $stmt = $db->prepare('INSERT INTO registry
-        (content_address, healthcheck_address, registered_at, version)
-        VALUES (:ca, :ha, :ra, :ver)
+        (content_address, healthcheck_address, registered_at, version, key_hash)
+        VALUES (:ca, :ha, :ra, :ver, :kh)
         ON CONFLICT(content_address) DO UPDATE SET
             healthcheck_address = :ha,
             registered_at = :ra,
             version = :ver,
+            key_hash = :kh,
             fail_count = 0,
             status = \'healthy\',
             fast_poll_remaining = 0');
@@ -131,6 +139,7 @@ function cellar_db_upsert_register($db, $data) {
         ':ha'  => $data['healthcheck_address'],
         ':ra'  => $now,
         ':ver' => $data['version'] ?? 'unknown',
+        ':kh'  => $data['key_hash'] ?? null,
     ]);
     // Return whether this was an insert or update
     return $db->query("SELECT changes()")->fetchColumn() > 0;
@@ -164,6 +173,30 @@ function cellar_db_batch_update_poll($db, $entries) {
     }
     $db->commit();
     return $updated;
+}
+
+/**
+ * Look up a single registry entry by content_address.
+ */
+function cellar_db_get_entry($db, $content_address) {
+    $stmt = $db->prepare('SELECT * FROM registry WHERE content_address = ?');
+    $stmt->execute([$content_address]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row) {
+        $row['fail_count'] = (int)$row['fail_count'];
+        $row['takeover_active'] = (int)$row['takeover_active'];
+        $row['fast_poll_remaining'] = (int)$row['fast_poll_remaining'];
+    }
+    return $row ?: null;
+}
+
+/**
+ * Delete a single entry by content_address.
+ */
+function cellar_db_delete_entry($db, $content_address) {
+    $stmt = $db->prepare('DELETE FROM registry WHERE content_address = ?');
+    $stmt->execute([$content_address]);
+    return $db->query("SELECT changes()")->fetchColumn() > 0;
 }
 
 /**
@@ -228,6 +261,16 @@ if (php_sapi_name() === 'cli' && isset($argv[0]) && realpath($argv[0]) === realp
                 echo json_encode(['ok' => true, 'updated' => $updated]) . "\n";
                 break;
 
+            case 'delete-entry':
+                $addr = $argv[2] ?? '';
+                if ($addr === '') {
+                    fwrite(STDERR, "Usage: delete-entry <content_address>\n");
+                    exit(1);
+                }
+                $deleted = cellar_db_delete_entry($db, $addr);
+                echo json_encode(['ok' => true, 'deleted' => $deleted]) . "\n";
+                break;
+
             case 'delete-by-version':
                 $version = $argv[2] ?? '';
                 if ($version === '') {
@@ -251,7 +294,7 @@ if (php_sapi_name() === 'cli' && isset($argv[0]) && realpath($argv[0]) === realp
 
             default:
                 fwrite(STDERR, "Usage: php onionpress-cellar-db.php <command>\n");
-                fwrite(STDERR, "Commands: init, read-all, batch-upsert-poll, delete-by-version, count, query-addresses\n");
+                fwrite(STDERR, "Commands: init, read-all, batch-upsert-poll, delete-entry, delete-by-version, count, query-addresses\n");
                 exit(1);
         }
     } catch (Exception $e) {

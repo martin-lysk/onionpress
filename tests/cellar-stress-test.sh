@@ -687,57 +687,40 @@ cleanup_stress_test() {
     done
     log "  Removed worker containers"
 
-    # Remove stress-test entries from cellar registry
-    docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" delete-by-version stress-test 2>/dev/null || true
-    log "  Cleaned registry"
-
-    # Get stress-test addresses for key/takeover cleanup
+    # Get stress-test addresses before unregistering
     local stress_addrs
     stress_addrs=$(docker_cmd exec onionpress-wordpress \
         php "$CELLAR_DB_PHP" query-addresses "WHERE version='stress-test'" 2>/dev/null) || true
 
-    # Remove encrypted key directories
+    local count=0
+    local released_arti=0
     if [ -n "$stress_addrs" ]; then
         for addr in $stress_addrs; do
             addr=$(echo "$addr" | tr -d '\r\n ')
             [ -z "$addr" ] && continue
-            docker_cmd exec onionpress-wordpress \
-                rm -rf "/var/lib/onionpress/cellar/keys/${addr}" 2>/dev/null || true
-        done
-    fi
-    log "  Removed key directories"
 
-    # Remove cellar Arti takeover entries
-    local removed_arti=0
-    if [ -n "$stress_addrs" ]; then
-        for addr in $stress_addrs; do
-            addr=$(echo "$addr" | tr -d '\r\n ')
-            [ -z "$addr" ] && continue
-            local marker="# cellar:${addr}"
-            if docker_cmd exec onionpress-tor grep -q "$marker" /etc/arti/arti.toml 2>/dev/null; then
-                docker_cmd exec onionpress-tor sh -c "
-                    awk -v marker='$marker' '
-                    BEGIN { skip = 0 }
-                    \$0 == marker { skip = 3; next }
-                    skip > 0 { skip--; next }
-                    { print }
-                    ' /etc/arti/arti.toml > /etc/arti/arti.toml.tmp && mv /etc/arti/arti.toml.tmp /etc/arti/arti.toml
-                " 2>/dev/null || true
-                # Remove keystore directory
-                local addr_prefix
-                addr_prefix=$(echo "$addr" | sed 's/\.onion$//' | cut -c1-16)
+            # POST /unregister — handles DB + key file cleanup
+            local resp
+            resp=$(docker_cmd exec onionpress-wordpress \
+                curl -s -X POST http://localhost:80/unregister \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+
+            # If takeover was active, release Arti config in tor container
+            if echo "$resp" | grep -q '"takeover_was_active":true'; then
                 docker_cmd exec onionpress-tor \
-                    rm -rf "/var/lib/arti/state/keystore/hss/cellar_${addr_prefix}" 2>/dev/null || true
-                removed_arti=$((removed_arti + 1))
+                    /cellar-tor-manager.sh release "$addr" 2>/dev/null || true
+                released_arti=$((released_arti + 1))
             fi
+
+            count=$((count + 1))
         done
     fi
 
-    if [ "$removed_arti" -gt 0 ]; then
-        # SIGHUP Arti to reload
-        docker_cmd exec onionpress-tor sh -c "kill -HUP \$(pgrep arti)" 2>/dev/null || true
-        log "  Removed ${removed_arti} Arti takeover entries, sent SIGHUP"
+    log "  Unregistered ${count} entries"
+
+    if [ "$released_arti" -gt 0 ]; then
+        log "  Released ${released_arti} Arti takeover entries"
     fi
 
     log "Cleanup complete"
@@ -873,48 +856,34 @@ run_cleanup() {
         return
     fi
 
-    # Delete stress-test entries from registry
-    docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" delete-by-version stress-test 2>/dev/null || true
-    log "Cleaned registry"
-
-    # Remove key directories
-    local removed_keys=0
+    # Unregister each entry via /unregister endpoint
+    local unregistered=0
+    local released_arti=0
     for addr in $stress_addrs; do
         addr=$(echo "$addr" | tr -d '\r\n ')
         [ -z "$addr" ] && continue
-        docker_cmd exec onionpress-wordpress \
-            rm -rf "/var/lib/onionpress/cellar/keys/${addr}" 2>/dev/null || true
-        removed_keys=$((removed_keys + 1))
-    done
-    log "Removed ${removed_keys} key directories"
 
-    # Remove Arti takeover entries
-    local removed_arti=0
-    for addr in $stress_addrs; do
-        addr=$(echo "$addr" | tr -d '\r\n ')
-        [ -z "$addr" ] && continue
-        local marker="# cellar:${addr}"
-        if docker_cmd exec onionpress-tor grep -q "$marker" /etc/arti/arti.toml 2>/dev/null; then
-            docker_cmd exec onionpress-tor sh -c "
-                awk -v marker='$marker' '
-                BEGIN { skip = 0 }
-                \$0 == marker { skip = 3; next }
-                skip > 0 { skip--; next }
-                { print }
-                ' /etc/arti/arti.toml > /etc/arti/arti.toml.tmp && mv /etc/arti/arti.toml.tmp /etc/arti/arti.toml
-            " 2>/dev/null || true
-            local addr_prefix
-            addr_prefix=$(echo "$addr" | sed 's/\.onion$//' | cut -c1-16)
+        # POST /unregister — handles DB + key file cleanup
+        local resp
+        resp=$(docker_cmd exec onionpress-wordpress \
+            curl -s -X POST http://localhost:80/unregister \
+            -H "Content-Type: application/json" \
+            -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+
+        # If takeover was active, release Arti config in tor container
+        if echo "$resp" | grep -q '"takeover_was_active":true'; then
             docker_cmd exec onionpress-tor \
-                rm -rf "/var/lib/arti/state/keystore/hss/cellar_${addr_prefix}" 2>/dev/null || true
-            removed_arti=$((removed_arti + 1))
+                /cellar-tor-manager.sh release "$addr" 2>/dev/null || true
+            released_arti=$((released_arti + 1))
         fi
+
+        unregistered=$((unregistered + 1))
     done
 
-    if [ "$removed_arti" -gt 0 ]; then
-        docker_cmd exec onionpress-tor sh -c "kill -HUP \$(pgrep arti)" 2>/dev/null || true
-        log "Removed ${removed_arti} Arti takeover entries, sent SIGHUP"
+    log "Unregistered ${unregistered} entries"
+
+    if [ "$released_arti" -gt 0 ]; then
+        log "Released ${released_arti} Arti takeover entries"
     fi
 
     echo ""

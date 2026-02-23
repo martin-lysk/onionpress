@@ -235,6 +235,78 @@ def start_registration_thread(app):
     return thread
 
 
+def unregister_from_cellar(app, content_address=None):
+    """
+    Unregister this instance from the OnionCellar.
+    Called during uninstall or address prefix change so the cellar stops
+    monitoring an address that will never come back.
+
+    Runs synchronously — caller should invoke from a background thread if needed.
+    Best-effort: logs failures but does not raise.
+    """
+    import hashlib
+
+    # Don't unregister the cellar from itself
+    if getattr(app, 'is_cellar', False):
+        return
+
+    # Check if we ever registered
+    status = _load_registration_status(app)
+    if not status.get("registered"):
+        app.log("OnionCellar: not registered, skipping unregister")
+        return
+
+    addr = content_address or status.get("content_address") or getattr(app, 'onion_address', None)
+    if not addr or not addr.endswith('.onion'):
+        app.log("OnionCellar: no content address for unregister")
+        return
+
+    app.log(f"Unregistering {addr} from OnionCellar...")
+
+    # Compute proof = sha256(secret_key_bytes) to authenticate the request
+    try:
+        import key_manager
+        secret_key_bytes = key_manager.extract_private_key()
+        proof = hashlib.sha256(secret_key_bytes).hexdigest()
+    except Exception as e:
+        app.log(f"OnionCellar: failed to extract key for unregister proof: {e}")
+        return
+
+    payload = json.dumps({
+        "content_address": addr,
+        "proof": proof,
+    })
+
+    ok, output = _run_docker(app, [
+        "exec", "onionpress-wordpress",
+        "curl", "-s", "-X", "POST",
+        "--socks5-hostname", "onionpress-tor:9050",
+        "-H", "Content-Type: application/json",
+        "-d", payload,
+        "--max-time", "30",
+        f"http://{CELLAR_ADDRESS}/unregister"
+    ], timeout=45)
+
+    if ok and output:
+        try:
+            resp = json.loads(output)
+            if resp.get("unregistered"):
+                app.log("OnionCellar: unregistered successfully")
+                _save_registration_status(app, {
+                    "registered": False,
+                    "unregistered_at": datetime.now(timezone.utc).isoformat(),
+                    "cellar_address": CELLAR_ADDRESS,
+                    "content_address": addr,
+                })
+                return
+            error_msg = resp.get("error", "unknown error")
+            app.log(f"OnionCellar: unregister rejected: {error_msg}")
+        except json.JSONDecodeError:
+            pass
+
+    app.log(f"OnionCellar: unregister failed (best-effort, continuing) — response: {output!r}")
+
+
 # ---------------------------------------------------------------------------
 # Cellar mode (runs on the OnionCellar instance)
 # ---------------------------------------------------------------------------
