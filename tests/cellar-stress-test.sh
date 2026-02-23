@@ -501,7 +501,7 @@ enable_workers() {
     local start="$1"
     local count="$2"
 
-    log "Re-enabling responders for workers ${start}..$(( start + count - 1 ))..."
+    log "Re-enabling responders and re-registering workers ${start}..$(( start + count - 1 ))..."
 
     for i in $(seq "$start" $((start + count - 1))); do
         local ctr_idx=$((i / PER_CTR))
@@ -510,13 +510,77 @@ enable_workers() {
         local cp=$((BASE_PORT + local_idx * 2))
         local hp=$((BASE_PORT + local_idx * 2 + 1))
 
+        # Re-enable HTTP responders
         docker_cmd exec "$ctr_name" \
             curl -s -X POST http://127.0.0.1:9000/enable \
             -H "Content-Type: application/json" \
             -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
+
+        # Re-register with cellar over Tor (like a real OnionPress restart).
+        # This triggers immediate release of the taken-over address.
+        docker_cmd exec -d "$ctr_name" \
+            python3 -c "
+import json, subprocess, sys
+with open('/worker-info.json') as f:
+    workers = json.load(f)
+w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
+if not w or not w.get('content_address'):
+    sys.exit(0)
+# Re-read PEM from keystore
+import base64
+nick = 'w${ctr_idx}_${local_idx}_content'
+pem_path = f'/var/lib/arti/state/keystore/hss/{nick}/ks_hs_id.ed25519_expanded_private'
+try:
+    with open(pem_path, 'rb') as f:
+        pem_b64 = base64.b64encode(f.read()).decode()
+except:
+    pem_b64 = ''
+# Parse raw keys from worker-info (bootstrap already extracted them)
+import struct
+with open(pem_path, 'rb') as f:
+    pem_data = f.read()
+lines = pem_data.decode().strip().splitlines()
+b64 = ''.join(l for l in lines if not l.startswith('-----'))
+blob = base64.b64decode(b64)
+pos = 15
+def rs(d, o):
+    ln = struct.unpack_from('!I', d, o)[0]
+    return d[o+4:o+4+ln], o+4+ln
+_, pos = rs(blob, pos)
+_, pos = rs(blob, pos)
+_, pos = rs(blob, pos)
+pos += 4
+pub_blob, pos = rs(blob, pos)
+_, pp = rs(pub_blob, 0)
+pubkey, _ = rs(pub_blob, pp)
+priv_blob, pos = rs(blob, pos)
+pp = 8
+_, pp = rs(priv_blob, pp)
+_, pp = rs(priv_blob, pp)
+privkey, _ = rs(priv_blob, pp)
+payload = json.dumps({
+    'content_address': w['content_address'],
+    'healthcheck_address': w['healthcheck_address'],
+    'secret_key': base64.b64encode(privkey).decode(),
+    'public_key': base64.b64encode(pubkey).decode(),
+    'arti_key_pem': pem_b64,
+    'version': 'stress-test',
+})
+subprocess.run([
+    'curl', '-s', '-X', 'POST',
+    '--socks5-hostname', '127.0.0.1:9050',
+    '-H', 'Content-Type: application/json',
+    '-d', payload,
+    '--max-time', '60',
+    'http://${CELLAR_ADDR}/register',
+], capture_output=True, timeout=75)
+print(f'Re-registered {w[\"content_address\"]}')
+" 2>/dev/null &
     done
 
-    log "Re-enabled ${count} workers"
+    # Wait briefly for the background re-registrations to start
+    wait
+    log "Re-enabled and re-registering ${count} workers over Tor"
 }
 
 wait_for_takeover() {
@@ -711,8 +775,9 @@ run_worker() {
         fi
         echo ""
 
-        # Phase 6: Recovery — re-enable the failed workers
-        log "Phase 6: Re-enabling ${FAILING} workers..."
+        # Phase 6: Recovery — workers come back online and re-register over Tor
+        # (just like a real OnionPress instance restarting)
+        log "Phase 6: Workers coming back online — re-enabling + re-registering over Tor..."
         enable_workers "$fail_start" "$FAILING"
         echo ""
 
