@@ -1421,6 +1421,33 @@ wait_for_services() {
 main() {
     case "${1:-start}" in
         start)
+            # Pre-check: if cellar key is imported, ensure VM has 5GB
+            local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+            if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ]; then
+                local current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+                if [ -z "$current_mem" ] || [ "$current_mem" -lt 5 ] 2>/dev/null; then
+                    log "Cellar key detected — setting VM_MEMORY=5"
+                    mkdir -p "$DATA_DIR"
+                    if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
+                        sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
+                    else
+                        echo "VM_MEMORY=5" >> "$DATA_DIR/config"
+                    fi
+                    # If Colima is already running, restart it with 5GB
+                    if "$BIN_DIR/colima" status >/dev/null 2>&1; then
+                        log "Cellar key detected — restarting VM with 5GB"
+                        cd "$DOCKER_DIR"
+                        docker compose --profile cloudflare --profile cellar down >> "$LOG_FILE" 2>&1 || true
+                        "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1 || true
+                        "$BIN_DIR/colima" start \
+                            --mount "$DATA_DIR/shared:w" \
+                            --memory 5 \
+                            >> "$LOG_FILE" 2>&1
+                        log "Cellar: VM restarted with 5GB"
+                    fi
+                fi
+            fi
+
             # Detect container runtime
             if ! RUNTIME=$(detect_container_runtime); then
                 install_docker

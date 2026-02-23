@@ -98,6 +98,18 @@ initialize_colima() {
                 VM_MEMORY="$config_mem"
             fi
         fi
+        # Pre-check: if cellar key is imported, start with 5GB to avoid a restart
+        local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+        if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
+            log "Cellar key detected in launcher — starting VM with 5GB"
+            VM_MEMORY=5
+            # Persist to config so subsequent starts also use 5GB
+            if [ -f "$DATA_DIR/config" ] && grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
+                sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
+            else
+                echo "VM_MEMORY=5" >> "$DATA_DIR/config"
+            fi
+        fi
         # Create minimal shared directory to avoid Downloads folder permission prompt
         mkdir -p "$DATA_DIR/shared"
         if [ "$HOST_ARCH" = "arm64" ]; then
@@ -136,9 +148,24 @@ initialize_colima() {
 
     # Ensure Colima is running
     if ! "$BIN_DIR/colima" status >/dev/null 2>&1; then
+        # Read VM memory from config (default: 1 GB)
+        local vm_mem=1
+        if [ -f "$DATA_DIR/config" ]; then
+            local cfg_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+            if [ ! -z "$cfg_mem" ]; then
+                vm_mem="$cfg_mem"
+            fi
+        fi
+        # Pre-check: if cellar key exists, ensure 5GB
+        local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+        if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ] && [ "$vm_mem" -lt 5 ]; then
+            log "Cellar key detected in launcher — starting VM with 5GB"
+            vm_mem=5
+        fi
         log "Starting Colima VM..."
         "$BIN_DIR/colima" start \
             --mount "$DATA_DIR/shared:w" \
+            --memory "$vm_mem" \
             >> "$LOG_FILE" 2>&1
     fi
 }

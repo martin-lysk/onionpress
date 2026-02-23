@@ -3577,15 +3577,19 @@ License: AGPL v3"""
                 self.stop_onion_proxy()
                 self.stop_caffeinate()
 
-                # Delete Colima VM (cleaner than pkill, properly removes VM)
+                # Stop and delete Colima VM
                 # Only affects OnionPress instance, not system Colima
-                self.log("Uninstall: Deleting Colima VM...")
+                self.log("Uninstall: Stopping Colima VM...")
                 colima_bin = os.path.join(self.bin_dir, "colima")
                 env = os.environ.copy()
                 env["COLIMA_HOME"] = self.colima_home
                 env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
                 env["LIMA_INSTANCE"] = "onionpress"
+                subprocess.run([colima_bin, "stop", "-f"], capture_output=True, timeout=60, env=env)
+                self.log("Uninstall: Deleting Colima VM...")
                 subprocess.run([colima_bin, "delete", "-f"], capture_output=True, timeout=60, env=env)
+                # Kill any orphaned colima/lima processes as a fallback
+                subprocess.run(["pkill", "-f", f"{self.colima_home}"], capture_output=True, timeout=10)
                 # Note: Docker volumes lived inside the Colima VM and are deleted with it
 
                 # Step 3: Remove data directory (but keep it until after we show dialog)
