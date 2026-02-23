@@ -110,8 +110,34 @@ def register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
         return f'{{"error": "{e}"}}'
 
 
+def wait_for_socks():
+    """Wait for Arti's SOCKS proxy to be ready before attempting registration."""
+    print("Waiting for Arti SOCKS proxy to be ready...", flush=True)
+    for attempt in range(120):  # up to 4 minutes
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--socks5-hostname", "127.0.0.1:9050",
+                 "--max-time", "10",
+                 f"http://{CELLAR_ADDR}/"],
+                capture_output=True, text=True, timeout=15,
+            )
+            # Any response (even error) means SOCKS is working and Tor is connected
+            if result.returncode == 0:
+                print("SOCKS proxy ready", flush=True)
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+    print("WARNING: SOCKS proxy not ready after 4 minutes", flush=True)
+    return False
+
+
 def main():
     workers = []
+
+    # Wait for Arti SOCKS to be functional before registering any workers
+    wait_for_socks()
 
     for i in range(NUM_WORKERS):
         content_nick = f"w{CONTAINER_IDX}_{i}_content"
@@ -178,16 +204,21 @@ def main():
         public_b64 = base64.b64encode(pubkey).decode()
         pem_b64 = base64.b64encode(pem_data).decode()
 
-        # Self-register with cellar over Tor
+        # Self-register with cellar over Tor (retry up to 3 times)
         print(f"[worker {i}] Registering with cellar over Tor...", flush=True)
-        result = register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
-
         ok = False
-        try:
-            resp = json.loads(result)
-            ok = resp.get("registered", False)
-        except Exception:
-            pass
+        for attempt in range(3):
+            result = register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
+            try:
+                resp = json.loads(result)
+                ok = resp.get("registered", False)
+            except Exception:
+                pass
+            if ok:
+                break
+            if attempt < 2:
+                print(f"[worker {i}] Retry {attempt + 1}...", flush=True)
+                time.sleep(5)
 
         status = "OK" if ok else f"FAILED: {result[:200]}"
         print(f"[worker {i}] Registration: {status}", flush=True)

@@ -227,6 +227,10 @@ set -e
 # Install Python + curl (Arti image is Debian trixie-slim)
 apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
 
+# Fix ownership on config file (docker cp sets host UID)
+chown root:root /etc/arti/arti.toml
+chmod 644 /etc/arti/arti.toml
+
 # Prepare Arti state dirs
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
 chown -R arti:arti /var/lib/arti
@@ -316,10 +320,16 @@ print(sum(1 for x in w if x.get('registered')))
             fi
         done
 
+        # Also check cellar registry for real-time registration count
+        local db_count
+        db_count=$(docker_cmd exec onionpress-wordpress \
+            php "$CELLAR_DB_PHP" count "WHERE version='stress-test'" 2>/dev/null | tr -d ' \n\r')
+        [ -n "$db_count" ] && registered_count=$db_count
+
         local now
         now=$(date +%s)
-        if [ $((now - last_status)) -ge 15 ]; then
-            log "  Bootstrap: ${ready_count}/${NUM_CONTAINERS} containers done, ${registered_count} workers registered"
+        if [ $((now - last_status)) -ge 10 ]; then
+            log "  Bootstrap: ${ready_count}/${NUM_CONTAINERS} containers done, ${registered_count}/${TOTAL} workers registered"
             last_status=$now
         fi
 
