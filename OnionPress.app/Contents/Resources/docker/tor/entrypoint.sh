@@ -8,6 +8,12 @@ mkdir -p /var/lib/arti/cache /var/lib/arti/state
 chown -R arti:arti /var/lib/arti
 chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
+# Polling-only mode: just run Arti as a SOCKS proxy with no onion services
+if [ "${POLLING_ONLY}" = "1" ]; then
+    echo "Polling-only mode: starting Arti SOCKS proxy (no onion services)..."
+    exec su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml"
+fi
+
 # Create compat directories for hostname files
 mkdir -p /var/lib/tor/hidden_service/wordpress
 mkdir -p /var/lib/tor/hidden_service/healthcheck

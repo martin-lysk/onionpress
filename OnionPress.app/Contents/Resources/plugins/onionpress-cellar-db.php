@@ -110,7 +110,9 @@ function cellar_db_read_all($db) {
 
 /**
  * Insert or update a registration (called from the /register endpoint).
- * Only touches registration-time fields; poll fields are left alone on update.
+ * On re-registration: resets fail_count and status to healthy.
+ * If the entry was taken over, the poller detects takeover_active=1 + status='healthy'
+ * and does an immediate release. Registration over Tor proves the instance is alive.
  */
 function cellar_db_upsert_register($db, $data) {
     $now = gmdate('Y-m-d\TH:i:s\Z');
@@ -120,7 +122,10 @@ function cellar_db_upsert_register($db, $data) {
         ON CONFLICT(content_address) DO UPDATE SET
             healthcheck_address = :ha,
             registered_at = :ra,
-            version = :ver');
+            version = :ver,
+            fail_count = 0,
+            status = \'healthy\',
+            fast_poll_remaining = 0');
     $stmt->execute([
         ':ca'  => $data['content_address'],
         ':ha'  => $data['healthcheck_address'],

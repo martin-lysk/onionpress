@@ -1,28 +1,34 @@
 #!/bin/bash
-# OnionCellar Stress Test — Real Onion Services
-# Spins up a separate "worker Tor" container with its own hidden services,
-# registers them with the cellar, then tests healthy→failing→takeover→recovery.
+# OnionCellar Stress Test — Real Arti Onion Services
 #
 # Architecture:
-#   - Worker Tor container: runs worker hidden services + socat responders
-#   - Cellar Tor container: never modified by this script (only cellar-tor-manager.sh
-#     writes to its torrc during takeover/release)
-#   - This script: reads cellar registry + torrc counts, never writes cellar torrc
+#   - Worker containers: each runs Arti with N real onion services + a single
+#     Python HTTP server handling all ports (replaces per-worker socat processes).
+#   - Each worker self-registers with the cellar over Tor, just like a real
+#     OnionPress instance.
+#   - Cellar Tor container: never modified by this script.
+#   - This script: orchestrates containers, monitors dashboard, controls failures.
+#
+# Scaling:
+#   - Each worker container handles --per-ctr workers (default 50).
+#   - For 1000 workers: 20 containers × 50 workers each.
+#   - Only 1 docker exec -d per container (vs 2 per worker in old architecture).
+#   - macOS process limit is no longer a bottleneck.
 #
 # Usage:
-#   # Quick test — 5 workers (10 onion services: 5 content + 5 healthcheck)
+#   # Quick test — 5 workers in 1 container
 #   ./cellar-stress-test.sh --total 5
 #
-#   # Custom split: 3 stay healthy, 2 will fail mid-test
-#   ./cellar-stress-test.sh --healthy 3 --failing 2
+#   # Scale test — 100 workers across 2 containers
+#   ./cellar-stress-test.sh --total 100 --per-ctr 50
 #
-#   # Large test — register in batches of 10 to avoid overwhelming Tor
-#   ./cellar-stress-test.sh --total 50 --batch-size 10
+#   # Big test — 1000 workers across 20 containers, start 5 at a time
+#   ./cellar-stress-test.sh --total 1000 --per-ctr 50 --batch-size 5
 #
-#   # Monitor dashboard (run on the cellar machine)
+#   # Monitor dashboard
 #   ./cellar-stress-test.sh --mode coordinator
 #
-#   # Clean up stress-test entries
+#   # Clean up
 #   ./cellar-stress-test.sh --cleanup
 
 set -euo pipefail
@@ -35,16 +41,14 @@ FAILING=""        # auto: half of total
 CELLAR_ADDR=""    # auto-detect from local tor container
 OUTPUT_DIR="./cellar-stress-results"
 CLEANUP=false
-BATCH_SIZE=0          # 0 = register all at once (no batching)
-STRESS_VERSION="stress-test"   # marker for cleanup
-BASE_PORT=9100                 # port range start inside worker-tor container
+PER_CTR=50        # workers per container
+BATCH_SIZE=0      # 0 = start all containers at once
+STRESS_VERSION="stress-test"
+BASE_PORT=9100    # port range start inside each container
 
 DATA_DIR="$HOME/.onionpress"
 DOCKER_HOST_SOCK="unix://${DATA_DIR}/colima/default/docker.sock"
-
-# Worker Tor container name
-WORKER_TOR_CTR="stress-worker-tor"
-WORKER_TOR_IMAGE="alpine:latest"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -53,6 +57,7 @@ while [ $# -gt 0 ]; do
         --total)       TOTAL="$2"; shift 2 ;;
         --healthy)     HEALTHY="$2"; shift 2 ;;
         --failing)     FAILING="$2"; shift 2 ;;
+        --per-ctr)     PER_CTR="$2"; shift 2 ;;
         --cellar-addr) CELLAR_ADDR="$2"; shift 2 ;;
         --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
         --batch-size)  BATCH_SIZE="$2"; shift 2 ;;
@@ -77,13 +82,15 @@ else
     TOTAL=$((HEALTHY + FAILING))
 fi
 
+# Compute number of containers
+NUM_CONTAINERS=$(( (TOTAL + PER_CTR - 1) / PER_CTR ))
+
 if [ "$TOTAL" -lt 1 ]; then
     echo "ERROR: --total must be at least 1"
     exit 1
 fi
 
 # ── Docker helper ─────────────────────────────────────────────────────────────
-# Prefer the docker bundled with OnionPress.app
 DOCKER_BIN="docker"
 if [ -x "/Applications/OnionPress.app/Contents/Resources/bin/docker" ]; then
     DOCKER_BIN="/Applications/OnionPress.app/Contents/Resources/bin/docker"
@@ -108,14 +115,12 @@ log_json() {
 preflight() {
     log "Preflight checks..."
 
-    # Docker reachable?
     if ! docker_cmd info >/dev/null 2>&1; then
         echo "ERROR: Cannot reach Docker (is Colima running?)"
         echo "  Expected socket: $DOCKER_HOST_SOCK"
         exit 1
     fi
 
-    # Required containers running?
     for ctr in onionpress-tor onionpress-wordpress; do
         if ! docker_cmd inspect --format='{{.State.Running}}' "$ctr" 2>/dev/null | grep -q true; then
             echo "ERROR: Container $ctr is not running"
@@ -123,222 +128,245 @@ preflight() {
         fi
     done
 
-    # Cellar polling container should be running on the cellar machine
     if docker_cmd inspect --format='{{.State.Running}}' onionpress-tor-polling 2>/dev/null | grep -q true; then
         log "  onionpress-tor-polling is running (dedicated polling Tor)"
     else
-        log "  WARNING: onionpress-tor-polling is not running — cellar polls will use main Tor instance"
+        log "  WARNING: onionpress-tor-polling is not running"
     fi
+
+    # Get the Arti image from the running tor container
+    ARTI_IMAGE=$(docker_cmd inspect --format='{{.Config.Image}}' onionpress-tor 2>/dev/null)
+    if [ -z "$ARTI_IMAGE" ]; then
+        echo "ERROR: Cannot determine Arti image from onionpress-tor container"
+        exit 1
+    fi
+    log "  Arti image: $ARTI_IMAGE"
 
     log "Preflight OK"
 }
 
 # ── Auto-detect cellar address ────────────────────────────────────────────────
-# Known cellar address (must match CELLAR_ADDRESS in src/cellar.py)
 KNOWN_CELLAR_ADDR="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
 
 detect_cellar_addr() {
     if [ -n "$CELLAR_ADDR" ]; then
         return
     fi
-    # On the cellar machine itself, auto-detect confirms we're the cellar
-    local local_addr
-    local_addr=$(docker_cmd exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-    if [ "$local_addr" = "$KNOWN_CELLAR_ADDR" ]; then
-        CELLAR_ADDR="$KNOWN_CELLAR_ADDR"
-    else
-        # On a worker machine, use the known cellar address
-        CELLAR_ADDR="$KNOWN_CELLAR_ADDR"
-        log "Worker machine detected — targeting cellar at $CELLAR_ADDR"
-    fi
+    CELLAR_ADDR="$KNOWN_CELLAR_ADDR"
     log "Cellar address: $CELLAR_ADDR"
 }
 
-# ── Worker Tor container management ──────────────────────────────────────────
-# Spins up a separate Tor container for worker hidden services.
-# This keeps the cellar's torrc completely untouched.
-
-# Find the OnionPress Docker network
+# ── Docker network ────────────────────────────────────────────────────────────
 get_onionpress_network() {
     docker_cmd inspect onionpress-tor --format='{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null
 }
 
-start_worker_tor() {
-    log "Starting worker Tor container (${WORKER_TOR_CTR})..."
+# ── Worker container management ───────────────────────────────────────────────
 
-    # Remove any leftover container
-    docker_cmd rm -f "$WORKER_TOR_CTR" 2>/dev/null || true
+# Start a single worker container with Arti + Python HTTP server.
+# Each container handles $workers_in_ctr onion service pairs.
+start_worker_container() {
+    local idx="$1"
+    local workers_in_ctr="$2"
+    local ctr_name="stress-worker-${idx}"
+    local network="$3"
 
-    # Get the OnionPress network so worker-tor can reach the Tor network
+    log "  Starting container ${ctr_name} (${workers_in_ctr} workers)..."
+
+    # Remove leftover
+    docker_cmd rm -f "$ctr_name" 2>/dev/null || true
+
+    # Generate arti.toml for this container
+    local arti_conf="${OUTPUT_DIR}/${ctr_name}-arti.toml"
+    cat > "$arti_conf" << 'TOML_HEAD'
+[proxy]
+socks_listen = "127.0.0.1:9050"
+
+[storage]
+cache_dir = "/var/lib/arti/cache"
+state_dir = "/var/lib/arti/state"
+
+[storage.keystore]
+enabled = true
+TOML_HEAD
+
+    for i in $(seq 0 $((workers_in_ctr - 1))); do
+        local cp=$((BASE_PORT + i * 2))
+        local hp=$((BASE_PORT + i * 2 + 1))
+        cat >> "$arti_conf" << EOF
+
+[onion_services."w${idx}_${i}_content"]
+enabled = true
+proxy_ports = [["80", "127.0.0.1:${cp}"]]
+
+[onion_services."w${idx}_${i}_hc"]
+enabled = true
+proxy_ports = [["80", "127.0.0.1:${hp}"]]
+EOF
+    done
+
+    # Start container with sleep (we'll exec the real startup after copying files)
+    docker_cmd run -d \
+        --name "$ctr_name" \
+        --network "$network" \
+        --entrypoint sh \
+        "$ARTI_IMAGE" \
+        -c "sleep infinity" >/dev/null 2>&1
+
+    # Copy files into container
+    docker_cmd cp "$arti_conf" "${ctr_name}:/etc/arti/arti.toml"
+    docker_cmd cp "${SCRIPT_DIR}/stress/worker-server.py" "${ctr_name}:/worker-server.py"
+    docker_cmd cp "${SCRIPT_DIR}/stress/worker-bootstrap.py" "${ctr_name}:/worker-bootstrap.py"
+
+    # Generate startup script
+    local startup="${OUTPUT_DIR}/${ctr_name}-start.sh"
+    cat > "$startup" << STARTEOF
+#!/bin/sh
+set -e
+
+# Install Python + curl (Arti image is Debian trixie-slim)
+apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
+
+# Prepare Arti state dirs
+mkdir -p /var/lib/arti/cache /var/lib/arti/state
+chown -R arti:arti /var/lib/arti
+chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
+
+# Start Python HTTP server (single process handles all ${workers_in_ctr} workers)
+python3 /worker-server.py ${BASE_PORT} ${workers_in_ctr} &
+
+# Start Arti
+su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+ARTI_PID=\$!
+
+# Wait for Arti keys, then self-register with cellar over Tor
+python3 /worker-bootstrap.py "${CELLAR_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} &
+
+wait \$ARTI_PID
+STARTEOF
+    chmod +x "$startup"
+    docker_cmd cp "$startup" "${ctr_name}:/start.sh"
+
+    # Launch the startup script (single docker exec -d per container)
+    docker_cmd exec -d "$ctr_name" sh /start.sh
+}
+
+# Start all worker containers, optionally in batches.
+start_all_workers() {
     local network
     network=$(get_onionpress_network)
     if [ -z "$network" ]; then
         log "ERROR: Could not determine OnionPress Docker network"
         exit 1
     fi
-    log "  Docker network: $network"
+    log "Docker network: $network"
 
-    # Build the worker torrc with all worker hidden services
-    local worker_torrc="${OUTPUT_DIR}/worker-torrc"
-    cat > "$worker_torrc" << 'TORRC_HEAD'
-SocksPort 0
-DataDirectory /var/lib/tor/data
-TORRC_HEAD
+    local remaining=$TOTAL
+    local idx=0
 
-    for i in $(seq 0 $((TOTAL - 1))); do
-        local content_port=$((BASE_PORT + i * 2))
-        local hc_port=$((BASE_PORT + i * 2 + 1))
-        cat >> "$worker_torrc" << EOF
-
-HiddenServiceDir /var/lib/tor/worker${i}-content
-HiddenServicePort 80 127.0.0.1:${content_port}
-HiddenServiceNumIntroductionPoints 3
-HiddenServiceDir /var/lib/tor/worker${i}-healthcheck
-HiddenServicePort 80 127.0.0.1:${hc_port}
-HiddenServiceNumIntroductionPoints 3
-EOF
-    done
-
-    # Read the torrc content for embedding in the run command
-    local torrc_content
-    torrc_content=$(cat "$worker_torrc")
-
-    # Start the container: install tor+socat, write torrc, then run Tor
-    docker_cmd run -d \
-        --name "$WORKER_TOR_CTR" \
-        --network "$network" \
-        "$WORKER_TOR_IMAGE" \
-        sh -c "
-            apk add --no-cache tor socat >/dev/null 2>&1
-            mkdir -p /etc/tor /var/lib/tor /var/lib/tor/data
-            cat > /etc/tor/torrc << 'EMBEDDED_TORRC'
-${torrc_content}
-EMBEDDED_TORRC
-            chown -R tor:tor /var/lib/tor
-            chmod 700 /var/lib/tor
-            exec tor -f /etc/tor/torrc --User tor
-        " >/dev/null 2>&1
-
-    # Wait for Tor to bootstrap
-    log "  Waiting for worker Tor to bootstrap..."
-    local deadline=$(($(date +%s) + 120))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        if docker_cmd logs "$WORKER_TOR_CTR" 2>&1 | grep -q "Bootstrapped 100%"; then
-            log "  Worker Tor bootstrapped"
-            break
+    while [ "$remaining" -gt 0 ]; do
+        local workers_in_ctr=$PER_CTR
+        if [ "$workers_in_ctr" -gt "$remaining" ]; then
+            workers_in_ctr=$remaining
         fi
-        sleep 2
+
+        start_worker_container "$idx" "$workers_in_ctr" "$network"
+
+        remaining=$((remaining - workers_in_ctr))
+        idx=$((idx + 1))
+
+        # Batch staggering: wait between batches of containers
+        if [ "$BATCH_SIZE" -gt 0 ] && [ $((idx % BATCH_SIZE)) -eq 0 ] && [ "$remaining" -gt 0 ]; then
+            log "  Batch of ${BATCH_SIZE} containers started, waiting 30s before next batch..."
+            sleep 30
+        fi
     done
 
-    if ! docker_cmd logs "$WORKER_TOR_CTR" 2>&1 | grep -q "Bootstrapped 100%"; then
-        log "ERROR: Worker Tor failed to bootstrap within 120s"
-        docker_cmd logs --tail 20 "$WORKER_TOR_CTR" 2>&1
-        exit 1
-    fi
+    log "Started ${NUM_CONTAINERS} worker containers"
 }
 
-# Wait for all worker hostname files to appear
-wait_for_worker_hostnames() {
-    log "  Waiting for worker hostname files..."
-    local deadline=$(($(date +%s) + 120))
+# Wait for all workers to bootstrap (register with cellar over Tor).
+wait_for_bootstrap() {
+    local timeout_secs="${1:-900}"
+    log "Waiting for all workers to bootstrap and register (timeout: ${timeout_secs}s)..."
+
+    local deadline=$(($(date +%s) + timeout_secs))
+    local last_status=0
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local all_ready=true
-        for i in $(seq 0 $((TOTAL - 1))); do
-            if ! docker_cmd exec "$WORKER_TOR_CTR" test -f "/var/lib/tor/worker${i}-content/hostname" 2>/dev/null; then
+        local ready_count=0
+        local registered_count=0
+
+        for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
+            local ctr_name="stress-worker-${idx}"
+            if docker_cmd exec "$ctr_name" test -f /worker-info.json 2>/dev/null; then
+                ready_count=$((ready_count + 1))
+                # Count registered workers in this container
+                local reg
+                reg=$(docker_cmd exec "$ctr_name" python3 -c "
+import json
+with open('/worker-info.json') as f:
+    w = json.load(f)
+print(sum(1 for x in w if x.get('registered')))
+" 2>/dev/null || echo 0)
+                registered_count=$((registered_count + reg))
+            else
                 all_ready=false
-                break
-            fi
-            if ! docker_cmd exec "$WORKER_TOR_CTR" test -f "/var/lib/tor/worker${i}-healthcheck/hostname" 2>/dev/null; then
-                all_ready=false
-                break
             fi
         done
 
+        local now
+        now=$(date +%s)
+        if [ $((now - last_status)) -ge 15 ]; then
+            log "  Bootstrap: ${ready_count}/${NUM_CONTAINERS} containers done, ${registered_count} workers registered"
+            last_status=$now
+        fi
+
         if [ "$all_ready" = true ]; then
+            log "All containers bootstrapped: ${registered_count} workers registered"
             return 0
         fi
-        sleep 2
+
+        sleep 5
     done
 
-    log "ERROR: Timed out waiting for worker hostname files"
+    log "WARNING: Bootstrap timed out — some containers not ready"
     return 1
 }
 
-# Extract worker addresses and keys
-extract_worker_info() {
-    for i in $(seq 0 $((TOTAL - 1))); do
-        local content_addr hc_addr secret_key_b64 public_key_b64
-        content_addr=$(docker_cmd exec "$WORKER_TOR_CTR" cat "/var/lib/tor/worker${i}-content/hostname" | tr -d '\r\n ')
-        hc_addr=$(docker_cmd exec "$WORKER_TOR_CTR" cat "/var/lib/tor/worker${i}-healthcheck/hostname" | tr -d '\r\n ')
-        secret_key_b64=$(docker_cmd exec "$WORKER_TOR_CTR" sh -c "cat '/var/lib/tor/worker${i}-content/hs_ed25519_secret_key' | tail -c 64 | base64 -w0 2>/dev/null || cat '/var/lib/tor/worker${i}-content/hs_ed25519_secret_key' | tail -c 64 | base64")
-        public_key_b64=$(docker_cmd exec "$WORKER_TOR_CTR" sh -c "cat '/var/lib/tor/worker${i}-content/hs_ed25519_public_key' | base64 -w0 2>/dev/null || cat '/var/lib/tor/worker${i}-content/hs_ed25519_public_key' | base64")
+# Extract all worker info from containers into local files.
+extract_all_worker_info() {
+    log "Extracting worker info from containers..."
+    local total_registered=0
 
-        echo "${content_addr}" > "${OUTPUT_DIR}/worker${i}.content_addr"
-        echo "${hc_addr}" > "${OUTPUT_DIR}/worker${i}.hc_addr"
-        echo "${secret_key_b64}" > "${OUTPUT_DIR}/worker${i}.secret_key"
-        echo "${public_key_b64}" > "${OUTPUT_DIR}/worker${i}.public_key"
+    for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
+        local ctr_name="stress-worker-${idx}"
+        docker_cmd exec "$ctr_name" cat /worker-info.json > "${OUTPUT_DIR}/worker-${idx}-info.json" 2>/dev/null || true
 
-        log "  Worker ${i}: content=${content_addr} hc=${hc_addr}"
+        # Count registered
+        local reg
+        reg=$(python3 -c "
+import json, sys
+try:
+    with open('${OUTPUT_DIR}/worker-${idx}-info.json') as f:
+        w = json.load(f)
+    print(sum(1 for x in w if x.get('registered')))
+except: print(0)
+" 2>/dev/null || echo 0)
+        total_registered=$((total_registered + reg))
     done
+
+    log "Total registered workers: ${total_registered}"
 }
 
-# ── Register a single address with the cellar ────────────────────────────────
-# Uses curl inside the wordpress container through tor's SOCKS proxy
-register_address() {
-    local content_addr="$1"
-    local hc_addr="$2"
-    local secret_key="$3"
-    local public_key="$4"
-
-    local payload
-    payload=$(printf '{"content_address":"%s","healthcheck_address":"%s","secret_key":"%s","public_key":"%s","version":"%s"}' \
-        "$content_addr" "$hc_addr" "$secret_key" "$public_key" "$STRESS_VERSION")
-
-    # POST via curl in wordpress container through tor's SOCKS proxy
-    local output
-    output=$(docker_cmd exec onionpress-wordpress \
-        curl -s -X POST \
-        --socks5-hostname onionpress-tor:9050 \
-        -H "Content-Type: application/json" \
-        -d "$payload" \
-        --max-time 30 \
-        "http://${CELLAR_ADDR}/register" 2>&1) || true
-
-    if echo "$output" | grep -q '"registered".*true'; then
-        return 0
-    else
-        echo "$output" >&2
-        return 1
-    fi
-}
-
-# ── Metrics collection (read-only from cellar) ──────────────────────────────
-get_container_mem_mb() {
-    local ctr="$1"
-    local mem_bytes
-    mem_bytes=$(docker_cmd stats --no-stream --format '{{.MemUsage}}' "$ctr" 2>/dev/null | awk '{print $1}')
-    if echo "$mem_bytes" | grep -qi gib; then
-        echo "$mem_bytes" | sed 's/[Gg][Ii][Bb]//' | awk '{printf "%.0f", $1 * 1024}'
-    elif echo "$mem_bytes" | grep -qi mib; then
-        echo "$mem_bytes" | sed 's/[Mm][Ii][Bb]//' | awk '{printf "%.0f", $1}'
-    elif echo "$mem_bytes" | grep -qi kib; then
-        echo "$mem_bytes" | sed 's/[Kk][Ii][Bb]//' | awk '{printf "%.0f", $1 / 1024}'
-    else
-        echo "0"
-    fi
-}
+# ── Metrics collection ────────────────────────────────────────────────────────
 
 CELLAR_DB_PHP="/var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php"
 
 get_registry_count() {
     docker_cmd exec onionpress-wordpress \
         php "$CELLAR_DB_PHP" count "" 2>/dev/null | tr -d ' \n\r'
-}
-
-get_torrc_service_count() {
-    docker_cmd exec onionpress-tor \
-        sh -c "grep -c '^HiddenServiceDir.*/cellar/' /etc/tor/torrc 2>/dev/null || echo 0" | tr -d ' \n\r'
 }
 
 get_stress_fail_count() {
@@ -354,6 +382,21 @@ get_takeover_count() {
 get_healthy_count() {
     docker_cmd exec onionpress-wordpress \
         php "$CELLAR_DB_PHP" count "WHERE version='stress-test' AND status='healthy' AND last_healthcheck IS NOT NULL" 2>/dev/null | tr -d ' \n\r'
+}
+
+get_container_mem_mb() {
+    local ctr="$1"
+    local mem_bytes
+    mem_bytes=$(docker_cmd stats --no-stream --format '{{.MemUsage}}' "$ctr" 2>/dev/null | awk '{print $1}')
+    if echo "$mem_bytes" | grep -qi gib; then
+        echo "$mem_bytes" | sed 's/[Gg][Ii][Bb]//' | awk '{printf "%.0f", $1 * 1024}'
+    elif echo "$mem_bytes" | grep -qi mib; then
+        echo "$mem_bytes" | sed 's/[Mm][Ii][Bb]//' | awk '{printf "%.0f", $1}'
+    elif echo "$mem_bytes" | grep -qi kib; then
+        echo "$mem_bytes" | sed 's/[Kk][Ii][Bb]//' | awk '{printf "%.0f", $1 / 1024}'
+    else
+        echo "0"
+    fi
 }
 
 get_last_poll_duration() {
@@ -372,13 +415,11 @@ get_system_mem_pct() {
     fi
 }
 
-# ── Dashboard (read-only from cellar) ────────────────────────────────────────
 print_dashboard() {
-    local reg_count tor_mem wp_mem torrc_svcs fail_count takeover_count healthy_count mem_pct poll_dur
+    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct poll_dur
     reg_count=$(get_registry_count)
     tor_mem=$(get_container_mem_mb onionpress-tor)
     wp_mem=$(get_container_mem_mb onionpress-wordpress)
-    torrc_svcs=$(get_torrc_service_count)
     fail_count=$(get_stress_fail_count)
     takeover_count=$(get_takeover_count)
     healthy_count=$(get_healthy_count)
@@ -386,122 +427,13 @@ print_dashboard() {
     poll_dur=$(get_last_poll_duration)
 
     log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
-    echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | Torrc services: ${torrc_svcs} | VM mem: ${mem_pct}%"
+    echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | VM mem: ${mem_pct}%"
     echo "           Last poll pass: ${poll_dur}s"
 
-    log_json "\"registry_count\":${reg_count},\"tor_mem_mb\":${tor_mem},\"wp_mem_mb\":${wp_mem},\"torrc_services\":${torrc_svcs},\"healthy\":${healthy_count},\"failing\":${fail_count},\"takeovers\":${takeover_count},\"vm_mem_pct\":${mem_pct},\"poll_duration\":\"${poll_dur}\""
+    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"healthy\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\""
 }
 
-# ── Phase 1: Create worker onion services ────────────────────────────────────
-# Starts a separate Tor container for worker hidden services.
-# The cellar's torrc is never touched.
-
-setup_onion_services() {
-    log "Phase 1: Creating ${TOTAL} workers (${TOTAL} content + ${TOTAL} healthcheck onion services)..."
-    log "  Using separate worker Tor container (cellar torrc untouched)"
-
-    start_worker_tor
-
-    if ! wait_for_worker_hostnames; then
-        exit 1
-    fi
-
-    extract_worker_info
-
-    log "All ${TOTAL} workers have onion addresses"
-}
-
-# ── Phase 2: Start HTTP responders ───────────────────────────────────────────
-# socat responders run inside the worker Tor container.
-
-start_responders() {
-    log "Phase 2: Starting HTTP responders for all ${TOTAL} workers..."
-
-    for i in $(seq 0 $((TOTAL - 1))); do
-        local content_port=$((BASE_PORT + i * 2))
-        local hc_port=$((BASE_PORT + i * 2 + 1))
-
-        # Content responder
-        docker_cmd exec -d "$WORKER_TOR_CTR" sh -c "
-            while true; do
-                echo -e 'HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>stress-test worker${i}</body></html>' | \
-                socat - TCP-LISTEN:${content_port},reuseaddr 2>/dev/null
-            done
-        "
-
-        # Healthcheck responder
-        docker_cmd exec -d "$WORKER_TOR_CTR" sh -c "
-            while true; do
-                echo -e 'HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>OK</body></html>' | \
-                socat - TCP-LISTEN:${hc_port},reuseaddr 2>/dev/null
-            done
-        "
-    done
-
-    # Give responders a moment to bind
-    sleep 2
-
-    # Verify responders are listening
-    local listening=0
-    for i in $(seq 0 $((TOTAL - 1))); do
-        local content_port=$((BASE_PORT + i * 2))
-        if docker_cmd exec "$WORKER_TOR_CTR" sh -c "echo | socat - TCP:127.0.0.1:${content_port},connect-timeout=2" >/dev/null 2>&1; then
-            listening=$((listening + 1))
-        fi
-    done
-    log "Verified ${listening}/${TOTAL} content responders are listening"
-}
-
-# ── Phase 3: Register with cellar ────────────────────────────────────────────
-
-# Register a range of workers [start, start+count)
-register_worker_range() {
-    local start="$1"
-    local count="$2"
-    local registered=0
-    local errors=0
-
-    for i in $(seq "$start" $((start + count - 1))); do
-        local content_addr hc_addr secret_key public_key
-        content_addr=$(cat "${OUTPUT_DIR}/worker${i}.content_addr" | tr -d '\r\n ')
-        hc_addr=$(cat "${OUTPUT_DIR}/worker${i}.hc_addr" | tr -d '\r\n ')
-        secret_key=$(cat "${OUTPUT_DIR}/worker${i}.secret_key" | tr -d '\r\n ')
-        public_key=$(cat "${OUTPUT_DIR}/worker${i}.public_key" | tr -d '\r\n ')
-
-        if register_address "$content_addr" "$hc_addr" "$secret_key" "$public_key"; then
-            registered=$((registered + 1))
-            log "  Worker ${i}: registered OK"
-            log_json "\"event\":\"register\",\"worker\":${i},\"address\":\"${content_addr}\",\"ok\":true"
-        else
-            errors=$((errors + 1))
-            log "  Worker ${i}: registration FAILED"
-            log_json "\"event\":\"register\",\"worker\":${i},\"address\":\"${content_addr}\",\"ok\":false"
-        fi
-
-        # Brief delay between registrations to avoid overwhelming Tor SOCKS
-        if [ "$i" -lt $((start + count - 1)) ]; then
-            sleep 2
-        fi
-    done
-
-    log "  Batch registered: ${registered} OK, ${errors} errors"
-    if [ "$errors" -gt 0 ] && [ "$registered" -eq 0 ]; then
-        return 1
-    fi
-    return 0
-}
-
-register_workers() {
-    log "Phase 3: Registering ${TOTAL} workers with cellar..."
-    register_worker_range 0 "$TOTAL"
-    local rc=$?
-    if [ "$rc" -ne 0 ]; then
-        log "ERROR: All registrations failed — aborting"
-        exit 1
-    fi
-}
-
-# ── Phase 4: Wait for healthy baseline ───────────────────────────────────────
+# ── Phase: Wait for healthy ──────────────────────────────────────────────────
 
 wait_for_healthy() {
     local target="$1"
@@ -538,37 +470,60 @@ wait_for_healthy() {
     return 1
 }
 
-# ── Phase 5: Trigger failures ─────────────────────────────────────────────────
-# Kills responders in the worker Tor container (not the cellar).
+# ── Phase: Trigger failures ──────────────────────────────────────────────────
+# Disable HTTP responders via the Python control API in each worker container.
 
-stop_responders_for_workers() {
+disable_workers() {
+    local fail_start="$1"
+    local fail_count="$2"
+
+    log "Disabling responders for workers ${fail_start}..$(( fail_start + fail_count - 1 ))..."
+
+    for i in $(seq "$fail_start" $((fail_start + fail_count - 1))); do
+        # Figure out which container and local index
+        local ctr_idx=$((i / PER_CTR))
+        local local_idx=$((i % PER_CTR))
+        local ctr_name="stress-worker-${ctr_idx}"
+        local cp=$((BASE_PORT + local_idx * 2))
+        local hp=$((BASE_PORT + local_idx * 2 + 1))
+
+        # Disable both content and healthcheck ports
+        docker_cmd exec "$ctr_name" \
+            curl -s -X POST http://127.0.0.1:9000/disable \
+            -H "Content-Type: application/json" \
+            -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
+    done
+
+    log "Disabled ${fail_count} workers"
+}
+
+enable_workers() {
     local start="$1"
     local count="$2"
 
-    log "Phase 5: Stopping responders for workers ${start}..$(( start + count - 1 ))..."
+    log "Re-enabling responders for workers ${start}..$(( start + count - 1 ))..."
 
     for i in $(seq "$start" $((start + count - 1))); do
-        local hc_port=$((BASE_PORT + i * 2 + 1))
-        local content_port=$((BASE_PORT + i * 2))
+        local ctr_idx=$((i / PER_CTR))
+        local local_idx=$((i % PER_CTR))
+        local ctr_name="stress-worker-${ctr_idx}"
+        local cp=$((BASE_PORT + local_idx * 2))
+        local hp=$((BASE_PORT + local_idx * 2 + 1))
 
-        # Kill -9 all processes whose command line contains the port number.
-        # Must use ps+grep because BusyBox pgrep -f truncates long command lines.
-        # Kill parent sh loops AND socat children — parent respawns if not killed.
-        docker_cmd exec "$WORKER_TOR_CTR" sh -c "
-            ps aux | grep 'TCP-LISTEN:${hc_port}' | grep -v grep | awk '{print \$1}' | xargs kill -9 2>/dev/null
-            ps aux | grep 'TCP-LISTEN:${content_port}' | grep -v grep | awk '{print \$1}' | xargs kill -9 2>/dev/null
-        " 2>/dev/null || true
-
-        log "  Worker ${i}: responders stopped (ports ${content_port}, ${hc_port})"
+        docker_cmd exec "$ctr_name" \
+            curl -s -X POST http://127.0.0.1:9000/enable \
+            -H "Content-Type: application/json" \
+            -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
     done
+
+    log "Re-enabled ${count} workers"
 }
 
 wait_for_takeover() {
     local expected="$1"
     local timeout_secs="${2:-600}"
 
-    log "Phase 5: Waiting for ${expected} takeovers (timeout: ${timeout_secs}s)..."
-    log "  (Cellar needs to detect failures and initiate takeover — this takes several poll cycles)"
+    log "Waiting for ${expected} takeovers (timeout: ${timeout_secs}s)..."
 
     local deadline=$(($(date +%s) + timeout_secs))
     local last_dashboard=0
@@ -585,7 +540,7 @@ wait_for_takeover() {
         fi
 
         if [ "$current_takeover" -ge "$expected" ] 2>/dev/null; then
-            log "Phase 5: ${current_takeover} takeovers active (target: ${expected})"
+            log "Takeover: ${current_takeover} active (target: ${expected})"
             print_dashboard
             return 0
         fi
@@ -593,122 +548,16 @@ wait_for_takeover() {
         sleep 10
     done
 
-    log "Phase 5: Timed out waiting for takeovers — $(get_takeover_count) active (wanted ${expected})"
+    log "Takeover: Timed out — $(get_takeover_count) active (wanted ${expected})"
     print_dashboard
     return 1
-}
-
-# ── Phase 5b: Verify takeover redirects to Wayback Machine ────────────────────
-# Uses curl in wordpress container through cellar's SOCKS proxy to check redirects.
-
-WAYBACK_ONION="web.archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
-
-verify_takeover_redirects() {
-    local fail_start="$1"
-    local fail_count="$2"
-
-    log "Phase 5b: Verifying takeover redirects to Wayback Machine..."
-    log "  (Waiting 120s for Tor descriptor publication...)"
-    sleep 120
-
-    local verified=0
-    local errors=0
-    local retries=3
-
-    for i in $(seq "$fail_start" $((fail_start + fail_count - 1))); do
-        local content_addr
-        content_addr=$(cat "${OUTPUT_DIR}/worker${i}.content_addr" | tr -d '\r\n ')
-
-        local attempt=0
-        local success=false
-
-        while [ "$attempt" -lt "$retries" ]; do
-            attempt=$((attempt + 1))
-
-            # Use curl in wordpress container through SOCKS proxy
-            local http_code
-            http_code=$(docker_cmd exec onionpress-wordpress \
-                curl -s -o /dev/null -w "%{http_code}" \
-                --socks5-hostname onionpress-tor:9050 \
-                --max-time 30 \
-                "http://${content_addr}/" 2>/dev/null) || true
-
-            if [ "$http_code" = "302" ]; then
-                # Verify Location header
-                local headers
-                headers=$(docker_cmd exec onionpress-wordpress \
-                    curl -s -D - -o /dev/null \
-                    --socks5-hostname onionpress-tor:9050 \
-                    --max-time 30 \
-                    "http://${content_addr}/" 2>/dev/null) || true
-
-                local location
-                location=$(echo "$headers" | grep -i "^Location:" | tr -d '\r' | sed 's/^[Ll]ocation: *//')
-
-                if echo "$location" | grep -q "$WAYBACK_ONION"; then
-                    log "  Worker ${i}: 302 → Wayback Machine OK"
-                    verified=$((verified + 1))
-                    success=true
-                    log_json "\"event\":\"verify_redirect\",\"worker\":${i},\"address\":\"${content_addr}\",\"ok\":true"
-                    break
-                else
-                    log "  Worker ${i}: 302 but wrong Location: ${location}"
-                fi
-            else
-                log "  Worker ${i}: attempt ${attempt}/${retries} — got HTTP ${http_code} (expected 302)"
-                if [ "$attempt" -lt "$retries" ]; then
-                    sleep 30
-                fi
-            fi
-        done
-
-        if [ "$success" != true ]; then
-            errors=$((errors + 1))
-            log "  Worker ${i}: FAILED to verify redirect after ${retries} attempts"
-            log_json "\"event\":\"verify_redirect\",\"worker\":${i},\"address\":\"${content_addr}\",\"ok\":false"
-        fi
-    done
-
-    log "Phase 5b: Redirect verification: ${verified} OK, ${errors} failed"
-    return 0
-}
-
-# ── Phase 6: Recovery test ────────────────────────────────────────────────────
-# Restarts responders in the worker Tor container.
-
-restart_responders_for_workers() {
-    local start="$1"
-    local count="$2"
-
-    log "Phase 6: Restarting responders for workers ${start}..$(( start + count - 1 ))..."
-
-    for i in $(seq "$start" $((start + count - 1))); do
-        local content_port=$((BASE_PORT + i * 2))
-        local hc_port=$((BASE_PORT + i * 2 + 1))
-
-        docker_cmd exec -d "$WORKER_TOR_CTR" sh -c "
-            while true; do
-                echo -e 'HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>stress-test worker${i}</body></html>' | \
-                socat - TCP-LISTEN:${content_port},reuseaddr 2>/dev/null
-            done
-        "
-
-        docker_cmd exec -d "$WORKER_TOR_CTR" sh -c "
-            while true; do
-                echo -e 'HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>OK</body></html>' | \
-                socat - TCP-LISTEN:${hc_port},reuseaddr 2>/dev/null
-            done
-        "
-
-        log "  Worker ${i}: responders restarted (ports ${content_port}, ${hc_port})"
-    done
 }
 
 wait_for_recovery() {
     local expected_healthy="$1"
     local timeout_secs="${2:-600}"
 
-    log "Phase 6: Waiting for recovery — expecting ${expected_healthy} healthy, 0 takeovers (timeout: ${timeout_secs}s)..."
+    log "Waiting for recovery — expecting ${expected_healthy} healthy, 0 takeovers (timeout: ${timeout_secs}s)..."
 
     local deadline=$(($(date +%s) + timeout_secs))
     local last_dashboard=0
@@ -726,7 +575,7 @@ wait_for_recovery() {
         fi
 
         if [ "$current_healthy" -ge "$expected_healthy" ] 2>/dev/null && [ "$current_takeover" -eq 0 ] 2>/dev/null; then
-            log "Phase 6: Recovery complete — ${current_healthy} healthy, ${current_takeover} takeovers"
+            log "Recovery complete — ${current_healthy} healthy, ${current_takeover} takeovers"
             print_dashboard
             return 0
         fi
@@ -734,64 +583,78 @@ wait_for_recovery() {
         sleep 10
     done
 
-    log "Phase 6: Timed out — $(get_healthy_count) healthy, $(get_takeover_count) takeovers"
+    log "Recovery: Timed out — $(get_healthy_count) healthy, $(get_takeover_count) takeovers"
     print_dashboard
     return 1
 }
 
-# ── Phase 7: Cleanup ─────────────────────────────────────────────────────────
-# Removes the worker Tor container and cleans cellar registry/keys.
-# Cellar torrc takeover entries are cleaned by cellar-tor-manager.sh release,
-# which the cellar poller calls when workers recover.
+# ── Cleanup ───────────────────────────────────────────────────────────────────
 
 cleanup_stress_test() {
-    log "Phase 7: Cleaning up stress test artifacts..."
+    log "Cleaning up stress test artifacts..."
 
-    # Remove the worker Tor container entirely
-    docker_cmd rm -f "$WORKER_TOR_CTR" 2>/dev/null || true
-    log "  Removed worker Tor container"
+    # Remove all worker containers
+    for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
+        docker_cmd rm -f "stress-worker-${idx}" 2>/dev/null || true
+    done
+    # Also catch any extras
+    docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
+        docker_cmd rm -f "$ctr" 2>/dev/null || true
+    done
+    log "  Removed worker containers"
 
     # Remove stress-test entries from cellar registry
     docker_cmd exec onionpress-wordpress \
         php "$CELLAR_DB_PHP" delete-by-version stress-test 2>/dev/null || true
     log "  Cleaned registry"
 
-    # Remove encrypted key directories for stress-test addresses
-    for i in $(seq 0 $((TOTAL - 1))); do
-        if [ -f "${OUTPUT_DIR}/worker${i}.content_addr" ]; then
-            local addr
-            addr=$(cat "${OUTPUT_DIR}/worker${i}.content_addr" | tr -d '\r\n ')
+    # Get stress-test addresses for key/takeover cleanup
+    local stress_addrs
+    stress_addrs=$(docker_cmd exec onionpress-wordpress \
+        php "$CELLAR_DB_PHP" query-addresses "WHERE version='stress-test'" 2>/dev/null) || true
+
+    # Remove encrypted key directories
+    if [ -n "$stress_addrs" ]; then
+        for addr in $stress_addrs; do
+            addr=$(echo "$addr" | tr -d '\r\n ')
+            [ -z "$addr" ] && continue
             docker_cmd exec onionpress-wordpress \
                 rm -rf "/var/lib/onionpress/cellar/keys/${addr}" 2>/dev/null || true
-        fi
-    done
+        done
+    fi
     log "  Removed key directories"
 
-    # Remove any cellar takeover entries from cellar's torrc
-    # (these were added by cellar-tor-manager.sh during takeover)
-    for i in $(seq 0 $((TOTAL - 1))); do
-        if [ -f "${OUTPUT_DIR}/worker${i}.content_addr" ]; then
-            local addr
-            addr=$(cat "${OUTPUT_DIR}/worker${i}.content_addr" | tr -d '\r\n ')
-            if docker_cmd exec onionpress-tor grep -q "# cellar:${addr}" /etc/tor/torrc 2>/dev/null; then
+    # Remove cellar Arti takeover entries
+    local removed_arti=0
+    if [ -n "$stress_addrs" ]; then
+        for addr in $stress_addrs; do
+            addr=$(echo "$addr" | tr -d '\r\n ')
+            [ -z "$addr" ] && continue
+            local marker="# cellar:${addr}"
+            if docker_cmd exec onionpress-tor grep -q "$marker" /etc/arti/arti.toml 2>/dev/null; then
                 docker_cmd exec onionpress-tor sh -c "
-                    awk -v marker='# cellar:${addr}' '
+                    awk -v marker='$marker' '
                     BEGIN { skip = 0 }
-                    \$0 == marker { skip = 4; next }
+                    \$0 == marker { skip = 3; next }
                     skip > 0 { skip--; next }
                     { print }
-                    ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
+                    ' /etc/arti/arti.toml > /etc/arti/arti.toml.tmp && mv /etc/arti/arti.toml.tmp /etc/arti/arti.toml
                 " 2>/dev/null || true
+                # Remove keystore directory
+                local addr_prefix
+                addr_prefix=$(echo "$addr" | sed 's/\.onion$//' | cut -c1-16)
+                docker_cmd exec onionpress-tor \
+                    rm -rf "/var/lib/arti/state/keystore/hss/cellar_${addr_prefix}" 2>/dev/null || true
+                removed_arti=$((removed_arti + 1))
             fi
-            # Remove cellar service directory
-            docker_cmd exec onionpress-tor \
-                rm -rf "/var/lib/tor/hidden_service/cellar/${addr}" 2>/dev/null || true
-        fi
-    done
+        done
+    fi
 
-    # SIGHUP cellar Tor to reload (only if we removed takeover entries)
-    docker_cmd exec onionpress-tor sh -c "kill -HUP \$(pgrep -x tor)" 2>/dev/null || true
-    log "  Cleaned cellar takeover entries and reloaded Tor"
+    if [ "$removed_arti" -gt 0 ]; then
+        # SIGHUP Arti to reload
+        docker_cmd exec onionpress-tor sh -c "kill -HUP \$(pgrep arti)" 2>/dev/null || true
+        log "  Removed ${removed_arti} Arti takeover entries, sent SIGHUP"
+    fi
 
     log "Cleanup complete"
 }
@@ -803,88 +666,54 @@ run_worker() {
     detect_cellar_addr
     mkdir -p "$OUTPUT_DIR"
 
-    log "=== OnionCellar Stress Test ==="
+    log "=== OnionCellar Stress Test (Arti) ==="
     log "Cellar: ${CELLAR_ADDR}"
     log "Workers: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
+    log "Containers: ${NUM_CONTAINERS} × ${PER_CTR} workers/container"
     if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
-        log "Batch size: ${BATCH_SIZE} (register+stabilize in waves)"
+        log "Container batch size: ${BATCH_SIZE}"
     fi
-    log "Worker Tor container: ${WORKER_TOR_CTR}"
     log "Output: ${OUTPUT_DIR}"
     echo ""
 
-    # Trap to ensure cleanup on exit
     trap 'log "Cleaning up before exit..."; cleanup_stress_test' EXIT
     trap 'log "Interrupted..."; exit 130' INT TERM
 
-    # Phase 1: Create worker onion services (separate Tor container)
-    setup_onion_services
+    # Phase 1: Start worker containers (Arti + Python HTTP server)
+    log "Phase 1: Starting ${NUM_CONTAINERS} worker containers..."
+    start_all_workers
     echo ""
 
-    # Phase 2: Start responders (inside worker Tor container)
-    start_responders
+    # Phase 2: Wait for all workers to bootstrap and self-register over Tor
+    log "Phase 2: Waiting for workers to bootstrap and register over Tor..."
+    if ! wait_for_bootstrap 900; then
+        log "WARNING: Not all workers bootstrapped"
+    fi
+    extract_all_worker_info
     echo ""
 
-    # Phase 3+4: Register with cellar (batched if --batch-size set)
-    if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
-        local batch_start=0
-        local batch_num=1
-        local total_registered=0
-        while [ "$batch_start" -lt "$TOTAL" ]; do
-            local batch_count=$BATCH_SIZE
-            if [ $((batch_start + batch_count)) -gt "$TOTAL" ]; then
-                batch_count=$((TOTAL - batch_start))
-            fi
-
-            log "Phase 3: Batch ${batch_num} — registering workers ${batch_start}..$(( batch_start + batch_count - 1 ))"
-            if ! register_worker_range "$batch_start" "$batch_count"; then
-                log "ERROR: Batch ${batch_num} all registrations failed — aborting"
-                exit 1
-            fi
-            total_registered=$((total_registered + batch_count))
-            echo ""
-
-            # Wait for this batch to become healthy before registering next
-            log "Phase 4: Waiting for batch ${batch_num} (${total_registered} total) to stabilize..."
-            if ! wait_for_healthy "$total_registered" "Phase 4 (batch ${batch_num})" 600; then
-                log "WARNING: Batch ${batch_num} not fully healthy, continuing to next batch..."
-            fi
-            echo ""
-
-            batch_start=$((batch_start + batch_count))
-            batch_num=$((batch_num + 1))
-        done
-        log "All ${TOTAL} workers registered in $((batch_num - 1)) batches"
-    else
-        # Register all at once
-        register_workers
-        echo ""
-
-        # Phase 4: Wait for healthy baseline
-        if ! wait_for_healthy "$TOTAL" "Phase 4" 600; then
-            log "WARNING: Not all workers became healthy, continuing anyway..."
-        fi
+    # Phase 3: Wait for cellar poller to confirm workers are healthy
+    if ! wait_for_healthy "$TOTAL" "Phase 3" 600; then
+        log "WARNING: Not all workers became healthy, continuing anyway..."
     fi
     echo ""
 
     if [ "$FAILING" -gt 0 ]; then
-        # Phase 5: Trigger failures (kill responders in worker Tor container)
+        # Phase 4: Trigger failures
         local fail_start=$((TOTAL - FAILING))
-        stop_responders_for_workers "$fail_start" "$FAILING"
+        log "Phase 4: Triggering failures for ${FAILING} workers..."
+        disable_workers "$fail_start" "$FAILING"
         echo ""
 
-        # Wait for cellar to detect failures and initiate takeover
+        # Phase 5: Wait for cellar to detect failures and takeover
         if ! wait_for_takeover "$FAILING" 600; then
-            log "WARNING: Not all expected takeovers happened, continuing anyway..."
+            log "WARNING: Not all expected takeovers happened"
         fi
         echo ""
 
-        # Phase 5b: Verify takeover serves Wayback Machine redirects
-        verify_takeover_redirects "$fail_start" "$FAILING"
-        echo ""
-
-        # Phase 6: Recovery — restart the failed workers' responders
-        restart_responders_for_workers "$fail_start" "$FAILING"
+        # Phase 6: Recovery — re-enable the failed workers
+        log "Phase 6: Re-enabling ${FAILING} workers..."
+        enable_workers "$fail_start" "$FAILING"
         echo ""
 
         if ! wait_for_recovery "$TOTAL" 600; then
@@ -901,7 +730,7 @@ run_worker() {
     print_dashboard
     echo ""
 
-    # Phase 7: Cleanup (disable EXIT trap since we're cleaning up explicitly)
+    # Cleanup
     trap - EXIT
     cleanup_stress_test
     echo ""
@@ -910,7 +739,7 @@ run_worker() {
     log "Results saved to: ${OUTPUT_DIR}/metrics.jsonl"
 }
 
-# ── Coordinator mode (read-only dashboard) ────────────────────────────────────
+# ── Coordinator mode ──────────────────────────────────────────────────────────
 run_coordinator() {
     preflight
     mkdir -p "$OUTPUT_DIR"
@@ -935,13 +764,16 @@ run_cleanup() {
         exit 1
     fi
 
-    # Remove worker Tor container if it exists
-    if docker_cmd inspect "$WORKER_TOR_CTR" >/dev/null 2>&1; then
-        docker_cmd rm -f "$WORKER_TOR_CTR" 2>/dev/null || true
-        log "Removed worker Tor container"
-    fi
+    # Remove all stress-worker containers
+    docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
+        docker_cmd rm -f "$ctr" 2>/dev/null || true
+        log "Removed container: $ctr"
+    done
 
-    # Get list of stress-test addresses from registry
+    # Also remove old-style container
+    docker_cmd rm -f stress-worker-tor 2>/dev/null || true
+
+    # Get stress-test addresses
     local stress_addrs
     stress_addrs=$(docker_cmd exec onionpress-wordpress \
         php "$CELLAR_DB_PHP" query-addresses "WHERE version='stress-test'" 2>/dev/null) || true
@@ -956,13 +788,12 @@ run_cleanup() {
         return
     fi
 
-    # Delete stress-test entries from SQLite registry
-    log "Cleaning registry..."
+    # Delete stress-test entries from registry
     docker_cmd exec onionpress-wordpress \
         php "$CELLAR_DB_PHP" delete-by-version stress-test 2>/dev/null || true
+    log "Cleaned registry"
 
-    # Remove encrypted key directories
-    log "Removing key directories..."
+    # Remove key directories
     local removed_keys=0
     for addr in $stress_addrs; do
         addr=$(echo "$addr" | tr -d '\r\n ')
@@ -973,31 +804,32 @@ run_cleanup() {
     done
     log "Removed ${removed_keys} key directories"
 
-    # Remove cellar takeover torrc entries (added by cellar-tor-manager.sh)
-    log "Cleaning cellar takeover torrc entries..."
-    local removed_torrc=0
+    # Remove Arti takeover entries
+    local removed_arti=0
     for addr in $stress_addrs; do
         addr=$(echo "$addr" | tr -d '\r\n ')
         [ -z "$addr" ] && continue
-        if docker_cmd exec onionpress-tor grep -q "# cellar:${addr}" /etc/tor/torrc 2>/dev/null; then
+        local marker="# cellar:${addr}"
+        if docker_cmd exec onionpress-tor grep -q "$marker" /etc/arti/arti.toml 2>/dev/null; then
             docker_cmd exec onionpress-tor sh -c "
-                awk -v marker='# cellar:${addr}' '
+                awk -v marker='$marker' '
                 BEGIN { skip = 0 }
-                \$0 == marker { skip = 4; next }
+                \$0 == marker { skip = 3; next }
                 skip > 0 { skip--; next }
                 { print }
-                ' /etc/tor/torrc > /etc/tor/torrc.tmp && mv /etc/tor/torrc.tmp /etc/tor/torrc
+                ' /etc/arti/arti.toml > /etc/arti/arti.toml.tmp && mv /etc/arti/arti.toml.tmp /etc/arti/arti.toml
             " 2>/dev/null || true
-            removed_torrc=$((removed_torrc + 1))
+            local addr_prefix
+            addr_prefix=$(echo "$addr" | sed 's/\.onion$//' | cut -c1-16)
+            docker_cmd exec onionpress-tor \
+                rm -rf "/var/lib/arti/state/keystore/hss/cellar_${addr_prefix}" 2>/dev/null || true
+            removed_arti=$((removed_arti + 1))
         fi
-        # Remove cellar service directory
-        docker_cmd exec onionpress-tor \
-            rm -rf "/var/lib/tor/hidden_service/cellar/${addr}" 2>/dev/null || true
     done
 
-    if [ "$removed_torrc" -gt 0 ]; then
-        docker_cmd exec onionpress-tor sh -c "kill -HUP \$(pgrep -x tor)" 2>/dev/null || true
-        log "Removed ${removed_torrc} cellar takeover torrc entries, reloaded Tor"
+    if [ "$removed_arti" -gt 0 ]; then
+        docker_cmd exec onionpress-tor sh -c "kill -HUP \$(pgrep arti)" 2>/dev/null || true
+        log "Removed ${removed_arti} Arti takeover entries, sent SIGHUP"
     fi
 
     echo ""

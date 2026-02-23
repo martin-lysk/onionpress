@@ -1,0 +1,7 @@
+# Arti config for polling-only container (SOCKS proxy, no onion services)
+[proxy]
+socks_listen = "0.0.0.0:9050"
+
+[storage]
+cache_dir = "/var/lib/arti/cache"
+state_dir = "/var/lib/arti/state"

@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -r -m -s /bin/false arti
 COPY --from=builder /usr/local/cargo/bin/arti /usr/local/bin/arti
 COPY arti.toml /etc/arti/arti.toml
+COPY arti-polling.toml /etc/arti/arti-polling.toml
 COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck-server.sh /healthcheck-server.sh
 COPY cellar-redirect.sh /cellar-redirect.sh

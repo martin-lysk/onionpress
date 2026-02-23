@@ -141,9 +141,11 @@ function onionpress_cellar_handle_register() {
         }
     } else {
         // Legacy client without arti_key_pem — build PEM from raw keys
-        // This maintains backward compatibility during the transition
-        onionpress_cellar_respond(400, ['error' => 'Missing required field: arti_key_pem']);
-        return;
+        $arti_pem = onionpress_build_openssh_pem($secret_key, $raw_pubkey);
+        if ($arti_pem === false) {
+            onionpress_cellar_respond(500, ['error' => 'Failed to build Arti PEM from raw keys']);
+            return;
+        }
     }
 
     // Encrypt and write the Arti PEM key file
@@ -187,6 +189,61 @@ function onionpress_cellar_handle_register() {
         'content_address' => $content_address,
         'message' => $found ? 'Registration updated' : 'Registration created',
     ]);
+}
+
+/**
+ * Build an OpenSSH PEM private key for Arti from raw Ed25519 keys.
+ *
+ * Produces the same format as key_manager.build_openssh_key():
+ *   openssh-key-v1 with key type "ed25519-expanded@spec.torproject.org"
+ *
+ * @param string $private_key  64-byte expanded Ed25519 private key
+ * @param string $public_key   32-byte Ed25519 public key
+ * @return string|false  PEM-encoded OpenSSH private key, or false on error
+ */
+function onionpress_build_openssh_pem($private_key, $public_key) {
+    if (strlen($private_key) !== 64 || strlen($public_key) !== 32) {
+        return false;
+    }
+
+    $key_type = 'ed25519-expanded@spec.torproject.org';
+
+    // pack_string: uint32 big-endian length prefix + data
+    $ps = function($data) {
+        return pack('N', strlen($data)) . $data;
+    };
+
+    // Public key blob
+    $pub_blob = $ps($key_type) . $ps($public_key);
+
+    // Check integers (random, must match)
+    $check = random_bytes(4);
+
+    // Private key blob (unencrypted)
+    $priv_inner = $check . $check
+        . $ps($key_type)
+        . $ps($public_key)
+        . $ps($private_key)
+        . $ps('');  // empty comment
+
+    // Pad to 8-byte alignment
+    $pad_len = (8 - (strlen($priv_inner) % 8)) % 8;
+    for ($i = 1; $i <= $pad_len; $i++) {
+        $priv_inner .= chr($i);
+    }
+
+    // Assemble the full binary blob
+    $blob = "openssh-key-v1\x00"   // magic
+        . $ps('none')              // cipher
+        . $ps('none')              // kdf
+        . $ps('')                  // kdf options
+        . pack('N', 1)             // num keys
+        . $ps($pub_blob)           // public key section
+        . $ps($priv_inner);        // private key section
+
+    return "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        . chunk_split(base64_encode($blob), 70, "\n")
+        . "-----END OPENSSH PRIVATE KEY-----\n";
 }
 
 /**

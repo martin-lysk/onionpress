@@ -480,6 +480,20 @@ def cellar_poller(app):
             pass_start = time.monotonic()
             modified_entries = []
             min_sleep = HEALTHY_INTERVAL
+
+            # Immediate release: if an entry re-registered while taken over,
+            # the PHP upsert resets status='healthy' but leaves takeover_active=1.
+            # Registration over Tor proves the instance is alive — release now.
+            for entry in registry:
+                if entry.get("takeover_active") and entry.get("status") == "healthy":
+                    app.log(f"OnionCellar: {entry['content_address']} re-registered — immediate release")
+                    _do_release(app, entry)
+                    entry["takeover_active"] = False
+                    entry["fail_count"] = 0
+                    entry["fast_poll_remaining"] = 0
+                    entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
+                    modified_entries.append(entry)
+
             workers = min(MAX_POLL_WORKERS, len(registry))
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
