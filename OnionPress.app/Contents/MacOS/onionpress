@@ -379,6 +379,9 @@ os.chmod(output_path, 0o600)
 import_key() {
     local key_b32="$1"
 
+    # Ensure data directory exists (import-key may run before first launch)
+    mkdir -p "$DATA_DIR"
+
     # Show help if no argument or --help
     if [ -z "$key_b32" ] || [ "$key_b32" = "--help" ] || [ "$key_b32" = "-h" ]; then
         cat <<'HELPEOF'
@@ -630,14 +633,12 @@ os.chmod(output_path, 0o600)
     # Update ADDRESS_PREFIX in config to match the imported address
     # so the startup prefix check doesn't flag a mismatch
     local addr_prefix=$(echo "$address" | cut -c1-3)
-    if [ -f "$DATA_DIR/config" ]; then
-        if grep -q "^ADDRESS_PREFIX=" "$DATA_DIR/config"; then
-            sed -i '' "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$addr_prefix/" "$DATA_DIR/config"
-        else
-            echo "ADDRESS_PREFIX=$addr_prefix" >> "$DATA_DIR/config"
-        fi
-        log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
+    if [ -f "$DATA_DIR/config" ] && grep -q "^ADDRESS_PREFIX=" "$DATA_DIR/config"; then
+        sed -i '' "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$addr_prefix/" "$DATA_DIR/config"
+    else
+        echo "ADDRESS_PREFIX=$addr_prefix" >> "$DATA_DIR/config"
     fi
+    log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
 
     log "Imported key for address: $address"
     echo "Imported key for: $address"
