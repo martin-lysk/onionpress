@@ -13,6 +13,8 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 
+import key_manager
+
 
 def verify_wp_admin(username, password):
     """Verify that the given credentials belong to a WordPress administrator.
@@ -80,21 +82,16 @@ def create_backup(onion_address, username, password, output_path, version, log_f
     """
     staging = tempfile.mkdtemp(prefix='onionpress-backup-')
     try:
-        # 1. Extract Tor keys
+        # 1. Extract Tor keys (Arti OpenSSH keystore format)
         log_func("Backup: extracting Tor keys...")
         tor_dir = os.path.join(staging, 'tor-keys')
         os.makedirs(tor_dir)
 
-        for keyfile in ('hs_ed25519_secret_key', 'hs_ed25519_public_key'):
-            result = subprocess.run(
-                ['docker', 'exec', 'onionpress-tor', 'cat',
-                 f'/var/lib/tor/hidden_service/wordpress/{keyfile}'],
-                capture_output=True, timeout=10
-            )
-            if result.returncode != 0:
-                raise Exception(f"Could not read {keyfile} from Tor container")
-            with open(os.path.join(tor_dir, keyfile), 'wb') as f:
-                f.write(result.stdout)
+        priv = key_manager.extract_private_key()
+        pub = key_manager.extract_public_key()
+        pem_data = key_manager.build_openssh_key(priv, pub)
+        with open(os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private'), 'wb') as f:
+            f.write(pem_data)
 
         # 2. Dump WordPress database via mariadb-dump in the db container
         # (wp db export uses mysqldump which isn't in the WordPress container)
@@ -237,22 +234,16 @@ def restore_from_backup(zip_path, password, log_func):
         db_dir = _find_dir(staging, 'database')
         wpcontent_dir = _find_dir(staging, 'wp-content')
 
-        # 1. Restore Tor keys
+        # 1. Restore Tor keys (Arti OpenSSH keystore format)
         log_func("Restore: writing Tor keys...")
-        for keyfile in ('hs_ed25519_secret_key', 'hs_ed25519_public_key'):
-            src = os.path.join(tor_dir, keyfile)
-            if not os.path.exists(src):
-                raise Exception(f"Backup is missing {keyfile}")
+        key_path = os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private')
+        if not os.path.exists(key_path):
+            raise Exception("Backup is missing ks_hs_id.ed25519_expanded_private")
 
-            dest = f'/var/lib/tor/hidden_service/wordpress/{keyfile}'
-            subprocess.run(
-                ['docker', 'cp', src, f'onionpress-tor:{dest}'],
-                capture_output=True, timeout=10, check=True
-            )
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-tor', 'chmod', '600', dest],
-                capture_output=True, timeout=10, check=True
-            )
+        with open(key_path, 'rb') as f:
+            pem_data = f.read()
+        priv, pub = key_manager.parse_openssh_key(pem_data)
+        key_manager.write_private_key(priv, pub)
 
         # 2. Restore database via mariadb CLI in the db container
         log_func("Restore: importing database...")
