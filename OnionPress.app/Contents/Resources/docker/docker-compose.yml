@@ -1,5 +1,6 @@
 services:
   tor:
+    image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
     container_name: onionpress-tor
     environment:
@@ -17,6 +18,7 @@ services:
       - "127.0.0.1:9050:9050"
 
   wordpress:
+    image: ghcr.io/brewsterkahle/onionpress-wordpress:latest
     build: ./wordpress
     container_name: onionpress-wordpress
     environment:
@@ -58,6 +60,7 @@ services:
       - onionpress-network
 
   tor-polling:
+    image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
     container_name: onionpress-tor-polling
     environment:

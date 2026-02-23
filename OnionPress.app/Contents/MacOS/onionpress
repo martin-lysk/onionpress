@@ -796,7 +796,7 @@ update_images() {
     cd "$DOCKER_DIR"
 
     # Pull latest images (WordPress, MariaDB, Tor)
-    local images=("wordpress:latest" "mariadb:latest")
+    local images=("ghcr.io/brewsterkahle/onionpress-tor:latest" "ghcr.io/brewsterkahle/onionpress-wordpress:latest" "mariadb:latest")
     local updated=false
 
     for image in "${images[@]}"; do
@@ -1120,7 +1120,7 @@ start_containers() {
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d --build wordpress db >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d wordpress db >> "$LOG_FILE" 2>&1; then
             break
         fi
         log "WARNING: 'docker compose up -d wordpress db' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
@@ -1159,7 +1159,7 @@ start_containers() {
 
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
-        docker compose up -d --build tor >> "$LOG_FILE" 2>&1
+        docker compose up -d tor >> "$LOG_FILE" 2>&1
     else
         log "WordPress not yet installed — waiting for setup (Tor NOT started)"
     fi
