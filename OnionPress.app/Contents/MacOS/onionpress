@@ -112,12 +112,37 @@ detect_cellar_mode() {
             else
                 echo "VM_MEMORY=5" >> "$DATA_DIR/config"
             fi
-            # Check if the running VM actually has less than 5GB
+            # Check if the running VM actually has less than 5GB — if so, restart it now
             local vm_mem_kb
             vm_mem_kb=$(docker compose exec -T tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
             vm_mem_kb="${vm_mem_kb:-0}"
             if [ "$vm_mem_kb" -lt 4500000 ] 2>/dev/null; then
-                log "OnionCellar: WARNING — VM is running with $(( vm_mem_kb / 1024 ))MB, restart OnionPress to apply 5GB"
+                log "OnionCellar: VM has $(( vm_mem_kb / 1024 ))MB — restarting with 5GB..."
+                cd "$DOCKER_DIR"
+                docker compose --profile cloudflare --profile cellar down >> "$LOG_FILE" 2>&1
+                "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
+                "$BIN_DIR/colima" start \
+                    --mount "$DATA_DIR/shared:w" \
+                    --memory 5 \
+                    >> "$LOG_FILE" 2>&1
+                if [ $? -eq 0 ]; then
+                    log "OnionCellar: VM restarted with 5GB"
+                    # Bring containers back up (start_containers will re-call detect_cellar_mode,
+                    # but this time the VM will have enough memory so no loop)
+                    docker compose up -d wordpress mariadb >> "$LOG_FILE" 2>&1
+                    # Wait for WordPress to be ready
+                    local mem_wp_wait=0
+                    while [ $mem_wp_wait -lt 60 ]; do
+                        if curl -s --max-time 3 http://localhost:8080 >/dev/null 2>&1; then
+                            break
+                        fi
+                        sleep 2
+                        mem_wp_wait=$((mem_wp_wait + 2))
+                    done
+                    docker compose up -d tor >> "$LOG_FILE" 2>&1
+                else
+                    log "OnionCellar: ERROR — VM restart failed, continuing with $(( vm_mem_kb / 1024 ))MB"
+                fi
             fi
         fi
         # Start cellar redirect service inside the tor container (port 8082)
