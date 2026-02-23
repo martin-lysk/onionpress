@@ -1,0 +1,20 @@
+[proxy]
+socks_listen = "0.0.0.0:9050"
+
+[storage]
+cache_dir = "/var/lib/arti/cache"
+state_dir = "/var/lib/arti/state"
+
+[storage.keystore]
+enabled = true
+
+[onion_services."wordpress"]
+enabled = true
+# Arti requires IP addresses (no hostnames). socat on 127.0.0.1:8080
+# forwards to wordpress:80 — started by entrypoint.sh.
+proxy_ports = [["80", "127.0.0.1:8080"]]
+num_intro_points = 20
+
+[onion_services."healthcheck"]
+enabled = true
+proxy_ports = [["80", "127.0.0.1:8081"]]

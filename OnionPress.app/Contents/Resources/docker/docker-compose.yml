@@ -6,7 +6,7 @@ services:
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
       - ONIONPRESS_CELLAR=${ONIONPRESS_CELLAR:-0}
     volumes:
-      - tor-keys:/var/lib/tor/hidden_service/
+      - arti-state:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress
     depends_on:
       - wordpress
@@ -72,9 +72,8 @@ services:
       - cloudflare
 
 volumes:
-  tor-keys:
-    name: onionpress-tor-keys
-    external: true
+  arti-state:
+    name: onionpress-arti-state
   wordpress-data:
     name: onionpress-wordpress-data
   db-data:
