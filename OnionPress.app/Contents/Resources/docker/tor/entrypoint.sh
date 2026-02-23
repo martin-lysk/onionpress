@@ -23,19 +23,38 @@ echo "${ONIONPRESS_VERSION:-unknown}" > /var/lib/tor/healthcheck-version
 
 # Forward 127.0.0.1:8080 → wordpress:80 (Arti requires IP, not hostname)
 socat TCP-LISTEN:8080,reuseaddr,fork TCP:wordpress:80 &
+SOCAT_PID=$!
+sleep 1
+if ! kill -0 $SOCAT_PID 2>/dev/null; then
+    echo "ERROR: socat (port 8080 forward) failed to start"
+fi
 
 # Start healthcheck HTTP server in background (port 8081)
 /healthcheck-server.sh &
+HC_PID=$!
+sleep 1
+if ! kill -0 $HC_PID 2>/dev/null; then
+    echo "ERROR: healthcheck-server.sh failed to start"
+fi
 
 # Start cellar redirect service if cellar mode
 if [ "${ONIONPRESS_CELLAR}" = "1" ]; then
     echo "OnionCellar mode: starting redirect service..."
     /cellar-redirect.sh &
+    CELLAR_PID=$!
+    sleep 1
+    if ! kill -0 $CELLAR_PID 2>/dev/null; then
+        echo "ERROR: cellar-redirect.sh failed to start"
+    fi
 fi
 
 # Start Arti in background
 su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
 ARTI_PID=$!
+sleep 2
+if ! kill -0 $ARTI_PID 2>/dev/null; then
+    echo "ERROR: Arti failed to start — check config at /etc/arti/arti.toml"
+fi
 
 # Wait for Arti to generate keys, then write compat hostname files
 # so existing scripts (healthcheck-server.sh, launcher, menubar.py)

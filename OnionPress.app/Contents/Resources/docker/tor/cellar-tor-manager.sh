@@ -102,9 +102,9 @@ do_takeover() {
     fi
 
     # Set correct ownership and permissions
-    chown -R arti:arti "$KEYSTORE_DIR"
-    chmod 700 "$KEYSTORE_DIR"
-    chmod 600 "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"
+    chown -R arti:arti "$KEYSTORE_DIR" || echo "ERROR: Failed to chown keystore directory $KEYSTORE_DIR"
+    chmod 700 "$KEYSTORE_DIR" || echo "ERROR: Failed to chmod keystore directory $KEYSTORE_DIR"
+    chmod 600 "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private" || echo "ERROR: Failed to chmod keystore key file"
 
     # Add onion service config to arti.toml if not already present
     local marker="# cellar:${CONTENT_ADDRESS}"
@@ -150,7 +150,7 @@ do_release() {
         ' "$ARTI_TOML" > "$tmp_toml"
 
         # Clean up any trailing blank lines left over
-        sed -i '/^$/N;/^\n$/d' "$tmp_toml" 2>/dev/null || true
+        sed -i '/^$/N;/^\n$/d' "$tmp_toml" 2>/dev/null || echo "WARNING: Failed to clean trailing blank lines in $tmp_toml"
         mv "$tmp_toml" "$ARTI_TOML"
         echo "Removed onion service config for ${CONTENT_ADDRESS}"
     else

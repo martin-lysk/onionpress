@@ -695,12 +695,16 @@ configure_ia_plugin() {
     log "Configuring Internet Archive Wayback Machine Link Fixer plugin..."
 
     # Enable link fixer (scans outbound links, replaces broken ones with archived versions)
-    docker exec onionpress-wordpress wp option update iawmlf_process_links 1 --allow-root >> "$LOG_FILE" 2>&1
-    docker exec onionpress-wordpress wp option update iawmlf_fixer_option replace_link --allow-root >> "$LOG_FILE" 2>&1
-    docker exec onionpress-wordpress wp option update iawmlf_scan_existing_posts 1 --allow-root >> "$LOG_FILE" 2>&1
+    docker exec onionpress-wordpress wp option update iawmlf_process_links 1 --allow-root >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to set iawmlf_process_links"
+    docker exec onionpress-wordpress wp option update iawmlf_fixer_option replace_link --allow-root >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to set iawmlf_fixer_option"
+    docker exec onionpress-wordpress wp option update iawmlf_scan_existing_posts 1 --allow-root >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to set iawmlf_scan_existing_posts"
 
     # Mark setup wizard complete (prevents wizard UI from showing)
-    docker exec onionpress-wordpress wp option update iawmlf_setup_wizard_completed 1 --allow-root >> "$LOG_FILE" 2>&1
+    docker exec onionpress-wordpress wp option update iawmlf_setup_wizard_completed 1 --allow-root >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to set iawmlf_setup_wizard_completed"
 
     # Do NOT enable the plugin's own auto-archive — our mu-plugin handles it
     # with proper .onion URLs and Tor routing
@@ -893,7 +897,8 @@ install_multisite_domain_map() {
         if docker cp "$plugins_dir/onionpress-sunrise.php" \
             onionpress-wordpress:/var/www/html/wp-content/sunrise.php >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/sunrise.php >> "$LOG_FILE" 2>&1
+                /var/www/html/wp-content/sunrise.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown sunrise.php"
             log "✓ sunrise.php installed"
         else
             log "WARNING: Failed to copy sunrise.php"
@@ -931,11 +936,13 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     # Copy domain-map mu-plugin → wp-content/mu-plugins/
     if [ -f "$plugins_dir/onionpress-domain-map.php" ]; then
         docker exec onionpress-wordpress mkdir -p \
-            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1
+            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1 \
+            || log "WARNING: Failed to create mu-plugins directory"
         if docker cp "$plugins_dir/onionpress-domain-map.php" \
             onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-domain-map.php >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-domain-map.php >> "$LOG_FILE" 2>&1
+                /var/www/html/wp-content/mu-plugins/onionpress-domain-map.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-domain-map.php"
             log "✓ onionpress-domain-map.php mu-plugin installed"
         else
             log "WARNING: Failed to copy onionpress-domain-map.php"
@@ -945,11 +952,13 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     # Copy Wayback Machine archiver mu-plugin → wp-content/mu-plugins/
     if [ -f "$plugins_dir/onionpress-wayback-archive.php" ]; then
         docker exec onionpress-wordpress mkdir -p \
-            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1
+            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1 \
+            || log "WARNING: Failed to create mu-plugins directory"
         if docker cp "$plugins_dir/onionpress-wayback-archive.php" \
             onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-wayback-archive.php >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-wayback-archive.php >> "$LOG_FILE" 2>&1
+                /var/www/html/wp-content/mu-plugins/onionpress-wayback-archive.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-wayback-archive.php"
             log "✓ onionpress-wayback-archive.php mu-plugin installed"
         else
             log "WARNING: Failed to copy onionpress-wayback-archive.php"
@@ -961,7 +970,8 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         if docker cp "$plugins_dir/onionpress-favicon.php" \
             onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-favicon.php >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-favicon.php >> "$LOG_FILE" 2>&1
+                /var/www/html/wp-content/mu-plugins/onionpress-favicon.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-favicon.php"
             log "✓ onionpress-favicon.php mu-plugin installed"
         else
             log "WARNING: Failed to copy onionpress-favicon.php"
@@ -981,11 +991,13 @@ install_cellar_plugin() {
 
     if [ -f "$plugins_dir/onionpress-cellar-register.php" ]; then
         docker exec onionpress-wordpress mkdir -p \
-            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1
+            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1 \
+            || log "WARNING: Failed to create mu-plugins directory"
         if docker cp "$plugins_dir/onionpress-cellar-register.php" \
             onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1
+                /var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-cellar-register.php"
             log "✓ onionpress-cellar-register.php mu-plugin installed"
         else
             log "WARNING: Failed to copy onionpress-cellar-register.php"
@@ -997,7 +1009,8 @@ install_cellar_plugin() {
         if docker cp "$plugins_dir/onionpress-cellar-crypto.php" \
             onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php >> "$LOG_FILE" 2>&1
+                /var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-cellar-crypto.php"
             log "✓ onionpress-cellar-crypto.php installed"
         else
             log "WARNING: Failed to copy onionpress-cellar-crypto.php"
@@ -1009,7 +1022,8 @@ install_cellar_plugin() {
         if docker cp "$plugins_dir/onionpress-cellar-db.php" \
             onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php >> "$LOG_FILE" 2>&1
+                /var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-cellar-db.php"
             log "✓ onionpress-cellar-db.php installed"
         else
             log "WARNING: Failed to copy onionpress-cellar-db.php"
@@ -1018,16 +1032,20 @@ install_cellar_plugin() {
 
     # Create cellar data directory inside containers
     docker exec onionpress-wordpress mkdir -p \
-        /var/lib/onionpress/cellar/keys >> "$LOG_FILE" 2>&1
+        /var/lib/onionpress/cellar/keys >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to create cellar data directory in wordpress container"
     docker exec onionpress-wordpress chown -R www-data:www-data \
-        /var/lib/onionpress/cellar >> "$LOG_FILE" 2>&1
+        /var/lib/onionpress/cellar >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to chown cellar data directory"
 
     # Ensure cellar starts locked — delete unlocked key file
     # (functionally equivalent to tmpfs: key is lost on restart)
     docker exec onionpress-wordpress rm -f \
-        /var/lib/onionpress/cellar/.master-key-unlocked >> "$LOG_FILE" 2>&1
+        /var/lib/onionpress/cellar/.master-key-unlocked >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to clear master key in wordpress container"
     docker exec onionpress-tor rm -f \
-        /var/lib/onionpress/cellar/.master-key-unlocked >> "$LOG_FILE" 2>&1
+        /var/lib/onionpress/cellar/.master-key-unlocked >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to clear master key in tor container"
     log "✓ Cellar locked on startup (master key cleared)"
 
     return 0
@@ -1163,7 +1181,7 @@ start_containers() {
 
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
-        docker compose up -d tor >> "$LOG_FILE" 2>&1
+        docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
     else
         log "WordPress not yet installed — waiting for setup (Tor NOT started)"
     fi
@@ -1191,7 +1209,7 @@ start_containers() {
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
         log "Cloudflare Tunnel enabled, starting cloudflared..."
-        docker compose --profile cloudflare up -d cloudflared >> "$LOG_FILE" 2>&1
+        docker compose --profile cloudflare up -d cloudflared >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start cloudflared container"
     else
         # Stop cloudflared if it was previously running but token was removed
         docker compose --profile cloudflare stop cloudflared 2>/dev/null || true
@@ -1383,7 +1401,7 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
-            docker compose up -d tor >> "$LOG_FILE" 2>&1
+            docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor container started"
             ;;
 

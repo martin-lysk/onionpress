@@ -394,11 +394,14 @@ def _poll_entry(app, entry):
             # Instance recovered — the healthcheck address is independent
             # (not taken over), so it being reachable means the original
             # instance is back online. Release the content address.
-            _do_release(app, entry)
-            entry["takeover_active"] = False
-            entry["status"] = "healthy"
-            entry["fail_count"] = 0
-            entry["fast_poll_remaining"] = FAST_POLL_COUNT
+            if _do_release(app, entry):
+                entry["takeover_active"] = False
+                entry["status"] = "healthy"
+                entry["fail_count"] = 0
+                entry["fast_poll_remaining"] = FAST_POLL_COUNT
+            else:
+                app.log(f"OnionCellar: WARNING — release failed for {content_addr}, keeping takeover_active")
+                entry["status"] = "release_failed"
             modified = True
         elif fail_count > 0:
             # Was failing, now recovering
@@ -487,10 +490,13 @@ def cellar_poller(app):
             for entry in registry:
                 if entry.get("takeover_active") and entry.get("status") == "healthy":
                     app.log(f"OnionCellar: {entry['content_address']} re-registered — immediate release")
-                    _do_release(app, entry)
-                    entry["takeover_active"] = False
-                    entry["fail_count"] = 0
-                    entry["fast_poll_remaining"] = 0
+                    if _do_release(app, entry):
+                        entry["takeover_active"] = False
+                        entry["fail_count"] = 0
+                        entry["fast_poll_remaining"] = 0
+                    else:
+                        app.log(f"OnionCellar: WARNING — immediate release failed for {entry['content_address']}, keeping takeover_active")
+                        entry["status"] = "release_failed"
                     entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
                     modified_entries.append(entry)
 
