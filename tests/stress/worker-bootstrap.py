@@ -83,7 +83,13 @@ def parse_openssh_pem(path):
 
 
 def register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64):
-    """Register with cellar over Tor (via this container's SOCKS proxy)."""
+    """Register with cellar over Tor (via this container's SOCKS proxy).
+
+    Uses exponential backoff: retries up to 6 times with delays of
+    5s, 15s, 30s, 60s, 60s between attempts. Total worst-case ~8 minutes
+    per worker, but this trades speed for reliability when Tor circuits
+    are flaky.
+    """
     payload = json.dumps({
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
@@ -93,21 +99,41 @@ def register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
         "version": "stress-test",
     })
 
+    max_attempts = 6
+    backoff = [5, 15, 30, 60, 60]  # delays between attempts
+
+    for attempt in range(max_attempts):
+        try:
+            result = subprocess.run(
+                [
+                    "curl", "-s", "-X", "POST",
+                    "--socks5-hostname", "127.0.0.1:9050",
+                    "-H", "Content-Type: application/json",
+                    "-d", payload,
+                    "--max-time", "90",
+                    f"http://{CELLAR_ADDR}/register",
+                ],
+                capture_output=True, text=True, timeout=105,
+            )
+            try:
+                resp = json.loads(result.stdout)
+                if resp.get("registered"):
+                    return result.stdout
+            except (json.JSONDecodeError, ValueError):
+                pass
+        except Exception:
+            pass
+
+        if attempt < max_attempts - 1:
+            delay = backoff[min(attempt, len(backoff) - 1)]
+            print(f"  Registration attempt {attempt + 1} failed, retrying in {delay}s...", flush=True)
+            time.sleep(delay)
+
+    # All attempts exhausted — return last result or error
     try:
-        result = subprocess.run(
-            [
-                "curl", "-s", "-X", "POST",
-                "--socks5-hostname", "127.0.0.1:9050",
-                "-H", "Content-Type: application/json",
-                "-d", payload,
-                "--max-time", "60",
-                f"http://{CELLAR_ADDR}/register",
-            ],
-            capture_output=True, text=True, timeout=75,
-        )
         return result.stdout
-    except Exception as e:
-        return f'{{"error": "{e}"}}'
+    except Exception:
+        return '{"error": "all attempts exhausted"}'
 
 
 def wait_for_socks():
@@ -204,24 +230,22 @@ def main():
         public_b64 = base64.b64encode(pubkey).decode()
         pem_b64 = base64.b64encode(pem_data).decode()
 
-        # Self-register with cellar over Tor (retry up to 3 times)
+        # Self-register with cellar over Tor (retries with backoff inside)
         print(f"[worker {i}] Registering with cellar over Tor...", flush=True)
+        result = register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
         ok = False
-        for attempt in range(3):
-            result = register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
-            try:
-                resp = json.loads(result)
-                ok = resp.get("registered", False)
-            except Exception:
-                pass
-            if ok:
-                break
-            if attempt < 2:
-                print(f"[worker {i}] Retry {attempt + 1}...", flush=True)
-                time.sleep(5)
+        try:
+            resp = json.loads(result)
+            ok = resp.get("registered", False)
+        except Exception:
+            pass
 
         status = "OK" if ok else f"FAILED: {result[:200]}"
         print(f"[worker {i}] Registration: {status}", flush=True)
+
+        # Stagger between workers to avoid overwhelming Tor circuits
+        if i < NUM_WORKERS - 1:
+            time.sleep(2)
 
         workers.append({
             "index": CONTAINER_IDX * NUM_WORKERS + i,

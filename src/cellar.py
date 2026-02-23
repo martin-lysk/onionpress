@@ -183,44 +183,57 @@ def register_with_cellar(app):
 
     # Send via wordpress container's curl through tor SOCKS proxy
     # (per CLAUDE.md: use docker exec for all Tor communication)
-    ok, output = _run_docker(app, [
-        "exec", "onionpress-wordpress",
-        "curl", "-s", "-X", "POST",
-        "--socks5-hostname", "onionpress-tor:9050",
-        "-H", "Content-Type: application/json",
-        "-d", payload,
-        "--max-time", "30",
-        f"http://{CELLAR_ADDRESS}/register"
-    ], timeout=45)
+    # Retry with backoff to handle flaky Tor circuits
+    backoff = [10, 30, 60]
+    max_attempts = 4
+    last_output = ""
 
-    if ok and output:
-        try:
-            resp = json.loads(output)
-            if resp.get("registered"):
-                app.log("OnionCellar: registration successful")
-                _save_registration_status(app, {
-                    "registered": True,
-                    "last_attempt": datetime.now(timezone.utc).isoformat(),
-                    "cellar_address": CELLAR_ADDRESS,
-                    "content_address": content_addr,
-                })
-                return
-            if resp.get("locked"):
-                app.log("OnionCellar: cellar is locked, deferring registration (will retry on next startup)")
-                _save_registration_status(app, {
-                    "registered": False,
-                    "locked": True,
-                    "last_attempt": datetime.now(timezone.utc).isoformat(),
-                    "cellar_address": CELLAR_ADDRESS,
-                })
-                return
-            # Server returned a structured error (e.g. key validation failure)
-            error_msg = resp.get("error", "unknown error")
-            app.log(f"OnionCellar: registration rejected: {error_msg}")
-        except json.JSONDecodeError:
-            pass
+    for attempt in range(max_attempts):
+        ok, output = _run_docker(app, [
+            "exec", "onionpress-wordpress",
+            "curl", "-s", "-X", "POST",
+            "--socks5-hostname", "onionpress-tor:9050",
+            "-H", "Content-Type: application/json",
+            "-d", payload,
+            "--max-time", "60",
+            f"http://{CELLAR_ADDRESS}/register"
+        ], timeout=75)
+        last_output = output
 
-    app.log(f"OnionCellar: registration failed (will retry on next startup) — response: {output!r}")
+        if ok and output:
+            try:
+                resp = json.loads(output)
+                if resp.get("registered"):
+                    app.log("OnionCellar: registration successful")
+                    _save_registration_status(app, {
+                        "registered": True,
+                        "last_attempt": datetime.now(timezone.utc).isoformat(),
+                        "cellar_address": CELLAR_ADDRESS,
+                        "content_address": content_addr,
+                    })
+                    return
+                if resp.get("locked"):
+                    app.log("OnionCellar: cellar is locked, deferring registration (will retry on next startup)")
+                    _save_registration_status(app, {
+                        "registered": False,
+                        "locked": True,
+                        "last_attempt": datetime.now(timezone.utc).isoformat(),
+                        "cellar_address": CELLAR_ADDRESS,
+                    })
+                    return
+                # Server returned a structured error — don't retry
+                error_msg = resp.get("error", "unknown error")
+                app.log(f"OnionCellar: registration rejected: {error_msg}")
+                break
+            except json.JSONDecodeError:
+                pass
+
+        if attempt < max_attempts - 1:
+            delay = backoff[min(attempt, len(backoff) - 1)]
+            app.log(f"OnionCellar: registration attempt {attempt + 1} failed, retrying in {delay}s...")
+            time.sleep(delay)
+
+    app.log(f"OnionCellar: registration failed after {max_attempts} attempts (will retry on next startup) — last response: {last_output!r}")
     _save_registration_status(app, {
         "registered": False,
         "last_attempt": datetime.now(timezone.utc).isoformat(),
@@ -277,34 +290,49 @@ def unregister_from_cellar(app, content_address=None):
         "proof": proof,
     })
 
-    ok, output = _run_docker(app, [
-        "exec", "onionpress-wordpress",
-        "curl", "-s", "-X", "POST",
-        "--socks5-hostname", "onionpress-tor:9050",
-        "-H", "Content-Type: application/json",
-        "-d", payload,
-        "--max-time", "30",
-        f"http://{CELLAR_ADDRESS}/unregister"
-    ], timeout=45)
+    # Retry with backoff — uninstall/address-change are one-shot, reliability > speed
+    backoff = [5, 15, 30]
+    max_attempts = 4
+    last_output = ""
 
-    if ok and output:
-        try:
-            resp = json.loads(output)
-            if resp.get("unregistered"):
-                app.log("OnionCellar: unregistered successfully")
-                _save_registration_status(app, {
-                    "registered": False,
-                    "unregistered_at": datetime.now(timezone.utc).isoformat(),
-                    "cellar_address": CELLAR_ADDRESS,
-                    "content_address": addr,
-                })
-                return
-            error_msg = resp.get("error", "unknown error")
-            app.log(f"OnionCellar: unregister rejected: {error_msg}")
-        except json.JSONDecodeError:
-            pass
+    for attempt in range(max_attempts):
+        ok, output = _run_docker(app, [
+            "exec", "onionpress-wordpress",
+            "curl", "-s", "-X", "POST",
+            "--socks5-hostname", "onionpress-tor:9050",
+            "-H", "Content-Type: application/json",
+            "-d", payload,
+            "--max-time", "60",
+            f"http://{CELLAR_ADDRESS}/unregister"
+        ], timeout=75)
+        last_output = output
 
-    app.log(f"OnionCellar: unregister failed (best-effort, continuing) — response: {output!r}")
+        if ok and output:
+            try:
+                resp = json.loads(output)
+                if resp.get("unregistered"):
+                    app.log("OnionCellar: unregistered successfully")
+                    _save_registration_status(app, {
+                        "registered": False,
+                        "unregistered_at": datetime.now(timezone.utc).isoformat(),
+                        "cellar_address": CELLAR_ADDRESS,
+                        "content_address": addr,
+                    })
+                    return
+                error_msg = resp.get("error", "unknown error")
+                app.log(f"OnionCellar: unregister rejected: {error_msg}")
+                # Don't retry on auth/validation errors — they won't fix themselves
+                if resp.get("error"):
+                    return
+            except json.JSONDecodeError:
+                pass
+
+        if attempt < max_attempts - 1:
+            delay = backoff[min(attempt, len(backoff) - 1)]
+            app.log(f"OnionCellar: unregister attempt {attempt + 1} failed, retrying in {delay}s...")
+            time.sleep(delay)
+
+    app.log(f"OnionCellar: unregister failed after {max_attempts} attempts (best-effort, continuing) — last response: {last_output!r}")
 
 
 # ---------------------------------------------------------------------------
