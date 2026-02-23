@@ -148,7 +148,7 @@ detect_cellar_mode() {
         # Build cellar-aware tor image (layers new files on top of pre-built image)
         # This is fast (<5s) since the base image is already pulled and we only add scripts
         local tor_dir
-        tor_dir="$(cd "$(dirname "$0")/../Contents/Resources/docker/tor" && pwd)"
+        tor_dir="$(cd "$(dirname "$0")/../Resources/docker/tor" && pwd)"
         log "OnionCellar: building tor image with cellar poller..."
         docker build -t ghcr.io/brewsterkahle/onionpress-tor:latest \
             -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'CELLAR_DOCKERFILE'
@@ -1097,16 +1097,6 @@ install_cellar_plugin() {
     docker exec onionpress-wordpress chown -R www-data:www-data \
         /var/lib/onionpress/cellar >> "$LOG_FILE" 2>&1 \
         || log "WARNING: Failed to chown cellar data directory"
-
-    # Ensure cellar starts locked — delete unlocked key file
-    # (functionally equivalent to tmpfs: key is lost on restart)
-    docker exec onionpress-wordpress rm -f \
-        /var/lib/onionpress/cellar/.master-key-unlocked >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to clear master key in wordpress container"
-    docker exec onionpress-tor rm -f \
-        /var/lib/onionpress/cellar/.master-key-unlocked >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to clear master key in tor container"
-    log "✓ Cellar locked on startup (master key cleared)"
 
     return 0
 }

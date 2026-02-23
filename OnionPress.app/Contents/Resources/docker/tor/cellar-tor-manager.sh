@@ -19,7 +19,6 @@ else
 fi
 ARTI_KEYSTORE="/var/lib/arti/state/keystore/hss"
 CELLAR_KEYS_DIR="/var/lib/onionpress/cellar/keys"
-CELLAR_UNLOCKED_FILE="/var/lib/onionpress/cellar/.master-key-unlocked"
 REDIRECT_PORT=8082
 
 usage() {
@@ -88,12 +87,6 @@ do_takeover() {
     if [ ! -f "${keys_src}/ks_hs_id.ed25519_expanded_private.enc" ]; then
         echo "ERROR: No Arti key found for ${CONTENT_ADDRESS}"
         exit 1
-    fi
-
-    # Encrypted key — need master key to be unlocked
-    if [ ! -f "$CELLAR_UNLOCKED_FILE" ]; then
-        echo "ERROR: Cellar is locked — cannot decrypt keys"
-        exit 2
     fi
 
     # Create the Arti keystore directory for this service

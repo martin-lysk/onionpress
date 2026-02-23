@@ -198,15 +198,6 @@ def register_with_cellar(app):
                         "content_address": content_addr,
                     })
                     return
-                if resp.get("locked"):
-                    app.log("OnionCellar: cellar is locked, deferring registration (will retry on next startup)")
-                    _save_registration_status(app, {
-                        "registered": False,
-                        "locked": True,
-                        "last_attempt": datetime.now(timezone.utc).isoformat(),
-                        "cellar_address": CELLAR_ADDRESS,
-                    })
-                    return
                 # Server returned a structured error — don't retry
                 error_msg = resp.get("error", "unknown error")
                 app.log(f"OnionCellar: registration rejected: {error_msg}")
@@ -332,11 +323,3 @@ def is_cellar_instance(onion_address):
     return onion_address.strip() == CELLAR_ADDRESS.strip()
 
 
-def _is_cellar_unlocked(app):
-    """Check if the cellar master key is currently unlocked.
-    Used by menubar.py to display lock status in the UI."""
-    ok, _ = _run_docker(app, [
-        "exec", "onionpress-tor",
-        "test", "-f", f"{CELLAR_DATA_DIR}/.master-key-unlocked"
-    ])
-    return ok

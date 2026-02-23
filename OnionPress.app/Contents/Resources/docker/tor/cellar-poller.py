@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 # Paths (inside the container, on shared onionpress-data volume)
 CELLAR_DB_PATH = "/var/lib/onionpress/cellar/registry.db"
 CELLAR_DATA_DIR = "/var/lib/onionpress/cellar"
-CELLAR_UNLOCKED_FILE = f"{CELLAR_DATA_DIR}/.master-key-unlocked"
 TOR_MANAGER = "/cellar-tor-manager.sh"
 
 # SOCKS proxy (Arti running in same container)
@@ -210,21 +209,12 @@ def check_content(content_address):
 
 
 # ---------------------------------------------------------------------------
-# Cellar lock check (shared volume)
-# ---------------------------------------------------------------------------
-
-def is_cellar_unlocked():
-    """Check if the cellar master key is currently unlocked."""
-    return os.path.exists(CELLAR_UNLOCKED_FILE)
-
-
-# ---------------------------------------------------------------------------
 # Takeover / Release via cellar-tor-manager.sh (local)
 # ---------------------------------------------------------------------------
 
 def do_takeover(entry):
     """Take over a failed instance's .onion address.
-    Returns: 'ok', 'locked', or 'failed'."""
+    Returns: 'ok' or 'failed'."""
     content_addr = entry["content_address"]
     log(f"Taking over {content_addr}")
 
@@ -236,9 +226,6 @@ def do_takeover(entry):
         if result.returncode == 0:
             log(f"Takeover complete for {content_addr}")
             return "ok"
-        elif result.returncode == 2:
-            log(f"Cellar locked, deferring takeover for {content_addr}")
-            return "locked"
         else:
             log(f"Takeover failed for {content_addr}: {result.stdout.strip()}")
             return "failed"
@@ -317,22 +304,16 @@ def poll_entry(entry):
         modified = True
 
         if new_fail_count >= FAIL_THRESHOLD and not takeover_active:
-            if not is_cellar_unlocked():
-                entry["status"] = "takeover_deferred_locked"
+            # Double-check: also test the content address
+            content_ok = check_content(content_addr)
+            if not content_ok:
+                result = do_takeover(entry)
+                if result == "ok":
+                    entry["takeover_active"] = True
+                    entry["status"] = "taken_over"
+                else:
+                    entry["status"] = "takeover_failed"
                 modified = True
-            else:
-                # Double-check: also test the content address
-                content_ok = check_content(content_addr)
-                if not content_ok:
-                    result = do_takeover(entry)
-                    if result == "ok":
-                        entry["takeover_active"] = True
-                        entry["status"] = "taken_over"
-                    elif result == "locked":
-                        entry["status"] = "takeover_deferred_locked"
-                    else:
-                        entry["status"] = "takeover_failed"
-                    modified = True
 
     # Update timestamp
     entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
