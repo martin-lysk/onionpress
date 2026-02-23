@@ -167,6 +167,9 @@ def register_with_cellar(app):
         app.log(f"OnionCellar: failed to read public key: {e}")
         return
 
+    # Build Arti OpenSSH PEM for cellar storage
+    arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
+
     # Build registration payload (keys as base64-encoded strings)
     import base64
     payload = json.dumps({
@@ -174,6 +177,7 @@ def register_with_cellar(app):
         "healthcheck_address": hc_addr,
         "secret_key": base64.b64encode(secret_key_bytes).decode('ascii'),
         "public_key": base64.b64encode(public_key_raw).decode('ascii'),
+        "arti_key_pem": base64.b64encode(arti_pem).decode('ascii'),
         "version": getattr(app, 'version', 'unknown'),
     })
 

@@ -124,7 +124,7 @@ function onionpress_cellar_handle_register() {
         }
     }
 
-    // Store keys on disk (encrypted)
+    // Store Arti OpenSSH PEM key on disk (encrypted)
     $cellar_dir = '/var/lib/onionpress/cellar';
     $keys_dir = "$cellar_dir/keys/$content_address";
 
@@ -132,28 +132,34 @@ function onionpress_cellar_handle_register() {
         mkdir($keys_dir, 0700, true);
     }
 
-    // Build the Tor key files in the expected format
-    // Secret key: 32-byte header + 64-byte key
-    $secret_header = "== ed25519v1-secret: type0 ==";
-    $secret_header = str_pad($secret_header, 32, "\x00");
-    $secret_full = $secret_header . $secret_key;
+    // Decode and validate Arti PEM if provided, otherwise build from raw keys
+    if (!empty($data['arti_key_pem'])) {
+        $arti_pem = base64_decode($data['arti_key_pem'], true);
+        if ($arti_pem === false || strpos($arti_pem, '-----BEGIN OPENSSH PRIVATE KEY-----') !== 0) {
+            onionpress_cellar_respond(400, ['error' => 'Invalid arti_key_pem format']);
+            return;
+        }
+    } else {
+        // Legacy client without arti_key_pem — build PEM from raw keys
+        // This maintains backward compatibility during the transition
+        onionpress_cellar_respond(400, ['error' => 'Missing required field: arti_key_pem']);
+        return;
+    }
 
-    // Encrypt and write key files
-    $enc_secret = cellar_crypto_encrypt_key($secret_full, $master_key);
-    $enc_public = cellar_crypto_encrypt_key($public_key, $master_key);
+    // Encrypt and write the Arti PEM key file
+    $enc_pem = cellar_crypto_encrypt_key($arti_pem, $master_key);
 
-    if ($enc_secret === false || $enc_public === false) {
+    if ($enc_pem === false) {
         onionpress_cellar_respond(500, ['error' => 'Encryption failed']);
         return;
     }
 
-    file_put_contents("$keys_dir/hs_ed25519_secret_key.enc", $enc_secret);
-    chmod("$keys_dir/hs_ed25519_secret_key.enc", 0600);
+    file_put_contents("$keys_dir/ks_hs_id.ed25519_expanded_private.enc", $enc_pem);
+    chmod("$keys_dir/ks_hs_id.ed25519_expanded_private.enc", 0600);
 
-    file_put_contents("$keys_dir/hs_ed25519_public_key.enc", $enc_public);
-    chmod("$keys_dir/hs_ed25519_public_key.enc", 0600);
-
-    // Remove any plaintext key files (migration cleanup)
+    // Remove old C-tor key files if present (migration cleanup)
+    @unlink("$keys_dir/hs_ed25519_secret_key.enc");
+    @unlink("$keys_dir/hs_ed25519_public_key.enc");
     @unlink("$keys_dir/hs_ed25519_secret_key");
     @unlink("$keys_dir/hs_ed25519_public_key");
 
@@ -365,9 +371,10 @@ function onionpress_cellar_super_admin_revoked($user_id) {
 }
 
 /**
- * Migrate plaintext key files to encrypted format.
- * Scans cellar/keys/ subdirectories for plaintext key files without .enc companions,
+ * Migrate plaintext Arti key files to encrypted format.
+ * Scans cellar/keys/ subdirectories for plaintext PEM files without .enc companions,
  * encrypts them, and removes the plaintext originals.
+ * Also cleans up any remaining C-tor key files from the pre-Arti era.
  */
 function onionpress_cellar_migrate_plaintext_keys($master_key) {
     $keys_base = '/var/lib/onionpress/cellar/keys';
@@ -390,34 +397,26 @@ function onionpress_cellar_migrate_plaintext_keys($master_key) {
             continue;
         }
 
-        // Check for plaintext secret key without encrypted companion
-        $secret_plain = "$dir_path/hs_ed25519_secret_key";
-        $secret_enc = "$dir_path/hs_ed25519_secret_key.enc";
-        $public_plain = "$dir_path/hs_ed25519_public_key";
-        $public_enc = "$dir_path/hs_ed25519_public_key.enc";
+        // Migrate plaintext Arti PEM to encrypted
+        $pem_plain = "$dir_path/ks_hs_id.ed25519_expanded_private";
+        $pem_enc = "$dir_path/ks_hs_id.ed25519_expanded_private.enc";
 
-        if (file_exists($secret_plain) && !file_exists($secret_enc)) {
-            $secret_data = file_get_contents($secret_plain);
-            if ($secret_data !== false) {
-                $encrypted = cellar_crypto_encrypt_key($secret_data, $master_key);
+        if (file_exists($pem_plain) && !file_exists($pem_enc)) {
+            $pem_data = file_get_contents($pem_plain);
+            if ($pem_data !== false) {
+                $encrypted = cellar_crypto_encrypt_key($pem_data, $master_key);
                 if ($encrypted !== false) {
-                    file_put_contents($secret_enc, $encrypted);
-                    chmod($secret_enc, 0600);
-                    unlink($secret_plain);
+                    file_put_contents($pem_enc, $encrypted);
+                    chmod($pem_enc, 0600);
+                    unlink($pem_plain);
                 }
             }
         }
 
-        if (file_exists($public_plain) && !file_exists($public_enc)) {
-            $public_data = file_get_contents($public_plain);
-            if ($public_data !== false) {
-                $encrypted = cellar_crypto_encrypt_key($public_data, $master_key);
-                if ($encrypted !== false) {
-                    file_put_contents($public_enc, $encrypted);
-                    chmod($public_enc, 0600);
-                    unlink($public_plain);
-                }
-            }
-        }
+        // Clean up old C-tor key files (no longer used)
+        @unlink("$dir_path/hs_ed25519_secret_key");
+        @unlink("$dir_path/hs_ed25519_secret_key.enc");
+        @unlink("$dir_path/hs_ed25519_public_key");
+        @unlink("$dir_path/hs_ed25519_public_key.enc");
     }
 }
