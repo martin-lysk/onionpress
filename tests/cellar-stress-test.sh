@@ -142,6 +142,16 @@ preflight() {
     fi
     log "  Arti image: $ARTI_IMAGE"
 
+    # Check if cellar is unlocked (registrations will fail if locked)
+    local lock_check
+    lock_check=$(docker_cmd exec onionpress-wordpress curl -s --max-time 5 http://localhost:80/register 2>/dev/null || echo "")
+    if echo "$lock_check" | grep -q '"locked":true'; then
+        echo "ERROR: Cellar is LOCKED — registrations will fail"
+        echo "  Log into WordPress admin in a browser to unlock the cellar"
+        exit 1
+    fi
+    log "  Cellar is unlocked"
+
     log "Preflight OK"
 }
 
