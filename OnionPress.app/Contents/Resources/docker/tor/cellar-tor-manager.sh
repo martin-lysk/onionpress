@@ -11,7 +11,12 @@
 # On release: removes service config from arti.toml, cleans up keystore directory,
 #              signals Arti to reload.
 
-ARTI_TOML="/etc/arti/arti.toml"
+# Detect config: cellar-polling container uses arti-cellar.toml, main tor uses arti.toml
+if [ "${POLLING_ONLY}" = "1" ]; then
+    ARTI_TOML="/etc/arti/arti-cellar.toml"
+else
+    ARTI_TOML="/etc/arti/arti.toml"
+fi
 ARTI_KEYSTORE="/var/lib/arti/state/keystore/hss"
 CELLAR_KEYS_DIR="/var/lib/onionpress/cellar/keys"
 CELLAR_UNLOCKED_FILE="/var/lib/onionpress/cellar/.master-key-unlocked"

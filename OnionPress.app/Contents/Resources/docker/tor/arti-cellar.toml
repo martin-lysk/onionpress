@@ -1,0 +1,10 @@
+# Arti config for cellar-polling container (SOCKS proxy + keystore for takeover)
+[proxy]
+socks_listen = "0.0.0.0:9050"
+
+[storage]
+cache_dir = "/var/lib/arti/cache"
+state_dir = "/var/lib/arti/state"
+
+[storage.keystore]
+enabled = true

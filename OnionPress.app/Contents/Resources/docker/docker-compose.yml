@@ -65,7 +65,11 @@ services:
     container_name: onionpress-tor-polling
     environment:
       - POLLING_ONLY=1
+      - ONIONPRESS_CELLAR=${ONIONPRESS_CELLAR:-0}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
+    volumes:
+      - arti-state-polling:/var/lib/arti/
+      - onionpress-data:/var/lib/onionpress
     restart: unless-stopped
     networks:
       - onionpress-network
@@ -89,6 +93,8 @@ services:
 volumes:
   arti-state:
     name: onionpress-arti-state
+  arti-state-polling:
+    name: onionpress-arti-state-polling
   wordpress-data:
     name: onionpress-wordpress-data
   db-data:

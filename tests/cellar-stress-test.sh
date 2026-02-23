@@ -41,7 +41,7 @@ FAILING=""        # auto: half of total
 CELLAR_ADDR=""    # auto-detect from local tor container
 OUTPUT_DIR="./cellar-stress-results"
 CLEANUP=false
-PER_CTR=50        # workers per container
+PER_CTR=100       # workers per container
 BATCH_SIZE=0      # 0 = start all containers at once
 STRESS_VERSION="stress-test"
 BASE_PORT=9100    # port range start inside each container
@@ -420,7 +420,7 @@ get_container_mem_mb() {
 }
 
 get_last_poll_duration() {
-    grep 'poll pass complete' "$DATA_DIR/onionpress.log" 2>/dev/null | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r'
+    docker_cmd logs --tail 100 onionpress-tor-polling 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r'
 }
 
 get_system_mem_pct() {

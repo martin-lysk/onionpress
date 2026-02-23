@@ -145,17 +145,8 @@ detect_cellar_mode() {
                 fi
             fi
         fi
-        # Start cellar redirect service inside the tor container (port 8082)
-        # This runs post-startup since ONIONPRESS_CELLAR wasn't set at container boot
-        docker compose exec -T tor mkdir -p /var/lib/tor/hidden_service/cellar 2>/dev/null || true
-        docker compose exec -T tor chown -R tor:tor /var/lib/tor/hidden_service/cellar 2>/dev/null || true
-        if docker compose exec -d -T tor /cellar-redirect.sh 2>/dev/null; then
-            log "OnionCellar: started redirect service on port 8082"
-        else
-            log "WARNING: Failed to start cellar redirect service"
-        fi
-        # Start dedicated polling Tor container (SOCKS-only, no hidden services)
-        # This keeps HSDir lookups for 50+ addresses off the main Tor instance
+        # Start dedicated polling Tor container (SOCKS + keystore + cellar-poller)
+        # This keeps HSDir lookups off the main Tor instance and runs the cellar poller
         if docker compose --profile cellar up -d tor-polling >> "$LOG_FILE" 2>&1; then
             log "OnionCellar: started polling Tor container (onionpress-tor-polling)"
         else

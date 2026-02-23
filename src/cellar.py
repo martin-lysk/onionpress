@@ -5,9 +5,11 @@ OnionCellar — failover system for OnionPress
 When an OnionPress instance's .onion address goes offline, the cellar takes over
 the address and serves 302 redirects to the Internet Archive Wayback Machine.
 
-Two roles:
-  1. Registration client (normal instances): sends keys to the cellar
-  2. Cellar mode (cellar instance): monitors registered instances, takes over on failure
+This module handles the registration client (normal instances send keys to the cellar)
+and cellar mode detection for the menubar UI.
+
+The cellar poller (healthcheck monitoring, takeover, release) runs inside the
+tor-polling container as cellar-poller.py — not in this module.
 """
 
 import json
@@ -15,7 +17,6 @@ import os
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 # The cellar's .onion address — placeholder until a real address is generated
@@ -26,21 +27,6 @@ WAYBACK_ONION = "web.archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.o
 
 # Paths inside containers
 CELLAR_DATA_DIR = "/var/lib/onionpress/cellar"
-CELLAR_KEYS_DIR = f"{CELLAR_DATA_DIR}/keys"
-CELLAR_DB_PHP = "/var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php"
-
-# Healthcheck intervals (seconds)
-HEALTHY_INTERVAL = 15        # 15 seconds between polls
-FAST_POLL_INTERVAL = 15      # 15 seconds after recent failure/recovery
-LONG_FAIL_INTERVAL = 1800    # 30 minutes after prolonged failure
-
-# Thresholds
-FAIL_THRESHOLD = 10          # consecutive failures before takeover (needs to survive Tor propagation delay)
-FAST_POLL_COUNT = 20         # how many fast polls before slowing down
-
-# Parallel polling
-POLL_CYCLE_TARGET = 60       # target seconds per full poll pass
-MAX_POLL_WORKERS = 20        # max concurrent healthcheck threads
 
 
 def _docker_env(app):
@@ -336,7 +322,7 @@ def unregister_from_cellar(app, content_address=None):
 
 
 # ---------------------------------------------------------------------------
-# Cellar mode (runs on the OnionCellar instance)
+# Cellar mode detection and UI helpers (poller runs in tor-polling container)
 # ---------------------------------------------------------------------------
 
 def is_cellar_instance(onion_address):
@@ -347,291 +333,10 @@ def is_cellar_instance(onion_address):
 
 
 def _is_cellar_unlocked(app):
-    """Check if the cellar master key is currently unlocked."""
+    """Check if the cellar master key is currently unlocked.
+    Used by menubar.py to display lock status in the UI."""
     ok, _ = _run_docker(app, [
         "exec", "onionpress-tor",
         "test", "-f", f"{CELLAR_DATA_DIR}/.master-key-unlocked"
     ])
     return ok
-
-
-def _cellar_db_init(app):
-    """Initialize the cellar SQLite database (schema + JSON migration).
-    Runs as www-data so DB files are owned by the web server user."""
-    ok, output = _run_docker(app, [
-        "exec", "--user", "www-data", "onionpress-wordpress",
-        "php", CELLAR_DB_PHP, "init"
-    ])
-    if ok and output:
-        try:
-            result = json.loads(output)
-            migrated = result.get("migrated", 0)
-            if migrated > 0:
-                app.log(f"OnionCellar: migrated {migrated} entries from JSON to SQLite")
-            return True
-        except json.JSONDecodeError:
-            pass
-    app.log(f"OnionCellar: DB init output: {output!r}")
-    return ok
-
-
-def _read_registry(app):
-    """Read the cellar registry from SQLite via PHP CLI."""
-    ok, output = _run_docker(app, [
-        "exec", "--user", "www-data", "onionpress-wordpress",
-        "php", CELLAR_DB_PHP, "read-all"
-    ])
-    if ok and output:
-        try:
-            return json.loads(output)
-        except json.JSONDecodeError:
-            app.log(f"OnionCellar: failed to parse registry JSON: {output[:200]!r}")
-    return []
-
-
-def _write_poll_updates(app, entries):
-    """Write poll results to SQLite via PHP CLI (batch update).
-    Only updates poll-related fields (status, last_healthcheck,
-    fail_count, takeover_active, fast_poll_remaining).
-    Uses a heredoc to safely pass JSON without shell quoting issues."""
-    if not entries:
-        return
-    payload = json.dumps(entries)
-    ok, output = _run_docker(app, [
-        "exec", "-i", "--user", "www-data", "onionpress-wordpress",
-        "sh", "-c", f"cat << 'POLLEOF' | php {CELLAR_DB_PHP} batch-upsert-poll\n{payload}\nPOLLEOF"
-    ], timeout=30)
-    if not ok:
-        app.log(f"OnionCellar: batch poll update failed: {output!r}")
-
-
-def _check_healthcheck(app, healthcheck_address):
-    """Check if a healthcheck .onion address is reachable. Returns True if healthy.
-    Uses curl in the wordpress container through the dedicated polling Tor's SOCKS
-    proxy, keeping HSDir lookups off the main Tor instance that serves our onion."""
-    ok, _ = _run_docker(app, [
-        "exec", "onionpress-wordpress",
-        "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-        "--socks5-hostname", "onionpress-tor-polling:9050",
-        "--max-time", "15",
-        f"http://{healthcheck_address}/"
-    ], timeout=25)
-    return ok
-
-
-def _check_content(app, content_address):
-    """Check if a content .onion address is reachable. Returns True if reachable.
-    Uses curl in the wordpress container through the dedicated polling Tor's SOCKS proxy."""
-    ok, _ = _run_docker(app, [
-        "exec", "onionpress-wordpress",
-        "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-        "--socks5-hostname", "onionpress-tor-polling:9050",
-        "--max-time", "15",
-        f"http://{content_address}/"
-    ], timeout=25)
-    return ok
-
-
-def _do_takeover(app, entry):
-    """Take over a failed instance's .onion address.
-    Returns: 'ok', 'locked', or 'failed'."""
-    content_addr = entry["content_address"]
-    app.log(f"OnionCellar: Taking over {content_addr}")
-
-    # Use cellar-tor-manager.sh inside the tor container to add the address
-    rc, output = _run_docker_rc(app, [
-        "exec", "onionpress-tor",
-        "/cellar-tor-manager.sh", "takeover", content_addr
-    ], timeout=30)
-
-    if rc == 0:
-        app.log(f"OnionCellar: Takeover complete for {content_addr}")
-        return "ok"
-    elif rc == 2:
-        app.log(f"OnionCellar: Cellar locked, deferring takeover for {content_addr}")
-        return "locked"
-    else:
-        app.log(f"OnionCellar: Takeover failed for {content_addr}: {output}")
-        return "failed"
-
-
-def _do_release(app, entry):
-    """Release a recovered instance's .onion address."""
-    content_addr = entry["content_address"]
-    app.log(f"OnionCellar: Releasing {content_addr} — original is back online")
-
-    ok, output = _run_docker(app, [
-        "exec", "onionpress-tor",
-        "/cellar-tor-manager.sh", "release", content_addr
-    ], timeout=30)
-
-    if ok:
-        app.log(f"OnionCellar: Released {content_addr}")
-    else:
-        app.log(f"OnionCellar: Release failed for {content_addr}: {output}")
-
-    return ok
-
-
-def _poll_entry(app, entry):
-    """Poll a single registry entry. Returns (entry, modified_bool, sleep_interval)."""
-    content_addr = entry.get("content_address", "")
-    hc_addr = entry.get("healthcheck_address", "")
-    fail_count = entry.get("fail_count", 0)
-    takeover_active = entry.get("takeover_active", False)
-    fast_poll_remaining = entry.get("fast_poll_remaining", 0)
-
-    if not content_addr or not hc_addr:
-        return entry, False, HEALTHY_INTERVAL
-
-    modified = False
-
-    # Check healthcheck
-    hc_ok = _check_healthcheck(app, hc_addr)
-
-    if hc_ok:
-        if takeover_active:
-            # Instance recovered — the healthcheck address is independent
-            # (not taken over), so it being reachable means the original
-            # instance is back online. Release the content address.
-            if _do_release(app, entry):
-                entry["takeover_active"] = False
-                entry["status"] = "healthy"
-                entry["fail_count"] = 0
-                entry["fast_poll_remaining"] = FAST_POLL_COUNT
-            else:
-                app.log(f"OnionCellar: WARNING — release failed for {content_addr}, keeping takeover_active")
-                entry["status"] = "release_failed"
-            modified = True
-        elif fail_count > 0:
-            # Was failing, now recovering
-            entry["fail_count"] = 0
-            entry["status"] = "healthy"
-            entry["fast_poll_remaining"] = FAST_POLL_COUNT
-            modified = True
-        else:
-            entry["status"] = "healthy"
-    else:
-        # Healthcheck failed
-        new_fail_count = fail_count + 1
-        entry["fail_count"] = new_fail_count
-        entry["status"] = "failing"
-        entry["fast_poll_remaining"] = FAST_POLL_COUNT
-        modified = True
-
-        if new_fail_count >= FAIL_THRESHOLD and not takeover_active:
-            # Check if cellar is unlocked before attempting takeover
-            if not _is_cellar_unlocked(app):
-                entry["status"] = "takeover_deferred_locked"
-                modified = True
-            else:
-                # Double-check: also test the content address
-                content_ok = _check_content(app, content_addr)
-                if not content_ok:
-                    result = _do_takeover(app, entry)
-                    if result == "ok":
-                        entry["takeover_active"] = True
-                        entry["status"] = "taken_over"
-                    elif result == "locked":
-                        entry["status"] = "takeover_deferred_locked"
-                    else:
-                        entry["status"] = "takeover_failed"
-                    modified = True
-
-    # Update timestamp (always mark modified so it gets persisted)
-    entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
-    modified = True
-
-    # Determine sleep interval for this entry
-    sleep_interval = HEALTHY_INTERVAL
-    if fast_poll_remaining > 0:
-        entry["fast_poll_remaining"] = fast_poll_remaining - 1
-        sleep_interval = FAST_POLL_INTERVAL
-        modified = True
-    elif takeover_active:
-        sleep_interval = LONG_FAIL_INTERVAL
-
-    return entry, modified, sleep_interval
-
-
-def cellar_poller(app):
-    """
-    Main cellar polling loop. Monitors registered instances and manages takeover/release.
-    Runs as a background thread on the cellar instance.
-    Uses a thread pool to check entries in parallel.
-
-    With SQLite, we only UPDATE the rows we polled — no merge logic needed.
-    New registrations go through PHP's cellar_db_upsert_register() on separate
-    columns, so there are no read-modify-write races.
-    """
-    app.log("OnionCellar: healthcheck poller started")
-
-    # Wait for services to be ready
-    while not app.is_ready:
-        time.sleep(10)
-
-    # Initialize the DB (schema + JSON migration) on first run
-    _cellar_db_init(app)
-
-    while True:
-        try:
-            registry = _read_registry(app)
-            if not registry:
-                app.log("OnionCellar: poll pass complete — 0 entries in 0.0s")
-                time.sleep(HEALTHY_INTERVAL)
-                continue
-
-            pass_start = time.monotonic()
-            modified_entries = []
-            min_sleep = HEALTHY_INTERVAL
-
-            # Immediate release: if an entry re-registered while taken over,
-            # the PHP upsert resets status='healthy' but leaves takeover_active=1.
-            # Registration over Tor proves the instance is alive — release now.
-            for entry in registry:
-                if entry.get("takeover_active") and entry.get("status") == "healthy":
-                    app.log(f"OnionCellar: {entry['content_address']} re-registered — immediate release")
-                    if _do_release(app, entry):
-                        entry["takeover_active"] = False
-                        entry["fail_count"] = 0
-                        entry["fast_poll_remaining"] = 0
-                    else:
-                        app.log(f"OnionCellar: WARNING — immediate release failed for {entry['content_address']}, keeping takeover_active")
-                        entry["status"] = "release_failed"
-                    entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
-                    modified_entries.append(entry)
-
-            workers = min(MAX_POLL_WORKERS, len(registry))
-
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {
-                    pool.submit(_poll_entry, app, entry): i
-                    for i, entry in enumerate(registry)
-                }
-                for future in as_completed(futures):
-                    try:
-                        entry, modified, sleep_interval = future.result()
-                        if modified:
-                            modified_entries.append(entry)
-                        min_sleep = min(min_sleep, sleep_interval)
-                    except Exception as e:
-                        app.log(f"OnionCellar: entry poll error: {e}")
-
-            elapsed = time.monotonic() - pass_start
-            app.log(f"OnionCellar: poll pass complete — {len(registry)} entries in {elapsed:.1f}s")
-
-            if modified_entries:
-                _write_poll_updates(app, modified_entries)
-
-            time.sleep(min_sleep)
-
-        except Exception as e:
-            app.log(f"OnionCellar: poller error: {e}")
-            time.sleep(60)
-
-
-def start_cellar_poller(app):
-    """Start the cellar healthcheck polling thread."""
-    thread = threading.Thread(target=cellar_poller, args=(app,), daemon=True)
-    thread.start()
-    return thread

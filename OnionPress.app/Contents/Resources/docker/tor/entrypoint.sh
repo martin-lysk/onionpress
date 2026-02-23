@@ -8,10 +8,44 @@ mkdir -p /var/lib/arti/cache /var/lib/arti/state
 chown -R arti:arti /var/lib/arti
 chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
-# Polling-only mode: just run Arti as a SOCKS proxy with no onion services
+# Polling-only mode
 if [ "${POLLING_ONLY}" = "1" ]; then
-    echo "Polling-only mode: starting Arti SOCKS proxy (no onion services)..."
-    exec su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml"
+    if [ "${ONIONPRESS_CELLAR}" = "1" ]; then
+        # Cellar polling mode: Arti with keystore (for takeover) + cellar-poller + redirect
+        echo "Cellar polling mode: starting Arti (SOCKS + keystore), redirect service, and poller..."
+
+        # Start cellar redirect service in background (port 8082)
+        /cellar-redirect.sh &
+        CELLAR_REDIRECT_PID=$!
+        sleep 1
+        if ! kill -0 $CELLAR_REDIRECT_PID 2>/dev/null; then
+            echo "ERROR: cellar-redirect.sh failed to start"
+        fi
+
+        # Start Arti with cellar config (SOCKS + keystore)
+        su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-cellar.toml" &
+        ARTI_PID=$!
+        sleep 2
+        if ! kill -0 $ARTI_PID 2>/dev/null; then
+            echo "ERROR: Arti failed to start — check config at /etc/arti/arti-cellar.toml"
+        fi
+
+        # Start cellar poller in background
+        python3 /cellar-poller.py &
+        POLLER_PID=$!
+        sleep 1
+        if ! kill -0 $POLLER_PID 2>/dev/null; then
+            echo "ERROR: cellar-poller.py failed to start"
+        fi
+
+        # Wait on Arti (main process)
+        wait $ARTI_PID
+        exit $?
+    else
+        # Plain polling mode: just SOCKS proxy, no onion services
+        echo "Polling-only mode: starting Arti SOCKS proxy (no onion services)..."
+        exec su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml"
+    fi
 fi
 
 # Create compat directories for hostname files
@@ -35,17 +69,6 @@ HC_PID=$!
 sleep 1
 if ! kill -0 $HC_PID 2>/dev/null; then
     echo "ERROR: healthcheck-server.sh failed to start"
-fi
-
-# Start cellar redirect service if cellar mode
-if [ "${ONIONPRESS_CELLAR}" = "1" ]; then
-    echo "OnionCellar mode: starting redirect service..."
-    /cellar-redirect.sh &
-    CELLAR_PID=$!
-    sleep 1
-    if ! kill -0 $CELLAR_PID 2>/dev/null; then
-        echo "ERROR: cellar-redirect.sh failed to start"
-    fi
 fi
 
 # Start Arti in background
