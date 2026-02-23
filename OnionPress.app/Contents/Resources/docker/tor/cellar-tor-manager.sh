@@ -1,19 +1,19 @@
 #!/bin/sh
-# OnionCellar Tor Address Manager
-# Manages dynamic HiddenServiceDir entries in torrc for address takeover/release.
+# OnionCellar Arti Address Manager
+# Manages dynamic onion service entries in arti.toml for address takeover/release.
 #
 # Usage:
 #   cellar-tor-manager.sh takeover <content_address>
 #   cellar-tor-manager.sh release <content_address>
 #
-# On takeover: copies keys from cellar storage, adds HiddenServiceDir to torrc,
-#              signals Tor to reload.
-# On release: removes HiddenServiceDir from torrc, cleans up key directory,
-#              signals Tor to reload.
+# On takeover: decrypts Arti PEM key from cellar storage, installs into Arti keystore,
+#              appends service config to arti.toml, signals Arti to reload.
+# On release: removes service config from arti.toml, cleans up keystore directory,
+#              signals Arti to reload.
 
-TORRC="/etc/tor/torrc"
+ARTI_TOML="/etc/arti/arti.toml"
+ARTI_KEYSTORE="/var/lib/arti/state/keystore/hss"
 CELLAR_KEYS_DIR="/var/lib/onionpress/cellar/keys"
-CELLAR_SERVICES_DIR="/var/lib/tor/hidden_service/cellar"
 CELLAR_UNLOCKED_FILE="/var/lib/onionpress/cellar/.master-key-unlocked"
 REDIRECT_PORT=8082
 
@@ -38,8 +38,12 @@ if ! echo "$CONTENT_ADDRESS" | grep -qE '^[a-z2-7]{56}\.onion$'; then
     exit 1
 fi
 
-# Create a safe directory name from the address (use the address itself)
-SERVICE_DIR="${CELLAR_SERVICES_DIR}/${CONTENT_ADDRESS}"
+# Nickname convention: cellar_ + first 16 chars of address (without .onion)
+ADDR_PREFIX=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//' | cut -c1-16)
+NICKNAME="cellar_${ADDR_PREFIX}"
+
+# Keystore directory for this service
+KEYSTORE_DIR="${ARTI_KEYSTORE}/${NICKNAME}"
 
 # Decrypt an .enc file using the master key (AES-256-CBC).
 # Format: [16-byte IV][ciphertext with PKCS7 padding]
@@ -75,123 +79,98 @@ decrypt_file() {
 do_takeover() {
     local keys_src="${CELLAR_KEYS_DIR}/${CONTENT_ADDRESS}"
 
-    # Check for encrypted keys (.enc) or plaintext (legacy)
-    local have_encrypted=false
-    local have_plaintext=false
-
-    if [ -f "${keys_src}/hs_ed25519_secret_key.enc" ]; then
-        have_encrypted=true
-    fi
-    if [ -f "${keys_src}/hs_ed25519_secret_key" ]; then
-        have_plaintext=true
-    fi
-
-    if [ "$have_encrypted" = false ] && [ "$have_plaintext" = false ]; then
-        echo "ERROR: No keys found for ${CONTENT_ADDRESS}"
+    # Check for encrypted Arti PEM key
+    if [ ! -f "${keys_src}/ks_hs_id.ed25519_expanded_private.enc" ]; then
+        echo "ERROR: No Arti key found for ${CONTENT_ADDRESS}"
         exit 1
     fi
 
-    # Create the HiddenServiceDir
-    mkdir -p "$SERVICE_DIR"
-
-    if [ "$have_encrypted" = true ]; then
-        # Encrypted keys — need master key to be unlocked
-        if [ ! -f "$CELLAR_UNLOCKED_FILE" ]; then
-            echo "ERROR: Cellar is locked — cannot decrypt keys"
-            exit 2
-        fi
-
-        # Decrypt each key file to the service directory
-        if ! decrypt_file "${keys_src}/hs_ed25519_secret_key.enc" "${SERVICE_DIR}/hs_ed25519_secret_key"; then
-            echo "ERROR: Failed to decrypt secret key for ${CONTENT_ADDRESS}"
-            exit 1
-        fi
-        if ! decrypt_file "${keys_src}/hs_ed25519_public_key.enc" "${SERVICE_DIR}/hs_ed25519_public_key"; then
-            echo "ERROR: Failed to decrypt public key for ${CONTENT_ADDRESS}"
-            exit 1
-        fi
-        cp "${keys_src}/hostname" "${SERVICE_DIR}/"
-    else
-        # Plaintext keys (legacy / backward compat during migration)
-        cp "${keys_src}/hs_ed25519_secret_key" "${SERVICE_DIR}/"
-        cp "${keys_src}/hs_ed25519_public_key" "${SERVICE_DIR}/"
-        cp "${keys_src}/hostname" "${SERVICE_DIR}/"
+    # Encrypted key — need master key to be unlocked
+    if [ ! -f "$CELLAR_UNLOCKED_FILE" ]; then
+        echo "ERROR: Cellar is locked — cannot decrypt keys"
+        exit 2
     fi
 
-    # Set correct ownership and permissions (tor user = uid 100)
-    chown -R tor:tor "$SERVICE_DIR"
-    chmod 700 "$SERVICE_DIR"
-    chmod 600 "${SERVICE_DIR}/hs_ed25519_secret_key"
-    chmod 600 "${SERVICE_DIR}/hs_ed25519_public_key"
-    chmod 600 "${SERVICE_DIR}/hostname"
+    # Create the Arti keystore directory for this service
+    mkdir -p "$KEYSTORE_DIR"
 
-    # Add HiddenServiceDir entry to torrc if not already present
+    # Decrypt the PEM key to the keystore
+    if ! decrypt_file "${keys_src}/ks_hs_id.ed25519_expanded_private.enc" "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"; then
+        echo "ERROR: Failed to decrypt key for ${CONTENT_ADDRESS}"
+        rm -rf "$KEYSTORE_DIR"
+        exit 1
+    fi
+
+    # Set correct ownership and permissions
+    chown -R arti:arti "$KEYSTORE_DIR"
+    chmod 700 "$KEYSTORE_DIR"
+    chmod 600 "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"
+
+    # Add onion service config to arti.toml if not already present
     local marker="# cellar:${CONTENT_ADDRESS}"
-    if grep -q "$marker" "$TORRC"; then
-        echo "HiddenServiceDir entry already exists for ${CONTENT_ADDRESS}"
+    if grep -q "$marker" "$ARTI_TOML"; then
+        echo "Service config already exists for ${CONTENT_ADDRESS}"
     else
-        cat >> "$TORRC" << EOF
+        cat >> "$ARTI_TOML" << EOF
 
 ${marker}
-HiddenServiceDir ${SERVICE_DIR}
-HiddenServiceVersion 3
-HiddenServicePort 80 127.0.0.1:${REDIRECT_PORT}
-HiddenServiceNumIntroductionPoints 3
+[onion_services."${NICKNAME}"]
+enabled = true
+proxy_ports = [["80", "127.0.0.1:${REDIRECT_PORT}"]]
 EOF
-        echo "Added HiddenServiceDir for ${CONTENT_ADDRESS}"
+        echo "Added onion service config for ${CONTENT_ADDRESS}"
     fi
 
-    # Signal Tor to reload configuration
-    local tor_pid
-    tor_pid=$(pgrep -x tor)
-    if [ -n "$tor_pid" ]; then
-        kill -HUP "$tor_pid"
-        echo "Sent SIGHUP to Tor (pid $tor_pid)"
+    # Signal Arti to reload configuration
+    local arti_pid
+    arti_pid=$(pgrep arti)
+    if [ -n "$arti_pid" ]; then
+        kill -HUP "$arti_pid"
+        echo "Sent SIGHUP to Arti (pid $arti_pid)"
     else
-        echo "WARNING: Tor process not found, cannot send SIGHUP"
+        echo "WARNING: Arti process not found, cannot send SIGHUP"
     fi
 
     echo "Takeover complete for ${CONTENT_ADDRESS}"
 }
 
 do_release() {
-    # Remove HiddenServiceDir entry from torrc
+    # Remove onion service config from arti.toml
     local marker="# cellar:${CONTENT_ADDRESS}"
-    if grep -q "$marker" "$TORRC"; then
-        # Remove the marker line and the four config lines that follow it
-        # (HiddenServiceDir, HiddenServiceVersion, HiddenServicePort, HiddenServiceNumIntroductionPoints)
+    if grep -q "$marker" "$ARTI_TOML"; then
+        # Remove the marker line and the 3 config lines that follow it
+        # (section header, enabled, proxy_ports)
         # Also remove the blank line before the marker if present
-        local tmp_torrc="${TORRC}.tmp"
+        local tmp_toml="${ARTI_TOML}.tmp"
         awk -v marker="$marker" '
         BEGIN { skip = 0 }
-        $0 == marker { skip = 4; next }
+        $0 == marker { skip = 3; next }
         skip > 0 { skip--; next }
-        # Remove blank line right before marker (already printed — handled by buffering)
         { print }
-        ' "$TORRC" > "$tmp_torrc"
+        ' "$ARTI_TOML" > "$tmp_toml"
 
         # Clean up any trailing blank lines left over
-        sed -i '/^$/N;/^\n$/d' "$tmp_torrc" 2>/dev/null || true
-        mv "$tmp_torrc" "$TORRC"
-        echo "Removed HiddenServiceDir entry for ${CONTENT_ADDRESS}"
+        sed -i '/^$/N;/^\n$/d' "$tmp_toml" 2>/dev/null || true
+        mv "$tmp_toml" "$ARTI_TOML"
+        echo "Removed onion service config for ${CONTENT_ADDRESS}"
     else
-        echo "No HiddenServiceDir entry found for ${CONTENT_ADDRESS}"
+        echo "No service config found for ${CONTENT_ADDRESS}"
     fi
 
-    # Remove the key directory
-    if [ -d "$SERVICE_DIR" ]; then
-        rm -rf "$SERVICE_DIR"
-        echo "Removed key directory for ${CONTENT_ADDRESS}"
+    # Remove the keystore directory
+    if [ -d "$KEYSTORE_DIR" ]; then
+        rm -rf "$KEYSTORE_DIR"
+        echo "Removed keystore directory for ${CONTENT_ADDRESS}"
     fi
 
-    # Signal Tor to reload configuration
-    local tor_pid
-    tor_pid=$(pgrep -x tor)
-    if [ -n "$tor_pid" ]; then
-        kill -HUP "$tor_pid"
-        echo "Sent SIGHUP to Tor (pid $tor_pid)"
+    # Signal Arti to reload configuration
+    local arti_pid
+    arti_pid=$(pgrep arti)
+    if [ -n "$arti_pid" ]; then
+        kill -HUP "$arti_pid"
+        echo "Sent SIGHUP to Arti (pid $arti_pid)"
     else
-        echo "WARNING: Tor process not found, cannot send SIGHUP"
+        echo "WARNING: Arti process not found, cannot send SIGHUP"
     fi
 
     echo "Release complete for ${CONTENT_ADDRESS}"

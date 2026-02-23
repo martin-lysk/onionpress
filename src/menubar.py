@@ -539,7 +539,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.116"
+        self.version = "2.3.0"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1437,7 +1437,15 @@ class OnionPressApp(rumps.App):
                 env=docker_env
             )
 
-            if "ERROR" in recent_result.stdout or "failed to publish" in recent_result.stdout.lower():
+            tor_output = result.stdout + result.stderr
+            if "Bootstrapped 100% (done)" not in tor_output and "Sufficiently bootstrapped" not in tor_output:
+                if log_result:
+                    self.log(f"✗ Tor not fully bootstrapped yet")
+                return False
+
+            # Check 3: Verify no critical errors in recent logs
+            # (Arti uses "ERROR" log level normally, so check for specific failure messages)
+            if "failed to publish" in tor_output.lower():
                 if log_result:
                     self.log(f"✗ Tor errors detected in logs")
                 return False
@@ -1549,6 +1557,9 @@ class OnionPressApp(rumps.App):
             )
             output = result.stdout + result.stderr
             best = 0
+            # Arti: "Sufficiently bootstrapped; proxy now functional" = 100%
+            if "Sufficiently bootstrapped" in output:
+                return 100
             for line in output.splitlines():
                 idx = line.find("Bootstrapped ")
                 if idx >= 0:
@@ -2110,11 +2121,12 @@ class OnionPressApp(rumps.App):
             env = os.environ.copy()
             env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
             env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            # Try SIGHUP on PID 1 (works for both C-tor and Arti entrypoint)
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor", "kill", "-HUP", "1"],
                 capture_output=True, text=True, env=env, timeout=10)
             if result.returncode == 0:
-                self.log("Sent SIGHUP to Tor — rebuilding circuits")
+                self.log("Sent SIGHUP to Tor/Arti — rebuilding circuits")
             else:
                 self.log(f"Failed to SIGHUP Tor: {result.stderr.strip()}")
         except Exception as e:
@@ -3761,7 +3773,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.116 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.3.0 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

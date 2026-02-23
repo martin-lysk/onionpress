@@ -539,7 +539,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.114"
+        self.version = "2.2.115"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -845,14 +845,20 @@ class OnionPressApp(rumps.App):
             return
 
         try:
-            # Start caffeinate in background
-            # -s: prevent system sleep when on AC power (battery power allows normal sleep)
+            if self.is_cellar:
+                # Cellar: prevent idle sleep so network stays active (display can sleep)
+                caff_args = ["caffeinate", "-i"]
+                caff_msg = "cellar mode — system will not idle-sleep"
+            else:
+                # Normal: prevent system sleep on AC power only
+                caff_args = ["caffeinate", "-s"]
+                caff_msg = "Mac will stay awake while plugged in"
             self.caffeinate_process = subprocess.Popen(
-                ["caffeinate", "-s"],
+                caff_args,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - Mac will stay awake while plugged in")
+            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - {caff_msg}")
         except Exception as e:
             self.log(f"Failed to start caffeinate: {e}")
 
@@ -1413,13 +1419,15 @@ class OnionPressApp(rumps.App):
                 env=docker_env
             )
 
-            if "Bootstrapped 100% (done)" not in result.stdout:
+            tor_output = result.stdout + result.stderr
+            if "Bootstrapped 100% (done)" not in tor_output and "Sufficiently bootstrapped" not in tor_output:
                 if log_result:
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False
 
             # Check 3: Verify no critical errors in recent logs
-            if "ERROR" in result.stdout or "failed to publish" in result.stdout.lower():
+            # (Arti uses "ERROR" log level normally, so check for specific failure messages)
+            if "failed to publish" in tor_output.lower():
                 if log_result:
                     self.log(f"✗ Tor errors detected in logs")
                 return False
@@ -1524,6 +1532,9 @@ class OnionPressApp(rumps.App):
             )
             output = result.stdout + result.stderr
             best = 0
+            # Arti: "Sufficiently bootstrapped; proxy now functional" = 100%
+            if "Sufficiently bootstrapped" in output:
+                return 100
             for line in output.splitlines():
                 idx = line.find("Bootstrapped ")
                 if idx >= 0:
@@ -2057,9 +2068,11 @@ class OnionPressApp(rumps.App):
         self.log("Registered for system sleep/wake notifications")
 
     def handle_sleep(self):
-        """Handle system sleep — release caffeinate so the Mac actually sleeps"""
+        """Handle system sleep — release caffeinate so the Mac actually sleeps.
+        Cellar resists sleep to keep network active."""
         self.log("System going to sleep")
-        self.stop_caffeinate()
+        if not self.is_cellar:
+            self.stop_caffeinate()
 
     def handle_wake(self):
         """Handle system wake — Tor circuits are dead, go yellow immediately"""
@@ -2083,11 +2096,12 @@ class OnionPressApp(rumps.App):
             env = os.environ.copy()
             env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
             env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            # Try SIGHUP on PID 1 (works for both C-tor and Arti entrypoint)
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor", "kill", "-HUP", "1"],
                 capture_output=True, text=True, env=env, timeout=10)
             if result.returncode == 0:
-                self.log("Sent SIGHUP to Tor — rebuilding circuits")
+                self.log("Sent SIGHUP to Tor/Arti — rebuilding circuits")
             else:
                 self.log(f"Failed to SIGHUP Tor: {result.stderr.strip()}")
         except Exception as e:
@@ -3734,7 +3748,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.114 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.115 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

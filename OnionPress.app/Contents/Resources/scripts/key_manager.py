@@ -1,230 +1,284 @@
 #!/usr/bin/env python3
 """
-Key Management for onionpress
-Converts Tor v3 Ed25519 private keys to/from BIP39 mnemonic words with checksums
+Key Management for OnionPress
+Extract and write Arti Ed25519 expanded private keys to/from the onionpress-tor container.
+Keys are stored in OpenSSH format at the Arti keystore path.
 """
 
-import subprocess
 import base64
+import struct
+import subprocess
 
-try:
-    from mnemonic import Mnemonic
-except ImportError:
-    raise ImportError(
-        "Required 'mnemonic' package is not installed. "
-        "Install it with: pip3 install mnemonic"
+ARTI_KEYSTORE_PATH = "/var/lib/arti/state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private"
+ARTI_KEY_TYPE = b"ed25519-expanded@spec.torproject.org"
+CONTAINER = "onionpress-tor"
+
+OPENSSH_MAGIC = b"openssh-key-v1\x00"
+
+
+def _pack_string(data):
+    """Pack bytes as uint32 big-endian length + data."""
+    return struct.pack(">I", len(data)) + data
+
+
+def _unpack_string(buf, offset):
+    """Unpack a uint32-length-prefixed string from buf at offset. Returns (data, new_offset)."""
+    if offset + 4 > len(buf):
+        raise ValueError("Truncated length field")
+    length = struct.unpack(">I", buf[offset:offset + 4])[0]
+    offset += 4
+    if offset + length > len(buf):
+        raise ValueError(f"Truncated data: need {length} bytes at offset {offset}, have {len(buf) - offset}")
+    return buf[offset:offset + length], offset + length
+
+
+def parse_openssh_key(data):
+    """
+    Parse an OpenSSH private key file (PEM format, unencrypted).
+    Returns (private_key_64bytes, public_key_32bytes).
+    """
+    # Strip PEM headers and decode base64
+    text = data.decode("utf-8", errors="replace")
+    lines = text.strip().splitlines()
+    b64_lines = []
+    in_body = False
+    for line in lines:
+        if line.startswith("-----BEGIN"):
+            in_body = True
+            continue
+        if line.startswith("-----END"):
+            break
+        if in_body:
+            b64_lines.append(line.strip())
+    if not b64_lines:
+        raise ValueError("No PEM body found in key file")
+
+    raw = base64.b64decode("".join(b64_lines))
+
+    # Parse binary format
+    if not raw.startswith(OPENSSH_MAGIC):
+        raise ValueError("Missing openssh-key-v1 magic")
+    offset = len(OPENSSH_MAGIC)
+
+    cipher, offset = _unpack_string(raw, offset)
+    kdf, offset = _unpack_string(raw, offset)
+    kdf_options, offset = _unpack_string(raw, offset)
+
+    if cipher != b"none" or kdf != b"none":
+        raise ValueError("Encrypted keys are not supported")
+
+    nkeys = struct.unpack(">I", raw[offset:offset + 4])[0]
+    offset += 4
+    if nkeys != 1:
+        raise ValueError(f"Expected 1 key, got {nkeys}")
+
+    # Skip public key blob (we'll get it from the private section)
+    _pub_blob, offset = _unpack_string(raw, offset)
+
+    # Parse private key blob
+    priv_blob, offset = _unpack_string(raw, offset)
+    p = 0
+
+    check1 = struct.unpack(">I", priv_blob[p:p + 4])[0]
+    p += 4
+    check2 = struct.unpack(">I", priv_blob[p:p + 4])[0]
+    p += 4
+    if check1 != check2:
+        raise ValueError("Check integers mismatch — key may be corrupt or encrypted")
+
+    key_type, p = _unpack_string(priv_blob, p)
+    if key_type != ARTI_KEY_TYPE:
+        raise ValueError(f"Unexpected key type: {key_type!r}")
+
+    public_key, p = _unpack_string(priv_blob, p)
+    if len(public_key) != 32:
+        raise ValueError(f"Public key is {len(public_key)} bytes, expected 32")
+
+    secret_blob, p = _unpack_string(priv_blob, p)
+    # Arti writes just the 64-byte expanded private key (no appended public key),
+    # unlike standard OpenSSH ed25519 which concatenates private+public.
+    if len(secret_blob) == 64:
+        private_key = secret_blob
+    elif len(secret_blob) == 96:
+        private_key = secret_blob[:64]
+        if secret_blob[64:] != public_key:
+            raise ValueError("Embedded public key in private blob does not match")
+    else:
+        raise ValueError(f"Secret blob is {len(secret_blob)} bytes, expected 64 or 96")
+
+    return private_key, public_key
+
+
+def build_openssh_key(private_key, public_key):
+    """
+    Build an OpenSSH private key file (PEM format, unencrypted) for Arti.
+    private_key: 64 bytes (expanded Ed25519)
+    public_key: 32 bytes
+    Returns bytes (PEM-encoded).
+    """
+    if len(private_key) != 64:
+        raise ValueError(f"Private key must be 64 bytes, got {len(private_key)}")
+    if len(public_key) != 32:
+        raise ValueError(f"Public key must be 32 bytes, got {len(public_key)}")
+
+    # Build public key blob
+    pub_blob = _pack_string(ARTI_KEY_TYPE) + _pack_string(public_key)
+
+    # Build private key blob
+    import os
+    check = struct.pack(">I", int.from_bytes(os.urandom(4), "big"))
+    priv_blob = (
+        check + check +  # checkint1 == checkint2
+        _pack_string(ARTI_KEY_TYPE) +
+        _pack_string(public_key) +
+        _pack_string(private_key) +  # Arti uses just 64-byte expanded privkey
+        _pack_string(b"")  # empty comment
+    )
+    # Pad to 8-byte boundary with 1,2,3,4,...
+    pad_len = (8 - len(priv_blob) % 8) % 8
+    priv_blob += bytes(range(1, pad_len + 1))
+
+    # Assemble full binary
+    binary = (
+        OPENSSH_MAGIC +
+        _pack_string(b"none") +       # cipher
+        _pack_string(b"none") +       # kdf
+        _pack_string(b"") +           # kdf options
+        struct.pack(">I", 1) +        # nkeys
+        _pack_string(pub_blob) +
+        _pack_string(priv_blob)
     )
 
-# Initialize BIP39 mnemonic encoder with English wordlist
-mnemo = Mnemonic("english")
+    # PEM-wrap
+    b64 = base64.b64encode(binary).decode("ascii")
+    lines = [b64[i:i + 70] for i in range(0, len(b64), 70)]
+    pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+    pem += "\n".join(lines) + "\n"
+    pem += "-----END OPENSSH PRIVATE KEY-----\n"
+    return pem.encode("utf-8")
 
-def bytes_to_mnemonic(key_bytes):
-    """
-    Convert 64-byte Ed25519 key to BIP39 mnemonic words with proper checksums
-
-    Ed25519 keys are 64 bytes (512 bits). We split this into two 32-byte chunks:
-    - First 32 bytes → 24-word mnemonic (with checksum)
-    - Second 32 bytes → 24-word mnemonic (with checksum)
-    Total: 48 words with proper BIP39 checksums for validation
-    """
-    if len(key_bytes) != 64:
-        raise ValueError(f"Expected 64 bytes, got {len(key_bytes)}")
-
-    # Split key into two 32-byte (256-bit) chunks
-    first_half = key_bytes[:32]
-    second_half = key_bytes[32:]
-
-    # Convert each half to BIP39 mnemonic (24 words each with checksum)
-    mnemonic_first = mnemo.to_mnemonic(first_half)
-    mnemonic_second = mnemo.to_mnemonic(second_half)
-
-    # Combine with separator
-    return f"{mnemonic_first} | {mnemonic_second}"
-
-def mnemonic_to_bytes(mnemonic):
-    """
-    Convert BIP39 mnemonic words back to 64-byte Ed25519 key
-    Validates checksums before returning
-    Returns exactly 64 bytes
-    """
-    # Split the two 24-word mnemonics
-    if '|' not in mnemonic:
-        raise ValueError("Invalid mnemonic format. Expected two 24-word mnemonics separated by '|'")
-
-    parts = mnemonic.split('|')
-    if len(parts) != 2:
-        raise ValueError("Invalid mnemonic format. Expected exactly two mnemonics separated by '|'")
-
-    mnemonic_first = parts[0].strip()
-    mnemonic_second = parts[1].strip()
-
-    # Validate both mnemonics (includes checksum validation)
-    if not mnemo.check(mnemonic_first):
-        raise ValueError("Invalid mnemonic (first half): checksum validation failed")
-    if not mnemo.check(mnemonic_second):
-        raise ValueError("Invalid mnemonic (second half): checksum validation failed")
-
-    # Convert back to bytes
-    first_half = mnemo.to_entropy(mnemonic_first)
-    second_half = mnemo.to_entropy(mnemonic_second)
-
-    # Combine to get 64-byte key
-    key_bytes = first_half + second_half
-
-    if len(key_bytes) != 64:
-        raise ValueError(f"Invalid key size after decoding: {len(key_bytes)} bytes (expected 64)")
-
-    return key_bytes
 
 def extract_private_key():
     """
-    Extract the Tor v3 private key from the running container
-    Returns the raw key bytes (64 bytes)
+    Extract the Ed25519 expanded private key from the Arti keystore.
+    Returns the raw 64-byte private key.
     """
     try:
-        # Read the secret key file from the Tor container
         result = subprocess.run(
-            ['docker', 'exec', 'onionpress-tor', 'cat',
-             '/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key'],
+            ["docker", "exec", CONTAINER, "cat", ARTI_KEYSTORE_PATH],
             capture_output=True,
             timeout=10
         )
-
         if result.returncode != 0:
-            raise Exception("Could not read Tor private key from container")
+            raise Exception(f"Could not read key file: {result.stderr.decode().strip()}")
 
-        # The key file format is:
-        # "== ed25519v1-secret: type0 =="
-        # followed by 64 bytes of key data
-        key_data = result.stdout
-
-        # Find the key data (skip the header)
-        # The header is 32 bytes, then 64 bytes of actual key
-        expected_header = b'== ed25519v1-secret: type0 =='
-        if len(key_data) == 96:
-            header = key_data[:32]
-            if not header.startswith(expected_header):
-                raise Exception(
-                    "Key file header mismatch: expected ed25519v1-secret header. "
-                    "File may be corrupt or in an unsupported format."
-                )
-            return key_data[32:]
-        elif len(key_data) == 64:
-            # Already just the key (no header)
-            return key_data
-        else:
-            raise Exception(f"Unexpected key file size: {len(key_data)} bytes")
+        private_key, _public_key = parse_openssh_key(result.stdout)
+        return private_key
 
     except Exception as e:
         raise Exception(f"Failed to extract private key: {e}")
 
-def export_key_as_mnemonic():
+
+def extract_public_key():
     """
-    Export the current Tor private key as BIP39 mnemonic words
-    Returns 48 words (two 24-word mnemonics) with proper checksums
+    Extract the Ed25519 public key from the Arti keystore.
+    Returns the raw 32-byte public key.
     """
-    key_bytes = extract_private_key()
-    return bytes_to_mnemonic(key_bytes)
+    try:
+        result = subprocess.run(
+            ["docker", "exec", CONTAINER, "cat", ARTI_KEYSTORE_PATH],
+            capture_output=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            raise Exception(f"Could not read key file: {result.stderr.decode().strip()}")
 
-def import_key_from_mnemonic(mnemonic):
+        _private_key, public_key = parse_openssh_key(result.stdout)
+        return public_key
+
+    except Exception as e:
+        raise Exception(f"Failed to extract public key: {e}")
+
+
+def write_private_key(private_key, public_key):
     """
-    Import a Tor private key from BIP39 mnemonic words
-    Validates checksums and key format
-    Returns the key bytes ready to be written to the container
-    """
-    # mnemonic_to_bytes already validates:
-    # - Checksum for both halves
-    # - 64-byte total length
-    # - BIP39 word validity
-    key_bytes = mnemonic_to_bytes(mnemonic)
-
-    # Additional Ed25519 validation
-    # The key should be 64 bytes (512 bits) for Ed25519 private key
-    if len(key_bytes) != 64:
-        raise ValueError(f"Invalid Ed25519 key size: {len(key_bytes)} bytes (expected 64)")
-
-    # Basic sanity check - key shouldn't be all zeros
-    if key_bytes == b'\x00' * 64:
-        raise ValueError("Invalid key: all zeros")
-
-    # Basic sanity check - key shouldn't be all 0xFF
-    if key_bytes == b'\xFF' * 64:
-        raise ValueError("Invalid key: all ones")
-
-    return key_bytes
-
-def write_private_key(key_bytes):
-    """
-    Write a new private key to the Tor container using secure Python file I/O
+    Write a new key pair to the Arti keystore in OpenSSH format.
+    Deletes derived keys and restarts the tor container.
     This will change your onion address!
     """
     import tempfile
     import os
 
     try:
-        # The Tor key file format includes a 32-byte header
-        # Header: "== ed25519v1-secret: type0 =="
-        header = b'== ed25519v1-secret: type0 =='
-
-        # Pad header to 32 bytes
-        header = header.ljust(32, b'\x00')
-
-        # Combine header + key
-        full_key = header + key_bytes
+        pem_data = build_openssh_key(private_key, public_key)
 
         # Write to a temporary file with restricted permissions
-        with tempfile.NamedTemporaryFile(mode='wb', delete=False) as temp_file:
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_file:
             temp_path = temp_file.name
-            # Set restrictive permissions immediately
             os.chmod(temp_path, 0o600)
-            temp_file.write(full_key)
+            temp_file.write(pem_data)
 
         try:
-            # Copy file to container using docker cp (safer than shell pipeline)
+            # Ensure keystore directory exists
             result = subprocess.run(
-                ['docker', 'cp', temp_path,
-                 'onionpress-tor:/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key'],
+                ["docker", "exec", CONTAINER, "mkdir", "-p",
+                 "/var/lib/arti/state/keystore/hss/wordpress"],
                 capture_output=True,
                 timeout=10
             )
 
+            # Copy file to container
+            result = subprocess.run(
+                ["docker", "cp", temp_path,
+                 f"{CONTAINER}:{ARTI_KEYSTORE_PATH}"],
+                capture_output=True,
+                timeout=10
+            )
             if result.returncode != 0:
                 raise Exception(f"Failed to copy key to container: {result.stderr.decode()}")
 
             # Set proper permissions inside container
             result = subprocess.run(
-                ['docker', 'exec', 'onionpress-tor', 'chmod', '600',
-                 '/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key'],
+                ["docker", "exec", CONTAINER, "chmod", "600", ARTI_KEYSTORE_PATH],
                 capture_output=True,
                 timeout=10
             )
-
             if result.returncode != 0:
                 raise Exception(f"Failed to set key permissions: {result.stderr.decode()}")
 
-            # Restart Tor container to regenerate public key and hostname
-            subprocess.run(['docker', 'restart', 'onionpress-tor'],
-                         capture_output=True, timeout=30)
+            # Delete derived keys so Arti regenerates them for the new identity
+            keystore_dir = "/var/lib/arti/state/keystore/hss/wordpress"
+            for derived in ["ks_hss_blind_id", "ks_hss_desc_sign", "ks_hss_ipts"]:
+                subprocess.run(
+                    ["docker", "exec", CONTAINER, "sh", "-c",
+                     f"rm -f {keystore_dir}/{derived}*"],
+                    capture_output=True,
+                    timeout=10
+                )
+
+            # Restart tor container to pick up the new key
+            subprocess.run(
+                ["docker", "restart", CONTAINER],
+                capture_output=True,
+                timeout=30
+            )
 
             return True
 
         finally:
-            # Securely delete temporary file (multi-pass for SSD wear leveling)
+            # Securely delete temporary file (multi-pass overwrite)
             if os.path.exists(temp_path):
-                file_len = len(full_key)
-                # Pass 1: overwrite with random bytes
-                with open(temp_path, 'wb') as f:
+                file_len = len(pem_data)
+                with open(temp_path, "wb") as f:
                     f.write(os.urandom(file_len))
                     f.flush()
                     os.fsync(f.fileno())
-                # Pass 2: overwrite with zeros
-                with open(temp_path, 'wb') as f:
-                    f.write(b'\x00' * file_len)
+                with open(temp_path, "wb") as f:
+                    f.write(b"\x00" * file_len)
                     f.flush()
                     os.fsync(f.fileno())
-                # Pass 3: overwrite with ones
-                with open(temp_path, 'wb') as f:
-                    f.write(b'\xff' * file_len)
+                with open(temp_path, "wb") as f:
+                    f.write(b"\xff" * file_len)
                     f.flush()
                     os.fsync(f.fileno())
                 os.unlink(temp_path)
@@ -232,20 +286,17 @@ def write_private_key(key_bytes):
     except Exception as e:
         raise Exception(f"Failed to write private key: {e}")
 
-if __name__ == "__main__":
-    # Test the functionality
-    import sys
 
-    if len(sys.argv) > 1 and sys.argv[1] == 'export':
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "extract":
         try:
-            mnemonic = export_key_as_mnemonic()
-            print("Your private key as mnemonic words:")
-            print()
-            print(mnemonic)
-            print()
-            print(f"({len(mnemonic.split())} words)")
+            key_bytes = extract_private_key()
+            print(f"Successfully extracted {len(key_bytes)}-byte private key")
+            pub_bytes = extract_public_key()
+            print(f"Successfully extracted {len(pub_bytes)}-byte public key")
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     else:
-        print("Usage: key_manager.py export")
+        print("Usage: key_manager.py extract")
