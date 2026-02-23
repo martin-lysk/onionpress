@@ -577,6 +577,7 @@ def cellar_poller(app):
         try:
             registry = _read_registry(app)
             if not registry:
+                app.log("OnionCellar: poll pass complete — 0 entries in 0.0s")
                 time.sleep(HEALTHY_INTERVAL)
                 continue
 
