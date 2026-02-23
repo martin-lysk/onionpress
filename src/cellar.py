@@ -160,13 +160,11 @@ def register_with_cellar(app):
         app.log(f"OnionCellar: failed to extract key: {e}")
         return
 
-    # Also get the public key
-    ok, public_key_raw = _run_docker_raw(app, [
-        "exec", "onionpress-tor", "cat",
-        "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
-    ])
-    if not ok:
-        app.log("OnionCellar: failed to read public key")
+    # Also get the public key (from same Arti keystore file)
+    try:
+        public_key_raw = key_manager.extract_public_key()
+    except Exception as e:
+        app.log(f"OnionCellar: failed to read public key: {e}")
         return
 
     # Build registration payload (keys as base64-encoded strings)
