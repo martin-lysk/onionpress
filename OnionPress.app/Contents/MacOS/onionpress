@@ -145,6 +145,20 @@ detect_cellar_mode() {
                 fi
             fi
         fi
+        # Build cellar-aware tor image (layers new files on top of pre-built image)
+        # This is fast (<5s) since the base image is already pulled and we only add scripts
+        local tor_dir
+        tor_dir="$(cd "$(dirname "$0")/../Contents/Resources/docker/tor" && pwd)"
+        log "OnionCellar: building tor image with cellar poller..."
+        docker build -t ghcr.io/brewsterkahle/onionpress-tor:latest \
+            -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'CELLAR_DOCKERFILE'
+FROM ghcr.io/brewsterkahle/onionpress-tor:latest
+COPY entrypoint.sh /entrypoint.sh
+COPY arti-cellar.toml /etc/arti/arti-cellar.toml
+COPY cellar-poller.py /cellar-poller.py
+COPY cellar-tor-manager.sh /cellar-tor-manager.sh
+RUN chmod +x /entrypoint.sh /cellar-poller.py /cellar-tor-manager.sh
+CELLAR_DOCKERFILE
         # Start dedicated polling Tor container (SOCKS + keystore + cellar-poller)
         # This keeps HSDir lookups off the main Tor instance and runs the cellar poller
         if docker compose --profile cellar up -d tor-polling >> "$LOG_FILE" 2>&1; then
