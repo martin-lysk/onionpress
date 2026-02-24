@@ -3600,20 +3600,9 @@ class OnionPressApp(rumps.App):
                 backup_manager.restore_from_backup(
                     zip_path, password, log_and_update)
 
-                _main_thread(lambda: pw.update("Restarting service..."))
-                self.log("Restore: restarting service...")
-                subprocess.run([self.launcher_script, "restart"],
-                               capture_output=True, timeout=60)
+                restored_addr = metadata.get('onion_address', addr)
 
-                # Update onion address from restored data
-                self.onion_address = metadata.get('onion_address', self.onion_address)
-
-                time.sleep(2)
-                self.check_status()
-
-                restored_addr = self.onion_address or addr
-
-                # Build summary of what changed / what will happen
+                # Build summary of what was restored and what will happen
                 notes = [f"Onion address: {restored_addr}"]
 
                 # Check if cellar mode was restored
@@ -3625,13 +3614,11 @@ class OnionPressApp(rumps.App):
                     except ValueError:
                         cur_mem_int = 1
                     if cur_mem_int < 5:
-                        notes.append("OnionCellar detected — VM memory will increase to 5 GB on next restart.")
+                        notes.append("OnionCellar detected — VM memory will increase to 5 GB on relaunch.")
                     else:
                         notes.append(f"OnionCellar detected — VM memory: {cur_mem} GB.")
 
-                # Note if address changed
-                if self.onion_address and addr and self.onion_address != addr:
-                    notes.append(f"Address changed from current site.")
+                notes.append("\nPlease quit and relaunch OnionPress for the restore to take full effect.")
 
                 summary = "Site restored successfully.\n\n" + "\n".join(notes)
                 _main_thread(lambda: pw.finish(summary))
