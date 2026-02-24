@@ -27,7 +27,6 @@ import key_manager
 import backup_manager
 import onion_proxy
 import install_native_messaging
-import setup_window
 import cellar
 
 
@@ -539,7 +538,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.112"
+        self.version = "2.3.8"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -654,7 +653,6 @@ class OnionPressApp(rumps.App):
         self.cellar_messages = []          # Messages received from OnionCellar
         self._cellar_alert_shown = False   # Whether we've shown the cellar alert icon
         self.is_cellar = False             # True if this instance is the OnionCellar
-        self.cellar_locked = True          # Whether the cellar is currently locked
         self._cellar_checked = False       # Whether cellar mode has been checked
         self._cellar_registration_started = False  # Whether registration thread is running
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
@@ -845,14 +843,20 @@ class OnionPressApp(rumps.App):
             return
 
         try:
-            # Start caffeinate in background
-            # -s: prevent system sleep when on AC power (battery power allows normal sleep)
+            if self.is_cellar:
+                # Cellar: prevent idle sleep so network stays active (display can sleep)
+                caff_args = ["caffeinate", "-i"]
+                caff_msg = "cellar mode — system will not idle-sleep"
+            else:
+                # Normal: prevent system sleep on AC power only
+                caff_args = ["caffeinate", "-s"]
+                caff_msg = "Mac will stay awake while plugged in"
             self.caffeinate_process = subprocess.Popen(
-                ["caffeinate", "-s"],
+                caff_args,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - Mac will stay awake while plugged in")
+            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - {caff_msg}")
         except Exception as e:
             self.log(f"Failed to start caffeinate: {e}")
 
@@ -1520,15 +1524,25 @@ class OnionPressApp(rumps.App):
             return False
 
     def _parse_bootstrap_percentage(self):
-        """Parse Tor bootstrap percentage from recent container logs.
-        Returns highest percentage found (0-100), or 0 if not parseable."""
+        """Parse Tor bootstrap percentage from full container logs.
+        Returns highest percentage found (0-100), or 0 if not parseable.
+        Uses full logs since bootstrap messages can be pushed out of --tail
+        by HSDir query spam when many onion descriptors are being fetched."""
         try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            docker_env = os.environ.copy()
+            docker_env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            docker_env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
             result = subprocess.run(
-                ["docker", "logs", "--tail", "50", "onionpress-tor"],
-                capture_output=True, text=True, timeout=5
+                [docker_bin, "logs", "onionpress-tor"],
+                capture_output=True, text=True, timeout=10,
+                env=docker_env
             )
             output = result.stdout + result.stderr
             best = 0
+            # Arti: "Sufficiently bootstrapped; proxy now functional" = 100%
+            if "Sufficiently bootstrapped" in output:
+                return 100
             for line in output.splitlines():
                 idx = line.find("Bootstrapped ")
                 if idx >= 0:
@@ -1728,26 +1742,20 @@ class OnionPressApp(rumps.App):
                 if self.is_ready:
                     self.poll_cellar_messages()
 
-                # OnionCellar: detect cellar mode and start registration/polling
+                # OnionCellar: detect cellar mode, register, or notify online
                 if self.is_ready and not self._cellar_checked:
                     self._cellar_checked = True
                     if cellar.is_cellar_instance(self.onion_address):
                         self.is_cellar = True
-                        self.log("OnionCellar mode activated")
-                        cellar.start_cellar_poller(self)
+                        self.log("OnionCellar mode activated (poller runs in onioncellar container)")
                         self.update_menu()
                     elif not self._cellar_registration_started:
+                        # First time — full registration with keys
                         self._cellar_registration_started = True
                         cellar.start_registration_thread(self)
-
-                # OnionCellar: poll lock status and update menu
-                if self.is_cellar and self.is_ready:
-                    was_locked = self.cellar_locked
-                    self.cellar_locked = not cellar._is_cellar_unlocked(self)
-                    if was_locked != self.cellar_locked:
-                        status = "locked" if self.cellar_locked else "unlocked"
-                        self.log(f"OnionCellar: cellar is now {status}")
-                        self.update_menu()
+                    else:
+                        # Already registered, coming back online (wake/reconnect)
+                        cellar.start_online_notification_thread(self)
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
@@ -1858,8 +1866,7 @@ class OnionPressApp(rumps.App):
             if state == "available":
                 self.icon = self.icon_running
                 if self.is_cellar:
-                    lock_icon = "Locked" if self.cellar_locked else "Unlocked"
-                    self.menu["Starting..."].title = f"OnionCellar [{lock_icon}]: {self.onion_address}"
+                    self.menu["Starting..."].title = f"OnionCellar: {self.onion_address}"
                 else:
                     self.menu["Starting..."].title = f"Address: {self.onion_address}"
                 self.menu["Start"].set_callback(None)
@@ -2062,15 +2069,25 @@ class OnionPressApp(rumps.App):
         self.log("Registered for system sleep/wake notifications")
 
     def handle_sleep(self):
-        """Handle system sleep — release caffeinate so the Mac actually sleeps"""
+        """Handle system sleep — notify cellar and release caffeinate.
+        Cellar resists sleep to keep network active."""
         self.log("System going to sleep")
-        self.stop_caffeinate()
+        if not self.is_cellar:
+            # Notify cellar before sleeping so it can take over quickly
+            if self.is_ready and self._cellar_registration_started:
+                try:
+                    cellar.notify_cellar_offline(self)
+                except Exception:
+                    pass
+            self.stop_caffeinate()
 
     def handle_wake(self):
         """Handle system wake — Tor circuits are dead, go yellow immediately"""
         self.log("System wake detected — marking Tor as reconnecting")
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.start_caffeinate()
+        # Reset cellar check so /online fires when Tor reconnects
+        self._cellar_checked = False
         if self.is_ready:
             self.is_ready = False
             self._last_bootstrap_pct = 0
@@ -2081,21 +2098,39 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=self._sighup_tor, daemon=True).start()
 
     def _sighup_tor(self):
-        """Send SIGHUP to Tor container to force circuit rebuild after wake"""
+        """Send SIGHUP to Tor container to force circuit rebuild after wake.
+        If Tor hasn't bootstrapped within 2 minutes, restart the container."""
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             env = os.environ.copy()
             env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
             env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            # Try SIGHUP on PID 1 (works for both C-tor and Arti entrypoint)
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor", "kill", "-HUP", "1"],
                 capture_output=True, text=True, env=env, timeout=10)
             if result.returncode == 0:
-                self.log("Sent SIGHUP to Tor — rebuilding circuits")
+                self.log("Sent SIGHUP to Tor/Arti — rebuilding circuits")
             else:
                 self.log(f"Failed to SIGHUP Tor: {result.stderr.strip()}")
         except Exception as e:
             self.log(f"Failed to SIGHUP Tor: {e}")
+
+        # Wait up to 2 minutes for Tor to bootstrap; if it doesn't, restart container
+        time.sleep(120)
+        if not self.is_ready:
+            self.log("Tor still not bootstrapped 2min after SIGHUP — restarting container")
+            try:
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+                subprocess.run(
+                    [docker_bin, "restart", "onionpress-tor"],
+                    capture_output=True, text=True, env=env, timeout=30)
+                self.log("Tor container restarted")
+            except Exception as e:
+                self.log(f"Failed to restart Tor container: {e}")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
@@ -2657,6 +2692,12 @@ class OnionPressApp(rumps.App):
             # User confirmed — delete old keys so launcher regenerates
             self.log("User confirmed address prefix change — deleting old keys")
 
+            # Unregister old address from OnionCellar (it will never come back)
+            try:
+                cellar.unregister_from_cellar(self, content_address=current_hostname)
+            except Exception as e:
+                self.log(f"Cellar unregister failed (continuing): {e}")
+
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
                 env = os.environ.copy()
@@ -2723,22 +2764,10 @@ class OnionPressApp(rumps.App):
             except Exception:
                 pass
 
-            # First run: show welcome screen and wait for user to click Continue
+            # First run: launch splash is already showing — just run setup
             if first_run:
-                self.log("First run detected - showing welcome screen")
-                self.setup_dialog_showing = True
-
-                def on_continue():
-                    self.log("User confirmed setup - starting installation")
-                    threading.Thread(target=self._run_first_time_setup, daemon=True).start()
-
-                def on_cancel():
-                    self.log("User cancelled setup")
-                    self.menu["Starting..."].title = "Status: Stopped"
-                    setup_window.close_setup_progress()
-                    self.setup_dialog_showing = False
-
-                setup_window.show_welcome_screen(on_continue=on_continue, on_cancel=on_cancel)
+                self.log("First run detected - starting installation")
+                threading.Thread(target=self._run_first_time_setup, daemon=True).start()
                 return
 
             # Not first run: check if address prefix changed before starting
@@ -2768,83 +2797,15 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=start, daemon=True).start()
 
     def _run_first_time_setup(self):
-        """Run first-time setup with progress window: launcher, pull images, then wait for ready."""
-        progress_window = setup_window.get_setup_window()
-        # Window already transitioned to progress view by Continue button
-
+        """Run first-time setup: launcher start, pull images, then wait for ready."""
         try:
-            # Step 0: System check
-            progress_window.set_step(0, "in_progress")
-            progress_window.set_status("Checking system requirements")
-            progress_window.add_log("CHECKING MACOS VERSION...", "progress")
-            time.sleep(0.3)
-            try:
-                ver = subprocess.run(
-                    ["sw_vers", "-productVersion"],
-                    capture_output=True, text=True, timeout=5
-                )
-                progress_window.add_log(f"MACOS {ver.stdout.strip()} DETECTED", "ok")
-            except Exception:
-                progress_window.add_log("MACOS DETECTED", "ok")
-            progress_window.add_log("PYTHON 3 FOUND", "ok")
-            time.sleep(0.3)
-            progress_window.complete_step(0)
-
-            # Step 1: Runtime init
-            progress_window.set_step(1, "in_progress")
-            progress_window.set_status("Initializing container runtime")
-            progress_window.add_log("STARTING COLIMA VM...", "progress")
+            self.log("Starting Colima VM and containers...")
             subprocess.run([self.launcher_script, "start"])
-            time.sleep(1)
-            progress_window.add_log("VM INITIALIZED", "ok")
-            progress_window.complete_step(1)
-
-            # Step 2: Download images
-            progress_window.set_step(2, "in_progress")
-            progress_window.set_status("Downloading container images")
-            progress_window.add_log("FETCHING CONTAINER IMAGES...", "progress")
         except Exception as e:
             self.log(f"Error in _run_first_time_setup: {e}")
-            progress_window.add_log(f"ERROR: {e}", "error")
 
-        docker_dir = os.path.join(self.parent_resources_dir, "docker")
-        try:
-            env = os.environ.copy()
-            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
-            secrets_file = os.path.join(self.app_support, "secrets")
-            if os.path.exists(secrets_file):
-                with open(secrets_file, 'r') as sf:
-                    for line in sf:
-                        line = line.strip()
-                        if line and not line.startswith('#') and '=' in line:
-                            key, val = line.split('=', 1)
-                            env[key] = val.strip("'")
-            # Pass Cloudflare Tunnel token (avoids docker-compose warning about undefined var)
-            env.setdefault("CLOUDFLARE_TUNNEL_TOKEN", self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
-            docker_bin = os.path.join(self.bin_dir, "docker")
-            docker_log = os.path.join(self.app_support, "docker-pull.log")
-
-            def pull_and_start():
-                with open(docker_log, 'w') as log_file:
-                    result = subprocess.run(
-                        [docker_bin, "compose", "up", "-d", "wordpress", "db"],
-                        cwd=docker_dir,
-                        stdout=log_file,
-                        stderr=subprocess.STDOUT,
-                        timeout=600,
-                        env=env
-                    )
-                self.log(f"Docker compose up completed with exit code: {result.returncode}")
-                if result.returncode == 0:
-                    progress_window.set_status("Generating custom onion address")
-                    progress_window.set_detail("Finding address...")
-                    self.log("Containers started, WordPress is starting...")
-
-            threading.Thread(target=pull_and_start, daemon=True).start()
-            self.monitor_image_downloads(progress_window)
-        except Exception as e:
-            self.log(f"Error starting containers: {e}")
-            progress_window.set_status(f"Error: {e}")
+        # Monitor image downloads (logs progress to onionpress.log)
+        self.monitor_image_downloads()
 
         # Poll until WordPress is responding
         max_wait = 60
@@ -2858,32 +2819,6 @@ class OnionPressApp(rumps.App):
 
         self.check_status()
         self.start_caffeinate()
-
-        # Complete setup window when service is ready
-        def wait_for_ready():
-            for _ in range(120):
-                time.sleep(1)
-                if self.is_ready and self.onion_address and self.onion_address not in ("Starting...", "Not running", "Generating address..."):
-                    progress_window.set_step(3, "in_progress")
-                    progress_window.add_log(f"ADDRESS: {self.onion_address[:25]}...", "ok")
-                    progress_window.complete_step(3)
-                    progress_window.set_step(4, "in_progress")
-                    progress_window.set_status("Starting services")
-                    progress_window.add_log("ALL CONTAINERS RUNNING", "ok")
-                    progress_window.complete_step(4)
-                    progress_window.set_step(5, "in_progress")
-                    progress_window.set_status("Finalizing setup")
-                    progress_window.add_log("VERIFYING TOR CIRCUIT...", "progress")
-                    progress_window.add_log("ONION SERVICE PUBLISHED", "ok")
-                    progress_window.complete_step(5)
-                    progress_window.set_modem_active(False)
-                    progress_window.show_completion(self.onion_address)
-                    time.sleep(4)
-                    setup_window.close_setup_progress()
-                    self.setup_dialog_showing = False
-                    break
-
-        threading.Thread(target=wait_for_ready, daemon=True).start()
 
     @rumps.clicked("Stop")
     def stop_service(self, _):
@@ -3448,14 +3383,10 @@ class OnionPressApp(rumps.App):
             self.log("Setup dialog fallback - dialog failed to show")
 
     def dismiss_setup_dialog(self):
-        """Dismiss the setup dialog if it's showing (native alert or setup progress window)"""
+        """Dismiss the setup dialog if it's showing (native NSAlert)"""
         if self.setup_dialog_showing:
             self.setup_dialog_showing = False
             self.log("Setup dialog marked for dismissal")
-            try:
-                setup_window.hide_setup_progress()
-            except Exception:
-                pass
             try:
                 if self.setup_alert:
                     AppKit.NSApp.abortModal()
@@ -3463,10 +3394,8 @@ class OnionPressApp(rumps.App):
             except Exception as e:
                 self.log(f"Error dismissing setup dialog: {e}")
 
-    def monitor_image_downloads(self, progress_window=None):
-        """Monitor Docker image downloads and show progress notifications.
-        If progress_window is provided (first-time setup), update its log and progress bar.
-        """
+    def monitor_image_downloads(self):
+        """Monitor Docker image downloads and log progress."""
         images_to_check = {
             'wordpress': False,
             'mariadb': False,
@@ -3478,10 +3407,6 @@ class OnionPressApp(rumps.App):
         # Check for images every 3 seconds for up to 10 minutes
         for i in range(200):
             try:
-                if progress_window:
-                    estimated_progress = min(0.9, i / 60)
-                    progress_window.set_progress(estimated_progress, "DOWNLOADING")
-
                 result = subprocess.run(
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
@@ -3497,27 +3422,7 @@ class OnionPressApp(rumps.App):
                         if any(image_name in img for img in current_images):
                             images_to_check[image_name] = True
                             self.log(f"Image downloaded: {image_name}")
-                            if progress_window:
-                                if image_name == 'wordpress':
-                                    progress_window.add_log("WORDPRESS IMAGE READY", "ok")
-                                    progress_window.set_progress(0.4, "WORDPRESS OK")
-                                elif image_name == 'mariadb':
-                                    progress_window.add_log("MARIADB IMAGE READY", "ok")
-                                    progress_window.set_progress(0.7, "MARIADB OK")
-                                elif image_name == 'tor':
-                                    progress_window.add_log("TOR IMAGE READY", "ok")
-                                    progress_window.set_progress(0.95, "TOR OK")
 
-                # When using progress window, step 2 completes when wordpress + mariadb are ready (first compose only pulls those)
-                all_needed = images_to_check['wordpress'] and images_to_check['mariadb']
-                if progress_window and all_needed:
-                    self.log("Required images ready (wordpress + mariadb)")
-                    progress_window.set_progress(1.0, "COMPLETE")
-                    progress_window.add_log("ALL IMAGES DOWNLOADED", "ok")
-                    progress_window.complete_step(2)
-                    progress_window.set_status("Generating custom onion address")
-                    progress_window.add_log("GENERATING ADDRESS PREFIX...", "progress")
-                    break
                 if all(images_to_check.values()):
                     self.log("All images downloaded")
                     break
@@ -3669,6 +3574,14 @@ License: AGPL v3"""
                 self.monitoring_tor_install = False
                 self.dismiss_setup_dialog()
 
+                # Unregister from OnionCellar before stopping (needs running containers)
+                if self.is_running:
+                    self.log("Uninstall: Unregistering from OnionCellar...")
+                    try:
+                        cellar.unregister_from_cellar(self)
+                    except Exception as e:
+                        self.log(f"Uninstall: cellar unregister failed (continuing): {e}")
+
                 # Stop the service (this will cancel any startup in progress)
                 self.log("Uninstall: Stopping services...")
                 subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
@@ -3676,15 +3589,19 @@ License: AGPL v3"""
                 self.stop_onion_proxy()
                 self.stop_caffeinate()
 
-                # Delete Colima VM (cleaner than pkill, properly removes VM)
+                # Stop and delete Colima VM
                 # Only affects OnionPress instance, not system Colima
-                self.log("Uninstall: Deleting Colima VM...")
+                self.log("Uninstall: Stopping Colima VM...")
                 colima_bin = os.path.join(self.bin_dir, "colima")
                 env = os.environ.copy()
                 env["COLIMA_HOME"] = self.colima_home
                 env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
                 env["LIMA_INSTANCE"] = "onionpress"
+                subprocess.run([colima_bin, "stop", "-f"], capture_output=True, timeout=60, env=env)
+                self.log("Uninstall: Deleting Colima VM...")
                 subprocess.run([colima_bin, "delete", "-f"], capture_output=True, timeout=60, env=env)
+                # Kill any orphaned colima/lima processes as a fallback
+                subprocess.run(["pkill", "-f", f"{self.colima_home}"], capture_output=True, timeout=10)
                 # Note: Docker volumes lived inside the Colima VM and are deleted with it
 
                 # Step 3: Remove data directory (but keep it until after we show dialog)
@@ -3722,7 +3639,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.112 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.3.8 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
@@ -3743,6 +3660,13 @@ License: AGPL v3"""
         def cleanup_and_quit():
             # Small delay to ensure UI updates
             time.sleep(0.5)
+
+            # Notify cellar before stopping services (containers needed for curl)
+            if self._cellar_registration_started:
+                try:
+                    cellar.notify_cellar_offline(self)
+                except Exception:
+                    pass
 
             # Now run cleanup
             try:
