@@ -991,7 +991,7 @@ install_multisite_domain_map() {
     fi
 
     # Ensure .htaccess has multisite rewrite rules (REST API needs these)
-    docker exec onionpress-wordpress bash -c 'cat > /var/www/html/.htaccess << '\''HTEOF'\''
+    docker exec onionpress-wordpress bash -c 'cat > /var/www/html/.htaccess << "HTEOF"
 # Privacy: prevent onion address leaking in Referer headers
 <IfModule mod_headers.c>
 Header set Referrer-Policy "no-referrer"
