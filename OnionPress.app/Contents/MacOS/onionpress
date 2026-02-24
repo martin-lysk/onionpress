@@ -87,6 +87,13 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export CLOUDFLARE_TUNNEL_TOKEN
 
+# Build compose flags — include cloudflare override file only when token is set
+if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+    CF_COMPOSE="-f docker-compose.yml -f docker-compose.cloudflare.yml"
+else
+    CF_COMPOSE=""
+fi
+
 # OnionCellar mode detection — check if our .onion address matches the cellar address
 # This env var is passed to docker-compose and controls cellar-specific behavior
 export ONIONPRESS_CELLAR="0"
@@ -126,7 +133,7 @@ detect_cellar_mode() {
             if [ "$vm_mem_kb" -lt 4500000 ] 2>/dev/null; then
                 log "OnionCellar: VM has $(( vm_mem_kb / 1024 ))MB — restarting with 5GB..."
                 cd "$DOCKER_DIR"
-                docker compose --profile cloudflare --profile cellar down >> "$LOG_FILE" 2>&1
+                docker compose $CF_COMPOSE --profile cellar down >> "$LOG_FILE" 2>&1
                 "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
                 "$BIN_DIR/colima" start \
                     --mount "$DATA_DIR/shared:w" \
@@ -1269,10 +1276,10 @@ start_containers() {
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
         log "Cloudflare Tunnel enabled, starting cloudflared..."
-        docker compose --profile cloudflare up -d cloudflared >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start cloudflared container"
+        docker compose $CF_COMPOSE up -d cloudflared >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start cloudflared container"
     else
         # Stop cloudflared if it was previously running but token was removed
-        docker compose --profile cloudflare stop cloudflared 2>/dev/null || true
+        docker stop onionpress-cloudflared 2>/dev/null || true
     fi
 }
 
@@ -1280,8 +1287,8 @@ start_containers() {
 stop_containers() {
     log "Stopping OnionPress containers..."
     cd "$DOCKER_DIR"
-    # Stop profile containers first (they need --profile to be addressed)
-    docker compose --profile cloudflare --profile cellar down 2>&1 | tee -a "$LOG_FILE"
+    # Stop all containers (cellar via profile, cloudflared via override file if token set)
+    docker compose $CF_COMPOSE --profile cellar down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
 }
 
@@ -1414,7 +1421,7 @@ main() {
                     if "$BIN_DIR/colima" status >/dev/null 2>&1; then
                         log "Cellar key detected — restarting VM with 5GB"
                         cd "$DOCKER_DIR"
-                        docker compose --profile cloudflare --profile cellar down >> "$LOG_FILE" 2>&1 || true
+                        docker compose $CF_COMPOSE --profile cellar down >> "$LOG_FILE" 2>&1 || true
                         "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1 || true
                         "$BIN_DIR/colima" start \
                             --mount "$DATA_DIR/shared:w" \

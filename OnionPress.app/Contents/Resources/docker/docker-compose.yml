@@ -76,20 +76,6 @@ services:
     profiles:
       - cellar
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: onionpress-cloudflared
-    command: tunnel run
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-    networks:
-      - onionpress-network
-    depends_on:
-      - wordpress
-    restart: unless-stopped
-    profiles:
-      - cloudflare
-
 volumes:
   arti-state:
     name: onionpress-arti-state

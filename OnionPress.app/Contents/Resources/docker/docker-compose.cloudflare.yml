@@ -1,0 +1,17 @@
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: onionpress-cloudflared
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - onionpress-network
+    depends_on:
+      - wordpress
+    restart: unless-stopped
+
+networks:
+  onionpress-network:
+    name: onionpress-network
+    driver: bridge
