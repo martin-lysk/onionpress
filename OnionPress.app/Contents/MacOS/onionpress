@@ -160,7 +160,7 @@ detect_cellar_mode() {
         docker build -t ghcr.io/brewsterkahle/onionpress-tor:latest \
             -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'CELLAR_DOCKERFILE'
 FROM ghcr.io/brewsterkahle/onionpress-tor:latest
-RUN apt-get update && apt-get install -y --no-install-recommends python3 curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 curl sqlite3 && rm -rf /var/lib/apt/lists/*
 COPY entrypoint.sh /entrypoint.sh
 COPY arti-cellar.toml /etc/arti/arti-cellar.toml
 COPY cellar-poller.py /cellar-poller.py
