@@ -168,6 +168,13 @@ COPY cellar-server.py /cellar-server.py
 COPY cellar-tor-manager.sh /cellar-tor-manager.sh
 RUN chmod +x /entrypoint.sh /cellar-poller.py /cellar-server.py /cellar-tor-manager.sh
 CELLAR_DOCKERFILE
+        # Remove old tor-polling container if it exists (renamed to onioncellar)
+        if docker inspect onionpress-tor-polling >/dev/null 2>&1; then
+            log "OnionCellar: removing old onionpress-tor-polling container..."
+            docker stop onionpress-tor-polling >> "$LOG_FILE" 2>&1 || true
+            docker rm onionpress-tor-polling >> "$LOG_FILE" 2>&1 || true
+        fi
+
         # Start onioncellar container (SOCKS + keystore + cellar-server + cellar-poller)
         # This keeps HSDir lookups off the main Tor instance and runs the cellar services
         if docker compose --profile cellar up -d onioncellar >> "$LOG_FILE" 2>&1; then
@@ -800,7 +807,12 @@ fix_onionpress_permissions() {
 
     # Ensure the directory exists and is owned by www-data
     # Use 750 (rwxr-x---) to prevent other users from reading the directory
-    if docker compose exec -T wordpress sh -c 'chown -R www-data:www-data /var/lib/onionpress && chmod 750 /var/lib/onionpress' 2>>"$LOG_FILE"; then
+    # Skip the cellar/ subdirectory — cellar-server.py runs as root and manages its own permissions
+    if docker compose exec -T wordpress sh -c '
+        chmod 750 /var/lib/onionpress
+        find /var/lib/onionpress -maxdepth 0 -exec chown www-data:www-data {} +
+        find /var/lib/onionpress -mindepth 1 -maxdepth 1 ! -name cellar -exec chown -R www-data:www-data {} +
+    ' 2>>"$LOG_FILE"; then
         log "✓ Onionpress data directory permissions fixed"
         return 0
     else
@@ -1067,19 +1079,26 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     return 0
 }
 
-# Function to set up OnionCellar data directories (cellar mode only)
+# Function to set up OnionCellar (cellar mode only)
 # Registration API now runs in the onioncellar container (cellar-server.py),
-# so PHP mu-plugins are no longer installed into WordPress.
+# which creates its own data directories on the shared volume at startup.
 install_cellar_plugin() {
     if [ "$ONIONPRESS_CELLAR" != "1" ]; then
         return 0
     fi
 
-    # Create cellar data directory on shared volume
-    # Both onioncellar (cellar-server.py writes keys) and tor (cellar-tor-manager.sh reads keys) need access
-    docker exec onionpress-wordpress mkdir -p \
-        /var/lib/onionpress/cellar/keys >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to create cellar data directory"
+    # Clean up old PHP mu-plugins if they exist (migrated to cellar-server.py)
+    docker exec onionpress-wordpress sh -c '
+        rm -f /var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php \
+              /var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php \
+              /var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php
+    ' >> "$LOG_FILE" 2>&1 || true
+
+    # Clean up old crypto artifacts from shared volume (encryption dropped)
+    docker exec onionpress-wordpress sh -c '
+        rm -f /var/lib/onionpress/cellar/.master-key-unlocked \
+              /var/lib/onionpress/cellar/master-key.json
+    ' >> "$LOG_FILE" 2>&1 || true
 
     return 0
 }
