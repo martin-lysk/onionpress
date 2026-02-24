@@ -30,6 +30,24 @@ import install_native_messaging
 import cellar
 
 
+class _HelpButtonTarget(AppKit.NSObject):
+    """ObjC target for (?) help buttons in the settings dialog."""
+    _help_texts = {}
+    _icon_path = None
+
+    def helpClicked_(self, sender):
+        text = self._help_texts.get(sender.tag(), "")
+        if text:
+            a = AppKit.NSAlert.alloc().init()
+            a.setMessageText_("Help")
+            a.setInformativeText_(text)
+            if self._icon_path and os.path.exists(self._icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(self._icon_path)
+                if icon:
+                    a.setIcon_(icon)
+            a.runModal()
+
+
 def parse_version(version_str):
     """Parse a version string like '2.10.3' into a tuple of ints for comparison."""
     try:
@@ -3096,8 +3114,8 @@ class OnionPressApp(rumps.App):
             ("ADDRESS_PREFIX", "op2"),
             ("VM_MEMORY", "1"),
             ("PREVENT_SLEEP", "yes"),
-            ("LAUNCH_ON_LOGIN", "no"),
-            ("UPDATE_ON_LAUNCH", "no"),
+            ("LAUNCH_ON_LOGIN", "yes"),
+            ("UPDATE_ON_LAUNCH", "yes"),
             ("INSTALL_IA_PLUGIN", "yes"),
             ("REGISTER_WITH_CELLAR", "yes"),
             ("CLOUDFLARE_TUNNEL_TOKEN", ""),
@@ -3106,16 +3124,7 @@ class OnionPressApp(rumps.App):
         for key, default in settings_keys:
             old_values[key] = self._read_config_value(key, default)
 
-        # -- Dialog 1: Settings form --
-        alert = AppKit.NSAlert.alloc().init()
-        alert.setMessageText_("OnionPress Settings")
-        alert.setInformativeText_("Change settings below. Click (?) for help on any setting.")
-
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
-        if os.path.exists(icon_path):
-            icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-            if icon:
-                alert.setIcon_(icon)
 
         # Layout constants
         field_w = 300
@@ -3125,119 +3134,163 @@ class OnionPressApp(rumps.App):
         input_w = 100
         help_x = 280
         help_w = 25
-        # 8 rows + some padding
         container_h = 8 * row_h + 10
 
-        container = AppKit.NSView.alloc().initWithFrame_(
-            AppKit.NSMakeRect(0, 0, field_w, container_h))
+        def _alert(title, message):
+            """Show an alert with the OnionPress icon."""
+            a = AppKit.NSAlert.alloc().init()
+            a.setMessageText_(title)
+            a.setInformativeText_(message)
+            if os.path.exists(icon_path):
+                img = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if img:
+                    a.setIcon_(img)
+            a.runModal()
 
-        fields = {}  # key -> NSTextField or NSButton(checkbox)
+        # Create help button target (shared across dialog rebuilds)
+        help_target = _HelpButtonTarget.alloc().init()
+        help_keys = [
+            "ADDRESS_PREFIX", "VM_MEMORY", "PREVENT_SLEEP",
+            "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH", "INSTALL_IA_PLUGIN",
+            "REGISTER_WITH_CELLAR", "CLOUDFLARE_TUNNEL_TOKEN",
+        ]
+        help_target._help_texts = {
+            i: self._SETTINGS_HELP[k] for i, k in enumerate(help_keys)
+        }
+        help_target._icon_path = icon_path
+        self._help_target = help_target  # prevent GC during modal
 
-        def add_text_row(y, label_text, key, value):
-            label = AppKit.NSTextField.labelWithString_(label_text)
-            label.setFrame_(AppKit.NSMakeRect(0, y + 3, label_w, 18))
-            container.addSubview_(label)
+        # Current form values — starts from config, updated on validation failure
+        form_values = dict(old_values)
 
-            field = AppKit.NSTextField.alloc().initWithFrame_(
-                AppKit.NSMakeRect(input_x, y, input_w, 24))
-            field.setStringValue_(str(value))
-            container.addSubview_(field)
-            fields[key] = field
+        while True:
+            # -- Build settings form dialog --
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("OnionPress Settings")
+            alert.setInformativeText_("Change settings below. Click (?) for help on any setting.")
 
-            help_btn = AppKit.NSButton.alloc().initWithFrame_(
-                AppKit.NSMakeRect(help_x, y, help_w, 24))
-            help_btn.setBezelStyle_(9)  # NSBezelStyleHelpButton
-            container.addSubview_(help_btn)
-            return field
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
 
-        def add_check_row(y, label_text, key, value):
-            cb = AppKit.NSButton.alloc().initWithFrame_(
-                AppKit.NSMakeRect(0, y, help_x - 5, 24))
-            cb.setButtonType_(AppKit.NSButtonTypeSwitch)
-            cb.setTitle_(label_text)
-            if value.lower() == "yes":
-                cb.setState_(AppKit.NSControlStateValueOn)
-            else:
-                cb.setState_(AppKit.NSControlStateValueOff)
-            container.addSubview_(cb)
-            fields[key] = cb
+            container = AppKit.NSView.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, field_w, container_h))
 
-            help_btn = AppKit.NSButton.alloc().initWithFrame_(
-                AppKit.NSMakeRect(help_x, y, help_w, 24))
-            help_btn.setBezelStyle_(9)  # NSBezelStyleHelpButton
-            container.addSubview_(help_btn)
-            return cb
+            fields = {}
+            tag_counter = [0]
 
-        # Rows laid out bottom-to-top (Cocoa coordinate system)
-        y = container_h - row_h
-        prefix_field = add_text_row(y, "Address Prefix:", "ADDRESS_PREFIX", old_values["ADDRESS_PREFIX"])
-        y -= row_h
-        memory_field = add_text_row(y, "VM Memory (GB):", "VM_MEMORY", old_values["VM_MEMORY"])
-        y -= row_h
-        add_check_row(y, "Prevent Sleep on AC", "PREVENT_SLEEP", old_values["PREVENT_SLEEP"])
-        y -= row_h
-        add_check_row(y, "Launch on Login", "LAUNCH_ON_LOGIN", old_values["LAUNCH_ON_LOGIN"])
-        y -= row_h
-        add_check_row(y, "Update on Launch", "UPDATE_ON_LAUNCH", old_values["UPDATE_ON_LAUNCH"])
-        y -= row_h
-        add_check_row(y, "Install IA Plugin", "INSTALL_IA_PLUGIN", old_values["INSTALL_IA_PLUGIN"])
-        y -= row_h
-        add_check_row(y, "Register with OnionCellar", "REGISTER_WITH_CELLAR", old_values["REGISTER_WITH_CELLAR"])
-        y -= row_h
-        cf_field = add_text_row(y, "Cloudflare Token:", "CLOUDFLARE_TUNNEL_TOKEN", old_values["CLOUDFLARE_TUNNEL_TOKEN"])
+            def _make_help_btn(y):
+                btn = AppKit.NSButton.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(help_x, y, help_w, 24))
+                btn.setBezelStyle_(9)  # NSBezelStyleHelpButton
+                btn.setTag_(tag_counter[0])
+                btn.setTarget_(help_target)
+                btn.setAction_(help_target.helpClicked_)
+                container.addSubview_(btn)
+                tag_counter[0] += 1
 
-        # Widen the Cloudflare token field since tokens are long
-        cf_field.setFrame_(AppKit.NSMakeRect(input_x, cf_field.frame().origin.y, input_w, 24))
+            def add_text_row(y, label_text, key, value):
+                label = AppKit.NSTextField.labelWithString_(label_text)
+                label.setFrame_(AppKit.NSMakeRect(0, y + 3, label_w, 18))
+                container.addSubview_(label)
 
-        alert.setAccessoryView_(container)
+                field = AppKit.NSTextField.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(input_x, y, input_w, 24))
+                field.setStringValue_(str(value))
+                container.addSubview_(field)
+                fields[key] = field
 
-        # Cancel is default (Return key), Save requires deliberate click
-        save_btn = alert.addButtonWithTitle_("Save")
-        cancel_btn = alert.addButtonWithTitle_("Cancel")
-        cancel_btn.setKeyEquivalent_("\r")
-        save_btn.setKeyEquivalent_("")
+                _make_help_btn(y)
+                return field
 
-        # Make prefix field first responder
-        alert.window().setInitialFirstResponder_(prefix_field)
+            def add_check_row(y, label_text, key, value):
+                cb = AppKit.NSButton.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(0, y, help_x - 5, 24))
+                cb.setButtonType_(AppKit.NSButtonTypeSwitch)
+                cb.setTitle_(label_text)
+                if value.lower() == "yes":
+                    cb.setState_(AppKit.NSControlStateValueOn)
+                else:
+                    cb.setState_(AppKit.NSControlStateValueOff)
+                container.addSubview_(cb)
+                fields[key] = cb
 
-        response = alert.runModal()
-        if response != 1000:  # Not "Save"
-            return
+                _make_help_btn(y)
+                return cb
 
-        # -- Collect new values --
-        new_values = {}
-        for key in [k for k, _ in settings_keys]:
-            widget = fields[key]
-            if key in ("PREVENT_SLEEP", "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
-                       "INSTALL_IA_PLUGIN", "REGISTER_WITH_CELLAR"):
-                new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"
-            else:
-                new_values[key] = widget.stringValue().strip()
+            y = container_h - row_h
+            prefix_field = add_text_row(y, "Address Prefix:", "ADDRESS_PREFIX", form_values["ADDRESS_PREFIX"])
+            y -= row_h
+            add_text_row(y, "VM Memory (GB):", "VM_MEMORY", form_values["VM_MEMORY"])
+            y -= row_h
+            add_check_row(y, "Prevent Sleep on AC", "PREVENT_SLEEP", form_values["PREVENT_SLEEP"])
+            y -= row_h
+            add_check_row(y, "Launch on Login", "LAUNCH_ON_LOGIN", form_values["LAUNCH_ON_LOGIN"])
+            y -= row_h
+            add_check_row(y, "Update Docker on Launch", "UPDATE_ON_LAUNCH", form_values["UPDATE_ON_LAUNCH"])
+            y -= row_h
+            add_check_row(y, "Install IA Plugin", "INSTALL_IA_PLUGIN", form_values["INSTALL_IA_PLUGIN"])
+            y -= row_h
+            add_check_row(y, "Register with OnionCellar", "REGISTER_WITH_CELLAR", form_values["REGISTER_WITH_CELLAR"])
+            y -= row_h
+            cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"])
+            cf_field.setPlaceholderString_("paste tunnel token")
+            cf_field.setFrame_(AppKit.NSMakeRect(input_x, cf_field.frame().origin.y, input_w, 24))
 
-        # -- Validate prefix --
-        prefix = new_values["ADDRESS_PREFIX"]
-        if prefix and not re.match(r'^[a-z2-7]+$', prefix):
-            rumps.alert(
-                title="Invalid Address Prefix",
-                message="Only lowercase base32 characters allowed (a-z, 2-7).\n"
-                        "Numbers 0, 1, 8, 9 are not valid.")
-            return
-        if len(prefix) > 5:
-            rumps.alert(
-                title="Invalid Address Prefix",
-                message="Address prefix must be at most 5 characters.")
-            return
+            alert.setAccessoryView_(container)
 
-        # -- Validate VM memory --
-        try:
-            mem = int(new_values["VM_MEMORY"])
-            if mem < 1:
-                raise ValueError
-        except ValueError:
-            rumps.alert(
-                title="Invalid VM Memory",
-                message="VM memory must be a whole number of at least 1 GB.")
-            return
+            save_btn = alert.addButtonWithTitle_("Save")
+            cancel_btn = alert.addButtonWithTitle_("Cancel")
+            cancel_btn.setKeyEquivalent_("\r")
+            save_btn.setKeyEquivalent_("")
+
+            alert.window().setInitialFirstResponder_(prefix_field)
+
+            response = alert.runModal()
+            if response != 1000:  # Not "Save"
+                return
+
+            # -- Collect new values from form --
+            new_values = {}
+            for key in [k for k, _ in settings_keys]:
+                widget = fields[key]
+                if key in ("PREVENT_SLEEP", "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
+                           "INSTALL_IA_PLUGIN", "REGISTER_WITH_CELLAR"):
+                    new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"
+                else:
+                    new_values[key] = widget.stringValue().strip()
+
+            # -- Validate prefix --
+            prefix = new_values["ADDRESS_PREFIX"]
+            if prefix and not re.match(r'^[a-z2-7]+$', prefix):
+                _alert("Invalid Address Prefix",
+                       "Only lowercase base32 characters allowed (a-z, 2-7).\n"
+                       "Numbers 0, 1, 8, 9 are not valid.")
+                form_values = new_values
+                form_values["ADDRESS_PREFIX"] = old_values["ADDRESS_PREFIX"]
+                continue
+            if len(prefix) > 5:
+                _alert("Invalid Address Prefix",
+                       "Address prefix must be at most 5 characters.")
+                form_values = new_values
+                form_values["ADDRESS_PREFIX"] = old_values["ADDRESS_PREFIX"]
+                continue
+
+            # -- Validate VM memory --
+            try:
+                mem = int(new_values["VM_MEMORY"])
+                if mem < 1:
+                    raise ValueError
+            except ValueError:
+                _alert("Invalid VM Memory",
+                       "VM memory must be a whole number of at least 1 GB.")
+                form_values = new_values
+                form_values["VM_MEMORY"] = old_values["VM_MEMORY"]
+                continue
+
+            # Validation passed
+            break
 
         # -- Find changed settings --
         changes = []
@@ -3246,7 +3299,7 @@ class OnionPressApp(rumps.App):
                 changes.append(key)
 
         if not changes:
-            rumps.alert(title="Settings", message="No changes.")
+            _alert("Settings", "No changes.")
             return
 
         # -- Dialog 2: Hazards confirmation --
@@ -3261,7 +3314,7 @@ class OnionPressApp(rumps.App):
                 "VM_MEMORY": "VM Memory (GB)",
                 "PREVENT_SLEEP": "Prevent Sleep on AC",
                 "LAUNCH_ON_LOGIN": "Launch on Login",
-                "UPDATE_ON_LAUNCH": "Update on Launch",
+                "UPDATE_ON_LAUNCH": "Update Docker on Launch",
                 "INSTALL_IA_PLUGIN": "Install IA Plugin",
                 "REGISTER_WITH_CELLAR": "Register with OnionCellar",
                 "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Token",
@@ -3319,11 +3372,16 @@ class OnionPressApp(rumps.App):
             self.write_config_value(key, new_values[key])
 
         self.log(f"Settings updated: {', '.join(changes)}")
-        rumps.alert(
-            title="Settings Saved",
-            message="Settings saved. Restart OnionPress from the menu bar "
-                    "for changes to take effect."
-        )
+        saved = AppKit.NSAlert.alloc().init()
+        saved.setMessageText_("Settings Saved")
+        saved.setInformativeText_(
+            "Settings saved. Restart OnionPress from the menu bar "
+            "for changes to take effect.")
+        if os.path.exists(icon_path):
+            icon3 = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+            if icon3:
+                saved.setIcon_(icon3)
+        saved.runModal()
 
     @rumps.clicked("Backup...")
     def backup(self, _):

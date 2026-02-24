@@ -32,27 +32,27 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 
 # Update Docker Images on Launch
-# Default: "no" (manual updates only via Check for Updates menu)
+# Default: "yes" (automatically update on launch)
 #
 # When enabled, onionpress will automatically check for and download updated
 # WordPress, MariaDB, and Tor container images when the app launches.
 # This ensures you have the latest security patches and features.
 #
-# Set to "yes" to enable automatic updates on launch.
+# Set to "no" to disable automatic updates on launch.
 # Note: Updates only occur when containers are stopped.
 #
-UPDATE_ON_LAUNCH=no
+UPDATE_ON_LAUNCH=yes
 
 # Launch on Login
-# Default: "no" (manual launch required)
+# Default: "yes" (auto-start on login)
 #
 # When enabled, OnionPress will automatically start when you log in to macOS.
 # The app will appear in your menu bar and your WordPress site will start automatically.
 #
-# Set to "yes" to launch on login.
+# Set to "no" to disable auto-start on login.
 # Note: You can also manage this in System Settings → General → Login Items
 #
-LAUNCH_ON_LOGIN=no
+LAUNCH_ON_LOGIN=yes
 
 # Prevent Mac Sleep While Running (AC Power Only)
 # Default: "yes" (keeps Mac awake when plugged in)

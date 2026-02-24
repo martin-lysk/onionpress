@@ -30,6 +30,24 @@ import install_native_messaging
 import cellar
 
 
+class _HelpButtonTarget(AppKit.NSObject):
+    """ObjC target for (?) help buttons in the settings dialog."""
+    _help_texts = {}
+    _icon_path = None
+
+    def helpClicked_(self, sender):
+        text = self._help_texts.get(sender.tag(), "")
+        if text:
+            a = AppKit.NSAlert.alloc().init()
+            a.setMessageText_("Help")
+            a.setInformativeText_(text)
+            if self._icon_path and os.path.exists(self._icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(self._icon_path)
+                if icon:
+                    a.setIcon_(icon)
+            a.runModal()
+
+
 def parse_version(version_str):
     """Parse a version string like '2.10.3' into a tuple of ints for comparison."""
     try:
@@ -1064,6 +1082,16 @@ class OnionPressApp(rumps.App):
                 compose_version = result.stdout.strip().split('\n')[0] if result.returncode == 0 else "Unknown"
                 self.log(f"Docker Compose version: {compose_version}")
         except Exception:
+            pass
+
+        # Log cached onion address from previous run if available
+        try:
+            cached_addr_file = os.path.join(self.app_support, "onion_address")
+            with open(cached_addr_file) as f:
+                cached = f.read().strip()
+            if cached and cached.endswith('.onion'):
+                self.log(f"Onion address: {cached}")
+        except (OSError, IOError):
             pass
 
         self.log("=" * 60)
@@ -2960,9 +2988,115 @@ class OnionPressApp(rumps.App):
         with open(config_file, 'w') as f:
             f.writelines(lines)
 
+    # -- Settings help text (from config-template comments) --
+    _SETTINGS_HELP = {
+        "ADDRESS_PREFIX": (
+            "Onion Address Prefix\n\n"
+            "Customise the beginning of your .onion address.\n"
+            "Default: \"op2\" (generates addresses like op2xxxxxxxxxxxxx.onion)\n\n"
+            "Only base32 characters allowed (a-z, 2-7). Numbers 0, 1, 8, 9 are not valid.\n"
+            "Maximum 5 characters. Longer prefixes take exponentially longer to generate:\n"
+            "  2 chars: < 1 second\n"
+            "  3 chars: < 1 second\n"
+            "  4 chars: 5-30 seconds\n"
+            "  5 chars: 10-30 minutes"
+        ),
+        "VM_MEMORY": (
+            "Virtual Machine Memory (GB)\n\n"
+            "RAM allocated to the Linux VM that runs WordPress, Tor, and MariaDB.\n"
+            "1 GB is sufficient for normal use. Increase if you run many plugins "
+            "or experience out-of-memory issues.\n\n"
+            "Requires restart to take effect."
+        ),
+        "PREVENT_SLEEP": (
+            "Prevent Mac Sleep While Running (AC Power Only)\n\n"
+            "Keeps your Mac awake while the service is running AND you're plugged "
+            "into AC power. On battery, your Mac sleeps normally.\n\n"
+            "Display sleep is not affected \u2014 the screen can still turn off."
+        ),
+        "LAUNCH_ON_LOGIN": (
+            "Launch on Login\n\n"
+            "Automatically start OnionPress when you log in to macOS.\n"
+            "You can also manage this in System Settings \u2192 General \u2192 Login Items."
+        ),
+        "UPDATE_ON_LAUNCH": (
+            "Update Docker Images on Launch\n\n"
+            "Automatically check for updated WordPress, MariaDB, and Tor container "
+            "images when the app launches. Ensures you have the latest security patches."
+        ),
+        "INSTALL_IA_PLUGIN": (
+            "Internet Archive Wayback Machine Link Fixer Plugin\n\n"
+            "Automatically installs and activates the IA Link Fixer plugin, which:\n"
+            "  - Scans posts for outbound links\n"
+            "  - Creates archived versions in the Wayback Machine\n"
+            "  - Redirects to archived versions when links break\n"
+            "  - Archives your own posts on every update"
+        ),
+        "REGISTER_WITH_CELLAR": (
+            "Register with OnionCellar\n\n"
+            "Registers your site with the OnionCellar so it can redirect page "
+            "requests to the Wayback Machine as a fallback when your Mac is offline."
+        ),
+        "CLOUDFLARE_TUNNEL_TOKEN": (
+            "Cloudflare Tunnel (Clearnet Access)\n\n"
+            "Expose your WordPress site on the regular internet via Cloudflare Tunnel.\n\n"
+            "PRIVACY NOTE: This reveals your Mac's IP address to Cloudflare. "
+            "Your site is no longer anonymous.\n\n"
+            "Setup:\n"
+            "1. Create a free Cloudflare account and add your domain\n"
+            "2. Go to Zero Trust > Networks > Tunnels > Create a tunnel\n"
+            "3. Set the tunnel service to http://wordpress:80\n"
+            "4. Copy the tunnel token and paste it below\n"
+            "5. Restart OnionPress"
+        ),
+    }
+
+    # Consequence text shown in the hazards confirmation dialog
+    _SETTINGS_CONSEQUENCES = {
+        "ADDRESS_PREFIX": (
+            "Your current .onion address will stop working. A new address "
+            "will be generated. Existing links or bookmarks will break."
+        ),
+        "VM_MEMORY": (
+            "The VM will restart with the new memory allocation. "
+            "Brief downtime expected."
+        ),
+        "PREVENT_SLEEP": {
+            "yes": "Mac will stay awake on AC power.",
+            "no": "Your Mac may sleep while running, taking your site offline.",
+        },
+        "LAUNCH_ON_LOGIN": {
+            "yes": "OnionPress will start automatically on login.",
+            "no": "OnionPress will no longer auto-start.",
+        },
+        "UPDATE_ON_LAUNCH": {
+            "yes": "Docker images will update automatically on launch.",
+            "no": "Automatic updates disabled.",
+        },
+        "INSTALL_IA_PLUGIN": {
+            "yes": "Internet Archive plugin will be installed.",
+            "no": "Internet Archive plugin will not be auto-installed.",
+        },
+        "REGISTER_WITH_CELLAR": {
+            "yes": "Site will register with OnionCellar.",
+            "no": "OnionCellar registration disabled. Wayback fallback won't work.",
+        },
+        "CLOUDFLARE_TUNNEL_TOKEN": {
+            "set": (
+                "Your site will be exposed on the clearnet via Cloudflare. "
+                "Your Mac's IP will be visible to Cloudflare."
+            ),
+            "cleared": "Clearnet access will be disabled.",
+        },
+    }
+
+    def _show_setting_help(self, key):
+        """Show help alert for a setting."""
+        rumps.alert(title="Help", message=self._SETTINGS_HELP.get(key, ""))
+
     @rumps.clicked("Settings...")
     def open_settings(self, _):
-        """Open config file in default text editor"""
+        """Show GUI settings dialog"""
         config_file = os.path.join(self.app_support, "config")
 
         # Create default config if it doesn't exist
@@ -2971,18 +3105,283 @@ class OnionPressApp(rumps.App):
             if os.path.exists(config_template):
                 subprocess.run(["cp", config_template, config_file])
 
-        if os.path.exists(config_file):
-            # Show helpful dialog first
-            rumps.alert(
-                title="Opening Settings",
-                message="Edit the config file that opens.\n\nWhen you're done:\n1. Save the file (⌘S)\n2. Close the editor\n3. Restart OnionPress from the menu bar\n\nYour changes will then take effect.",
-                ok="Open Config File"
-            )
-            # Open in TextEdit and bring it to the front
-            subprocess.run(["open", "-a", "TextEdit", config_file])
-            self.log("Opened config file in text editor")
-        else:
+        if not os.path.exists(config_file):
             rumps.alert("Settings file not found")
+            return
+
+        # -- Read current values --
+        settings_keys = [
+            ("ADDRESS_PREFIX", "op2"),
+            ("VM_MEMORY", "1"),
+            ("PREVENT_SLEEP", "yes"),
+            ("LAUNCH_ON_LOGIN", "yes"),
+            ("UPDATE_ON_LAUNCH", "yes"),
+            ("INSTALL_IA_PLUGIN", "yes"),
+            ("REGISTER_WITH_CELLAR", "yes"),
+            ("CLOUDFLARE_TUNNEL_TOKEN", ""),
+        ]
+        old_values = {}
+        for key, default in settings_keys:
+            old_values[key] = self._read_config_value(key, default)
+
+        icon_path = os.path.join(self.resources_dir, "app-icon.png")
+
+        # Layout constants
+        field_w = 300
+        row_h = 30
+        label_w = 170
+        input_x = 175
+        input_w = 100
+        help_x = 280
+        help_w = 25
+        container_h = 8 * row_h + 10
+
+        def _alert(title, message):
+            """Show an alert with the OnionPress icon."""
+            a = AppKit.NSAlert.alloc().init()
+            a.setMessageText_(title)
+            a.setInformativeText_(message)
+            if os.path.exists(icon_path):
+                img = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if img:
+                    a.setIcon_(img)
+            a.runModal()
+
+        # Create help button target (shared across dialog rebuilds)
+        help_target = _HelpButtonTarget.alloc().init()
+        help_keys = [
+            "ADDRESS_PREFIX", "VM_MEMORY", "PREVENT_SLEEP",
+            "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH", "INSTALL_IA_PLUGIN",
+            "REGISTER_WITH_CELLAR", "CLOUDFLARE_TUNNEL_TOKEN",
+        ]
+        help_target._help_texts = {
+            i: self._SETTINGS_HELP[k] for i, k in enumerate(help_keys)
+        }
+        help_target._icon_path = icon_path
+        self._help_target = help_target  # prevent GC during modal
+
+        # Current form values — starts from config, updated on validation failure
+        form_values = dict(old_values)
+
+        while True:
+            # -- Build settings form dialog --
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("OnionPress Settings")
+            alert.setInformativeText_("Change settings below. Click (?) for help on any setting.")
+
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
+
+            container = AppKit.NSView.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, field_w, container_h))
+
+            fields = {}
+            tag_counter = [0]
+
+            def _make_help_btn(y):
+                btn = AppKit.NSButton.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(help_x, y, help_w, 24))
+                btn.setBezelStyle_(9)  # NSBezelStyleHelpButton
+                btn.setTag_(tag_counter[0])
+                btn.setTarget_(help_target)
+                btn.setAction_(help_target.helpClicked_)
+                container.addSubview_(btn)
+                tag_counter[0] += 1
+
+            def add_text_row(y, label_text, key, value):
+                label = AppKit.NSTextField.labelWithString_(label_text)
+                label.setFrame_(AppKit.NSMakeRect(0, y + 3, label_w, 18))
+                container.addSubview_(label)
+
+                field = AppKit.NSTextField.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(input_x, y, input_w, 24))
+                field.setStringValue_(str(value))
+                container.addSubview_(field)
+                fields[key] = field
+
+                _make_help_btn(y)
+                return field
+
+            def add_check_row(y, label_text, key, value):
+                cb = AppKit.NSButton.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(0, y, help_x - 5, 24))
+                cb.setButtonType_(AppKit.NSButtonTypeSwitch)
+                cb.setTitle_(label_text)
+                if value.lower() == "yes":
+                    cb.setState_(AppKit.NSControlStateValueOn)
+                else:
+                    cb.setState_(AppKit.NSControlStateValueOff)
+                container.addSubview_(cb)
+                fields[key] = cb
+
+                _make_help_btn(y)
+                return cb
+
+            y = container_h - row_h
+            prefix_field = add_text_row(y, "Address Prefix:", "ADDRESS_PREFIX", form_values["ADDRESS_PREFIX"])
+            y -= row_h
+            add_text_row(y, "VM Memory (GB):", "VM_MEMORY", form_values["VM_MEMORY"])
+            y -= row_h
+            add_check_row(y, "Prevent Sleep on AC", "PREVENT_SLEEP", form_values["PREVENT_SLEEP"])
+            y -= row_h
+            add_check_row(y, "Launch on Login", "LAUNCH_ON_LOGIN", form_values["LAUNCH_ON_LOGIN"])
+            y -= row_h
+            add_check_row(y, "Update Docker on Launch", "UPDATE_ON_LAUNCH", form_values["UPDATE_ON_LAUNCH"])
+            y -= row_h
+            add_check_row(y, "Install IA Plugin", "INSTALL_IA_PLUGIN", form_values["INSTALL_IA_PLUGIN"])
+            y -= row_h
+            add_check_row(y, "Register with OnionCellar", "REGISTER_WITH_CELLAR", form_values["REGISTER_WITH_CELLAR"])
+            y -= row_h
+            cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"])
+            cf_field.setPlaceholderString_("paste tunnel token")
+            cf_field.setFrame_(AppKit.NSMakeRect(input_x, cf_field.frame().origin.y, input_w, 24))
+
+            alert.setAccessoryView_(container)
+
+            save_btn = alert.addButtonWithTitle_("Save")
+            cancel_btn = alert.addButtonWithTitle_("Cancel")
+            cancel_btn.setKeyEquivalent_("\r")
+            save_btn.setKeyEquivalent_("")
+
+            alert.window().setInitialFirstResponder_(prefix_field)
+
+            response = alert.runModal()
+            if response != 1000:  # Not "Save"
+                return
+
+            # -- Collect new values from form --
+            new_values = {}
+            for key in [k for k, _ in settings_keys]:
+                widget = fields[key]
+                if key in ("PREVENT_SLEEP", "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
+                           "INSTALL_IA_PLUGIN", "REGISTER_WITH_CELLAR"):
+                    new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"
+                else:
+                    new_values[key] = widget.stringValue().strip()
+
+            # -- Validate prefix --
+            prefix = new_values["ADDRESS_PREFIX"]
+            if prefix and not re.match(r'^[a-z2-7]+$', prefix):
+                _alert("Invalid Address Prefix",
+                       "Only lowercase base32 characters allowed (a-z, 2-7).\n"
+                       "Numbers 0, 1, 8, 9 are not valid.")
+                form_values = new_values
+                form_values["ADDRESS_PREFIX"] = old_values["ADDRESS_PREFIX"]
+                continue
+            if len(prefix) > 5:
+                _alert("Invalid Address Prefix",
+                       "Address prefix must be at most 5 characters.")
+                form_values = new_values
+                form_values["ADDRESS_PREFIX"] = old_values["ADDRESS_PREFIX"]
+                continue
+
+            # -- Validate VM memory --
+            try:
+                mem = int(new_values["VM_MEMORY"])
+                if mem < 1:
+                    raise ValueError
+            except ValueError:
+                _alert("Invalid VM Memory",
+                       "VM memory must be a whole number of at least 1 GB.")
+                form_values = new_values
+                form_values["VM_MEMORY"] = old_values["VM_MEMORY"]
+                continue
+
+            # Validation passed
+            break
+
+        # -- Find changed settings --
+        changes = []
+        for key, _ in settings_keys:
+            if new_values[key] != old_values[key]:
+                changes.append(key)
+
+        if not changes:
+            _alert("Settings", "No changes.")
+            return
+
+        # -- Dialog 2: Hazards confirmation --
+        change_lines = []
+        for key in changes:
+            old_v = old_values[key]
+            new_v = new_values[key]
+
+            # Human-readable label
+            labels = {
+                "ADDRESS_PREFIX": "Address Prefix",
+                "VM_MEMORY": "VM Memory (GB)",
+                "PREVENT_SLEEP": "Prevent Sleep on AC",
+                "LAUNCH_ON_LOGIN": "Launch on Login",
+                "UPDATE_ON_LAUNCH": "Update Docker on Launch",
+                "INSTALL_IA_PLUGIN": "Install IA Plugin",
+                "REGISTER_WITH_CELLAR": "Register with OnionCellar",
+                "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Token",
+            }
+            label = labels.get(key, key)
+
+            # Display values (truncate long tokens)
+            disp_old = old_v if len(old_v) <= 20 else old_v[:17] + "..."
+            disp_new = new_v if len(new_v) <= 20 else new_v[:17] + "..."
+            if not disp_old:
+                disp_old = "(empty)"
+            if not disp_new:
+                disp_new = "(empty)"
+
+            line = f"- {label}: {disp_old} \u2192 {disp_new}"
+
+            # Look up consequence text
+            cons = self._SETTINGS_CONSEQUENCES.get(key)
+            if isinstance(cons, dict):
+                if key == "CLOUDFLARE_TUNNEL_TOKEN":
+                    cons_text = cons.get("set") if new_v else cons.get("cleared")
+                else:
+                    cons_text = cons.get(new_v, "")
+            elif isinstance(cons, str):
+                cons_text = cons
+            else:
+                cons_text = ""
+
+            if cons_text:
+                line += f"\n  \u26a0 {cons_text}"
+            change_lines.append(line)
+
+        hazard_msg = "The following settings will change:\n\n" + "\n\n".join(change_lines)
+
+        hazard = AppKit.NSAlert.alloc().init()
+        hazard.setMessageText_("Confirm Changes")
+        hazard.setInformativeText_(hazard_msg)
+
+        if os.path.exists(icon_path):
+            icon2 = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+            if icon2:
+                hazard.setIcon_(icon2)
+
+        apply_btn = hazard.addButtonWithTitle_("Apply")
+        cancel2 = hazard.addButtonWithTitle_("Cancel")
+        cancel2.setKeyEquivalent_("\r")
+        apply_btn.setKeyEquivalent_("")
+
+        resp2 = hazard.runModal()
+        if resp2 != 1000:  # Not "Apply"
+            return
+
+        # -- Write changed values --
+        for key in changes:
+            self.write_config_value(key, new_values[key])
+
+        self.log(f"Settings updated: {', '.join(changes)}")
+        saved = AppKit.NSAlert.alloc().init()
+        saved.setMessageText_("Settings Saved")
+        saved.setInformativeText_(
+            "Settings saved. Restart OnionPress from the menu bar "
+            "for changes to take effect.")
+        if os.path.exists(icon_path):
+            icon3 = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+            if icon3:
+                saved.setIcon_(icon3)
+        saved.runModal()
 
     @rumps.clicked("Backup...")
     def backup(self, _):
