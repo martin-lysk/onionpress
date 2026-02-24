@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.3.9"
+        self.version = "2.4.0"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -3058,8 +3058,8 @@ class OnionPressApp(rumps.App):
             "will be generated. Existing links or bookmarks will break."
         ),
         "VM_MEMORY": (
-            "The VM will restart with the new memory allocation. "
-            "Brief downtime expected."
+            "The VM will be resized on next restart. "
+            "Brief downtime expected while the VM restarts."
         ),
         "PREVENT_SLEEP": {
             "yes": "Mac will stay awake on AC power.",
@@ -3612,8 +3612,29 @@ class OnionPressApp(rumps.App):
                 self.check_status()
 
                 restored_addr = self.onion_address or addr
-                _main_thread(lambda: pw.finish(
-                    f"Site restored successfully.\nOnion address: {restored_addr}"))
+
+                # Build summary of what changed / what will happen
+                notes = [f"Onion address: {restored_addr}"]
+
+                # Check if cellar mode was restored
+                cellar_addr = "ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+                if restored_addr == cellar_addr:
+                    cur_mem = self._read_config_value("VM_MEMORY", "1")
+                    try:
+                        cur_mem_int = int(cur_mem)
+                    except ValueError:
+                        cur_mem_int = 1
+                    if cur_mem_int < 5:
+                        notes.append("OnionCellar detected — VM memory will increase to 5 GB on next restart.")
+                    else:
+                        notes.append(f"OnionCellar detected — VM memory: {cur_mem} GB.")
+
+                # Note if address changed
+                if self.onion_address and addr and self.onion_address != addr:
+                    notes.append(f"Address changed from current site.")
+
+                summary = "Site restored successfully.\n\n" + "\n".join(notes)
+                _main_thread(lambda: pw.finish(summary))
             except Exception as e:
                 self.log(f"Restore failed: {e}")
                 _main_thread(lambda: pw.finish(f"Restore failed: {e}"))
@@ -4038,7 +4059,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.3.9 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.0 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

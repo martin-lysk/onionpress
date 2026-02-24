@@ -245,6 +245,14 @@ def restore_from_backup(zip_path, password, log_func):
         priv, pub = key_manager.parse_openssh_key(pem_data)
         key_manager.write_private_key(priv, pub)
 
+        # Remove arti-state volume so it gets recreated from vanity-keys
+        # on next launch. This avoids stale key mismatches.
+        log_func("Restore: removing arti-state volume for clean restart...")
+        subprocess.run(
+            ['docker', 'volume', 'rm', 'onionpress-arti-state'],
+            capture_output=True, timeout=15
+        )
+
         # Sync vanity-keys directory on host so cellar detection and
         # prefix mismatch logic can see the restored onion address.
         onion_address = metadata.get('onion_address', '')
