@@ -58,6 +58,21 @@ handle_request() {
     local len=${#body}
 
     printf "HTTP/1.0 302 Found\r\nLocation: %s\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" "$wayback_url" "$len" "$body"
+
+    # Record redirect timestamp in DB (best-effort, don't block response)
+    # Updates all rows for this content_address since the redirect applies to the address, not a specific instance.
+    if [ -n "$host" ] && command -v sqlite3 >/dev/null 2>&1; then
+        # Validate host looks like a .onion address before using in SQL
+        case "$host" in
+            *[!a-z2-7.]*)
+                # Contains invalid characters — skip DB update
+                ;;
+            *.onion)
+                sqlite3 /var/lib/onionpress/cellar/registry.db \
+                    "UPDATE registry SET last_redirect=datetime('now') WHERE content_address='${host}'" 2>/dev/null || true
+                ;;
+        esac
+    fi
 }
 
 # Dispatch: when called with --handle-request, handle a single request

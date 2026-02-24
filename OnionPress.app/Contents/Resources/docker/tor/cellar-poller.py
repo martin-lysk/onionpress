@@ -11,6 +11,11 @@ All operations are local:
   - Healthchecks via curl through local Arti SOCKS (127.0.0.1:9050)
   - Takeover/release via /cellar-tor-manager.sh (same container)
   - Cellar lock check via filesystem (shared volume)
+
+Schema uses composite primary key (content_address, healthcheck_address) to
+support multiple instances registering the same .onion address. Takeover
+triggers when ALL rows for a content_address are failing; release triggers
+when ANY row becomes healthy.
 """
 
 import json
@@ -19,6 +24,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -63,23 +69,78 @@ def db_connect():
 
 
 def db_ensure_schema(conn):
-    """Create registry table if it doesn't exist."""
+    """Create registry table if it doesn't exist, and migrate old schema."""
+    # Check if table exists and needs migration
+    cols = []
+    try:
+        cols = conn.execute("PRAGMA table_info(registry)").fetchall()
+    except sqlite3.Error:
+        pass
+
+    col_names = [row[1] for row in cols]
+    needs_migration = False
+
+    if col_names:
+        # Table exists — check for old schema (single PK, last_healthcheck)
+        if "last_healthcheck" in col_names and "last_contact" not in col_names:
+            needs_migration = True
+        # Check if single PK (old schema)
+        pk_cols = [row for row in cols if row[5] > 0]  # pk column index
+        if len(pk_cols) == 1:
+            needs_migration = True
+
+    if needs_migration:
+        conn.execute("""CREATE TABLE IF NOT EXISTS registry_new (
+            content_address     TEXT NOT NULL,
+            healthcheck_address TEXT NOT NULL,
+            registered_at       TEXT NOT NULL,
+            version             TEXT NOT NULL DEFAULT 'unknown',
+            status              TEXT NOT NULL DEFAULT 'healthy',
+            last_contact        TEXT,
+            last_redirect       TEXT,
+            fail_count          INTEGER NOT NULL DEFAULT 0,
+            takeover_active     INTEGER NOT NULL DEFAULT 0,
+            fast_poll_remaining INTEGER NOT NULL DEFAULT 0,
+            key_hash            TEXT,
+            PRIMARY KEY (content_address, healthcheck_address)
+        )""")
+
+        # Copy data — map last_healthcheck → last_contact
+        kh_col = ", key_hash" if "key_hash" in col_names else ", NULL"
+        conn.execute(f"""INSERT OR IGNORE INTO registry_new
+            (content_address, healthcheck_address, registered_at, version,
+             status, last_contact, fail_count, takeover_active, fast_poll_remaining, key_hash)
+            SELECT content_address, healthcheck_address, registered_at, version,
+                   status, last_healthcheck, fail_count, takeover_active, fast_poll_remaining
+                   {kh_col}
+            FROM registry""")
+        conn.execute("DROP TABLE registry")
+        conn.execute("ALTER TABLE registry_new RENAME TO registry")
+        conn.commit()
+        return
+
+    # Fresh install or already migrated
     conn.execute("""CREATE TABLE IF NOT EXISTS registry (
-        content_address     TEXT PRIMARY KEY,
+        content_address     TEXT NOT NULL,
         healthcheck_address TEXT NOT NULL,
         registered_at       TEXT NOT NULL,
         version             TEXT NOT NULL DEFAULT 'unknown',
         status              TEXT NOT NULL DEFAULT 'healthy',
-        last_healthcheck    TEXT,
+        last_contact        TEXT,
+        last_redirect       TEXT,
         fail_count          INTEGER NOT NULL DEFAULT 0,
         takeover_active     INTEGER NOT NULL DEFAULT 0,
         fast_poll_remaining INTEGER NOT NULL DEFAULT 0,
-        key_hash            TEXT
+        key_hash            TEXT,
+        PRIMARY KEY (content_address, healthcheck_address)
     )""")
-    # Migration: add key_hash column to existing tables
-    cols = [row[1] for row in conn.execute("PRAGMA table_info(registry)").fetchall()]
-    if "key_hash" not in cols:
-        conn.execute("ALTER TABLE registry ADD COLUMN key_hash TEXT")
+
+    # Add columns that may be missing on older new-schema tables
+    if col_names:
+        if "key_hash" not in col_names:
+            conn.execute("ALTER TABLE registry ADD COLUMN key_hash TEXT")
+        if "last_redirect" not in col_names:
+            conn.execute("ALTER TABLE registry ADD COLUMN last_redirect TEXT")
     conn.commit()
 
 
@@ -118,14 +179,14 @@ def db_migrate_json(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO registry
                    (content_address, healthcheck_address, registered_at, version,
-                    status, last_healthcheck, fail_count, takeover_active, fast_poll_remaining)
+                    status, last_contact, fail_count, takeover_active, fast_poll_remaining)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     ca, ha,
                     entry.get("registered_at", datetime.now(timezone.utc).isoformat()),
                     entry.get("version", "unknown"),
                     entry.get("status", "healthy"),
-                    entry.get("last_healthcheck"),
+                    entry.get("last_healthcheck", entry.get("last_contact")),
                     int(entry.get("fail_count", 0)),
                     1 if entry.get("takeover_active") else 0,
                     int(entry.get("fast_poll_remaining", entry.get("_fast_poll_remaining", 0))),
@@ -159,16 +220,17 @@ def db_write_poll_updates(conn, entries):
     for entry in entries:
         cursor.execute(
             """UPDATE registry SET
-               status = ?, last_healthcheck = ?, fail_count = ?,
+               status = ?, last_contact = ?, fail_count = ?,
                takeover_active = ?, fast_poll_remaining = ?
-               WHERE content_address = ?""",
+               WHERE content_address = ? AND healthcheck_address = ?""",
             (
                 entry.get("status", "healthy"),
-                entry.get("last_healthcheck"),
+                entry.get("last_contact"),
                 int(entry.get("fail_count", 0)),
                 1 if entry.get("takeover_active") else 0,
                 int(entry.get("fast_poll_remaining", 0)),
                 entry["content_address"],
+                entry["healthcheck_address"],
             )
         )
     conn.commit()
@@ -212,10 +274,9 @@ def check_content(content_address):
 # Takeover / Release via cellar-tor-manager.sh (local)
 # ---------------------------------------------------------------------------
 
-def do_takeover(entry):
+def do_takeover(content_addr):
     """Take over a failed instance's .onion address.
     Returns: 'ok' or 'failed'."""
-    content_addr = entry["content_address"]
     log(f"Taking over {content_addr}")
 
     try:
@@ -234,9 +295,8 @@ def do_takeover(entry):
         return "failed"
 
 
-def do_release(entry):
+def do_release(content_addr):
     """Release a recovered instance's .onion address."""
-    content_addr = entry["content_address"]
     log(f"Releasing {content_addr} — original is back online")
 
     try:
@@ -260,7 +320,12 @@ def do_release(entry):
 # ---------------------------------------------------------------------------
 
 def poll_entry(entry):
-    """Poll a single registry entry. Returns (entry, modified, sleep_interval)."""
+    """Poll a single registry entry. Returns (entry, modified, sleep_interval).
+
+    Note: takeover/release decisions are made in the main loop after grouping
+    entries by content_address. This function only does the healthcheck and
+    updates per-row state (fail_count, status).
+    """
     content_addr = entry.get("content_address", "")
     hc_addr = entry.get("healthcheck_address", "")
     fail_count = int(entry.get("fail_count", 0))
@@ -276,19 +341,7 @@ def poll_entry(entry):
     hc_ok = check_healthcheck(hc_addr)
 
     if hc_ok:
-        if takeover_active:
-            # Instance recovered — release
-            if do_release(entry):
-                entry["takeover_active"] = False
-                entry["status"] = "healthy"
-                entry["fail_count"] = 0
-                entry["fast_poll_remaining"] = FAST_POLL_COUNT
-            else:
-                log(f"WARNING — release failed for {content_addr}, keeping takeover_active")
-                entry["status"] = "release_failed"
-            modified = True
-        elif fail_count > 0:
-            # Was failing, now recovering
+        if fail_count > 0 or entry.get("status") != "healthy":
             entry["fail_count"] = 0
             entry["status"] = "healthy"
             entry["fast_poll_remaining"] = FAST_POLL_COUNT
@@ -303,20 +356,8 @@ def poll_entry(entry):
         entry["fast_poll_remaining"] = FAST_POLL_COUNT
         modified = True
 
-        if new_fail_count >= FAIL_THRESHOLD and not takeover_active:
-            # Double-check: also test the content address
-            content_ok = check_content(content_addr)
-            if not content_ok:
-                result = do_takeover(entry)
-                if result == "ok":
-                    entry["takeover_active"] = True
-                    entry["status"] = "taken_over"
-                else:
-                    entry["status"] = "takeover_failed"
-                modified = True
-
     # Update timestamp
-    entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
+    entry["last_contact"] = datetime.now(timezone.utc).isoformat()
     modified = True
 
     # Determine sleep interval
@@ -395,18 +436,30 @@ def main():
 
             # Immediate release: if entry re-registered while taken over,
             # registration resets status='healthy' but leaves takeover_active=1.
+            # Group by content_address — release if ANY row is healthy.
+            by_ca = defaultdict(list)
             for entry in registry:
-                if entry.get("takeover_active") and entry.get("status") == "healthy":
-                    log(f"{entry['content_address']} re-registered — immediate release")
-                    if do_release(entry):
-                        entry["takeover_active"] = False
-                        entry["fail_count"] = 0
-                        entry["fast_poll_remaining"] = 0
+                by_ca[entry["content_address"]].append(entry)
+
+            for ca, rows in by_ca.items():
+                any_taken_over = any(r.get("takeover_active") for r in rows)
+                any_healthy = any(r.get("status") == "healthy" for r in rows)
+                if any_taken_over and any_healthy:
+                    log(f"{ca} re-registered — immediate release")
+                    if do_release(ca):
+                        for r in rows:
+                            r["takeover_active"] = False
+                            r["fail_count"] = 0
+                            r["fast_poll_remaining"] = 0
+                            r["last_contact"] = datetime.now(timezone.utc).isoformat()
+                            modified_entries.append(r)
                     else:
-                        log(f"WARNING — immediate release failed for {entry['content_address']}, keeping takeover_active")
-                        entry["status"] = "release_failed"
-                    entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
-                    modified_entries.append(entry)
+                        log(f"WARNING — immediate release failed for {ca}, keeping takeover_active")
+                        for r in rows:
+                            if r.get("status") == "healthy":
+                                r["status"] = "release_failed"
+                                r["last_contact"] = datetime.now(timezone.utc).isoformat()
+                                modified_entries.append(r)
 
             workers = min(MAX_POLL_WORKERS, len(registry))
 
@@ -424,11 +477,59 @@ def main():
                     except Exception as e:
                         log(f"entry poll error: {e}")
 
+            # After polling, make takeover/release decisions grouped by content_address.
+            # Re-group because poll_entry updated individual row state.
+            by_ca_post = defaultdict(list)
+            for entry in registry:
+                by_ca_post[entry["content_address"]].append(entry)
+
+            for ca, rows in by_ca_post.items():
+                any_taken_over = any(r.get("takeover_active") for r in rows)
+                all_failing = all(
+                    int(r.get("fail_count", 0)) >= FAIL_THRESHOLD for r in rows
+                )
+                any_healthy = any(r.get("status") == "healthy" for r in rows)
+
+                if any_taken_over and any_healthy:
+                    # At least one instance came back — release
+                    log(f"{ca} instance recovered — releasing")
+                    if do_release(ca):
+                        for r in rows:
+                            r["takeover_active"] = False
+                            r["fast_poll_remaining"] = FAST_POLL_COUNT
+                            modified_entries.append(r)
+                    else:
+                        log(f"WARNING — release failed for {ca}")
+                        for r in rows:
+                            if r.get("status") == "healthy":
+                                r["status"] = "release_failed"
+                                modified_entries.append(r)
+
+                elif all_failing and not any_taken_over:
+                    # ALL instances failing — double-check content address, then takeover
+                    content_ok = check_content(ca)
+                    if not content_ok:
+                        result = do_takeover(ca)
+                        if result == "ok":
+                            for r in rows:
+                                r["takeover_active"] = True
+                                r["status"] = "taken_over"
+                                modified_entries.append(r)
+                        else:
+                            for r in rows:
+                                r["status"] = "takeover_failed"
+                                modified_entries.append(r)
+
             elapsed = time.monotonic() - pass_start
             log(f"poll pass complete — {len(registry)} entries in {elapsed:.1f}s")
 
             if modified_entries:
-                db_write_poll_updates(conn, modified_entries)
+                # Deduplicate: keep last update for each (ca, ha) pair
+                seen = {}
+                for e in modified_entries:
+                    key = (e["content_address"], e["healthcheck_address"])
+                    seen[key] = e
+                db_write_poll_updates(conn, list(seen.values()))
 
             conn.close()
             time.sleep(min_sleep)

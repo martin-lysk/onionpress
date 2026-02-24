@@ -5,7 +5,7 @@ RUN cargo install arti --locked --features onion-service-service
 # Stage 2: Runtime (must match builder's glibc — rust:latest uses trixie)
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget socat openssl ca-certificates libsqlite3-0 python3 curl && rm -rf /var/lib/apt/lists/*
+    wget socat openssl ca-certificates libsqlite3-0 sqlite3 python3 curl && rm -rf /var/lib/apt/lists/*
 RUN useradd -r -m -s /bin/false arti
 COPY --from=builder /usr/local/cargo/bin/arti /usr/local/bin/arti
 COPY arti.toml /etc/arti/arti.toml

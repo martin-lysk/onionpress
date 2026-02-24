@@ -1742,7 +1742,7 @@ class OnionPressApp(rumps.App):
                 if self.is_ready:
                     self.poll_cellar_messages()
 
-                # OnionCellar: detect cellar mode and start registration/polling
+                # OnionCellar: detect cellar mode, register, or notify online
                 if self.is_ready and not self._cellar_checked:
                     self._cellar_checked = True
                     if cellar.is_cellar_instance(self.onion_address):
@@ -1750,8 +1750,12 @@ class OnionPressApp(rumps.App):
                         self.log("OnionCellar mode activated (poller runs in tor-polling container)")
                         self.update_menu()
                     elif not self._cellar_registration_started:
+                        # First time — full registration with keys
                         self._cellar_registration_started = True
                         cellar.start_registration_thread(self)
+                    else:
+                        # Already registered, coming back online (wake/reconnect)
+                        cellar.start_online_notification_thread(self)
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
@@ -2065,10 +2069,16 @@ class OnionPressApp(rumps.App):
         self.log("Registered for system sleep/wake notifications")
 
     def handle_sleep(self):
-        """Handle system sleep — release caffeinate so the Mac actually sleeps.
+        """Handle system sleep — notify cellar and release caffeinate.
         Cellar resists sleep to keep network active."""
         self.log("System going to sleep")
         if not self.is_cellar:
+            # Notify cellar before sleeping so it can take over quickly
+            if self.is_ready and self._cellar_registration_started:
+                try:
+                    cellar.notify_cellar_offline(self)
+                except Exception:
+                    pass
             self.stop_caffeinate()
 
     def handle_wake(self):
@@ -2076,6 +2086,8 @@ class OnionPressApp(rumps.App):
         self.log("System wake detected — marking Tor as reconnecting")
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.start_caffeinate()
+        # Reset cellar check so /online fires when Tor reconnects
+        self._cellar_checked = False
         if self.is_ready:
             self.is_ready = False
             self._last_bootstrap_pct = 0
@@ -3648,6 +3660,13 @@ License: AGPL v3"""
         def cleanup_and_quit():
             # Small delay to ensure UI updates
             time.sleep(0.5)
+
+            # Notify cellar before stopping services (containers needed for curl)
+            if self._cellar_registration_started:
+                try:
+                    cellar.notify_cellar_offline(self)
+                except Exception:
+                    pass
 
             # Now run cleanup
             try:

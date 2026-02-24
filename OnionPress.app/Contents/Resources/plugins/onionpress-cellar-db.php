@@ -9,6 +9,9 @@
  *
  * WAL journaling + busy_timeout handles concurrent access from
  * registration and polling without the corruption risk of JSON files.
+ *
+ * Schema: composite primary key (content_address, healthcheck_address) allows
+ * multiple instances to register the same .onion address from different machines.
  */
 
 define('CELLAR_DB_DIR', '/var/lib/onionpress/cellar');
@@ -30,26 +33,90 @@ function cellar_db_connect() {
 }
 
 /**
- * Create the registry table if it doesn't exist.
+ * Create the registry table if it doesn't exist, and migrate old schema.
+ *
+ * New schema uses composite PK (content_address, healthcheck_address),
+ * renames last_healthcheck → last_contact, adds last_redirect.
  */
 function cellar_db_ensure_schema($db) {
+    // Check if we need to migrate from old single-PK schema
+    $cols = [];
+    try {
+        $cols = $db->query('PRAGMA table_info(registry)')->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        // Table doesn't exist yet — will be created below
+    }
+
+    $col_names = array_column($cols, 'name');
+    $needs_migration = false;
+
+    if (!empty($cols)) {
+        // Table exists — check if it uses old schema (single PK on content_address)
+        // Old schema has last_healthcheck; new schema has last_contact
+        if (in_array('last_healthcheck', $col_names) && !in_array('last_contact', $col_names)) {
+            $needs_migration = true;
+        }
+        // Also check: old schema has content_address as sole PK (pk=1 and only one pk column)
+        $pk_cols = array_filter($cols, function($c) { return $c['pk'] > 0; });
+        if (count($pk_cols) === 1) {
+            $needs_migration = true;
+        }
+    }
+
+    if ($needs_migration) {
+        // Migrate: create new table, copy data, swap
+        $db->exec('CREATE TABLE IF NOT EXISTS registry_new (
+            content_address     TEXT NOT NULL,
+            healthcheck_address TEXT NOT NULL,
+            registered_at       TEXT NOT NULL,
+            version             TEXT NOT NULL DEFAULT \'unknown\',
+            status              TEXT NOT NULL DEFAULT \'healthy\',
+            last_contact        TEXT,
+            last_redirect       TEXT,
+            fail_count          INTEGER NOT NULL DEFAULT 0,
+            takeover_active     INTEGER NOT NULL DEFAULT 0,
+            fast_poll_remaining INTEGER NOT NULL DEFAULT 0,
+            key_hash            TEXT,
+            PRIMARY KEY (content_address, healthcheck_address)
+        )');
+
+        // Copy data — map last_healthcheck → last_contact
+        $old_cols_str = in_array('key_hash', $col_names)
+            ? 'content_address, healthcheck_address, registered_at, version, status, last_healthcheck, fail_count, takeover_active, fast_poll_remaining, key_hash'
+            : 'content_address, healthcheck_address, registered_at, version, status, last_healthcheck, fail_count, takeover_active, fast_poll_remaining, NULL';
+        $new_cols_str = 'content_address, healthcheck_address, registered_at, version, status, last_contact, fail_count, takeover_active, fast_poll_remaining, key_hash';
+
+        $db->exec("INSERT OR IGNORE INTO registry_new ($new_cols_str)
+                    SELECT $old_cols_str FROM registry");
+        $db->exec('DROP TABLE registry');
+        $db->exec('ALTER TABLE registry_new RENAME TO registry');
+        return;
+    }
+
+    // Fresh install or already migrated — create with new schema
     $db->exec('CREATE TABLE IF NOT EXISTS registry (
-        content_address     TEXT PRIMARY KEY,
+        content_address     TEXT NOT NULL,
         healthcheck_address TEXT NOT NULL,
         registered_at       TEXT NOT NULL,
         version             TEXT NOT NULL DEFAULT \'unknown\',
         status              TEXT NOT NULL DEFAULT \'healthy\',
-        last_healthcheck    TEXT,
+        last_contact        TEXT,
+        last_redirect       TEXT,
         fail_count          INTEGER NOT NULL DEFAULT 0,
         takeover_active     INTEGER NOT NULL DEFAULT 0,
         fast_poll_remaining INTEGER NOT NULL DEFAULT 0,
-        key_hash            TEXT
+        key_hash            TEXT,
+        PRIMARY KEY (content_address, healthcheck_address)
     )');
 
-    // Migration: add key_hash column to existing tables
-    $cols = $db->query('PRAGMA table_info(registry)')->fetchAll(PDO::FETCH_COLUMN, 1);
-    if (!in_array('key_hash', $cols)) {
-        $db->exec('ALTER TABLE registry ADD COLUMN key_hash TEXT');
+    // Migration: add columns that may be missing on older new-schema tables
+    if (!empty($col_names)) {
+        if (!in_array('key_hash', $col_names)) {
+            $db->exec('ALTER TABLE registry ADD COLUMN key_hash TEXT');
+        }
+        if (!in_array('last_redirect', $col_names)) {
+            $db->exec('ALTER TABLE registry ADD COLUMN last_redirect TEXT');
+        }
     }
 }
 
@@ -75,7 +142,7 @@ function cellar_db_migrate_json($db) {
 
     $stmt = $db->prepare('INSERT OR IGNORE INTO registry
         (content_address, healthcheck_address, registered_at, version,
-         status, last_healthcheck, fail_count, takeover_active, fast_poll_remaining)
+         status, last_contact, fail_count, takeover_active, fast_poll_remaining)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 
     $count = 0;
@@ -87,7 +154,7 @@ function cellar_db_migrate_json($db) {
             $entry['registered_at'] ?? gmdate('Y-m-d\TH:i:s\Z'),
             $entry['version'] ?? 'unknown',
             $entry['status'] ?? 'healthy',
-            $entry['last_healthcheck'] ?? null,
+            $entry['last_healthcheck'] ?? $entry['last_contact'] ?? null,
             (int)($entry['fail_count'] ?? 0),
             (int)(!empty($entry['takeover_active']) ? 1 : 0),
             (int)($entry['_fast_poll_remaining'] ?? $entry['fast_poll_remaining'] ?? 0),
@@ -120,26 +187,30 @@ function cellar_db_read_all($db) {
  * On re-registration: resets fail_count and status to healthy.
  * If the entry was taken over, the poller detects takeover_active=1 + status='healthy'
  * and does an immediate release. Registration over Tor proves the instance is alive.
+ *
+ * Upserts on (content_address, healthcheck_address) — same instance re-registering
+ * updates in place; a new instance with different healthcheck gets a new row.
  */
 function cellar_db_upsert_register($db, $data) {
     $now = gmdate('Y-m-d\TH:i:s\Z');
     $stmt = $db->prepare('INSERT INTO registry
-        (content_address, healthcheck_address, registered_at, version, key_hash)
-        VALUES (:ca, :ha, :ra, :ver, :kh)
-        ON CONFLICT(content_address) DO UPDATE SET
-            healthcheck_address = :ha,
+        (content_address, healthcheck_address, registered_at, version, key_hash, last_contact)
+        VALUES (:ca, :ha, :ra, :ver, :kh, :lc)
+        ON CONFLICT(content_address, healthcheck_address) DO UPDATE SET
             registered_at = :ra,
             version = :ver,
             key_hash = :kh,
             fail_count = 0,
             status = \'healthy\',
-            fast_poll_remaining = 0');
+            fast_poll_remaining = 0,
+            last_contact = :lc');
     $stmt->execute([
         ':ca'  => $data['content_address'],
         ':ha'  => $data['healthcheck_address'],
         ':ra'  => $now,
         ':ver' => $data['version'] ?? 'unknown',
         ':kh'  => $data['key_hash'] ?? null,
+        ':lc'  => $now,
     ]);
     // Return whether this was an insert or update
     return $db->query("SELECT changes()")->fetchColumn() > 0;
@@ -147,27 +218,28 @@ function cellar_db_upsert_register($db, $data) {
 
 /**
  * Batch-update poll fields for multiple entries in a single transaction.
- * Input: array of entries with content_address + poll fields.
+ * Input: array of entries with content_address + healthcheck_address + poll fields.
  */
 function cellar_db_batch_update_poll($db, $entries) {
     $stmt = $db->prepare('UPDATE registry SET
         status = :status,
-        last_healthcheck = :lh,
+        last_contact = :lc,
         fail_count = :fc,
         takeover_active = :ta,
         fast_poll_remaining = :fpr
-        WHERE content_address = :ca');
+        WHERE content_address = :ca AND healthcheck_address = :ha');
 
     $db->beginTransaction();
     $updated = 0;
     foreach ($entries as $entry) {
         $stmt->execute([
             ':status' => $entry['status'] ?? 'healthy',
-            ':lh'     => $entry['last_healthcheck'] ?? null,
+            ':lc'     => $entry['last_contact'] ?? null,
             ':fc'     => (int)($entry['fail_count'] ?? 0),
             ':ta'     => (int)(!empty($entry['takeover_active']) ? 1 : 0),
             ':fpr'    => (int)($entry['fast_poll_remaining'] ?? 0),
             ':ca'     => $entry['content_address'],
+            ':ha'     => $entry['healthcheck_address'],
         ]);
         $updated++;
     }
@@ -176,10 +248,10 @@ function cellar_db_batch_update_poll($db, $entries) {
 }
 
 /**
- * Look up a single registry entry by content_address.
+ * Look up a single registry entry by content_address (returns first match).
  */
 function cellar_db_get_entry($db, $content_address) {
-    $stmt = $db->prepare('SELECT * FROM registry WHERE content_address = ?');
+    $stmt = $db->prepare('SELECT * FROM registry WHERE content_address = ? LIMIT 1');
     $stmt->execute([$content_address]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     if ($row) {
@@ -191,12 +263,86 @@ function cellar_db_get_entry($db, $content_address) {
 }
 
 /**
- * Delete a single entry by content_address.
+ * Look up a specific registry entry by (content_address, healthcheck_address).
  */
-function cellar_db_delete_entry($db, $content_address) {
-    $stmt = $db->prepare('DELETE FROM registry WHERE content_address = ?');
-    $stmt->execute([$content_address]);
+function cellar_db_get_entry_by_pair($db, $content_address, $healthcheck_address) {
+    $stmt = $db->prepare('SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?');
+    $stmt->execute([$content_address, $healthcheck_address]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row) {
+        $row['fail_count'] = (int)$row['fail_count'];
+        $row['takeover_active'] = (int)$row['takeover_active'];
+        $row['fast_poll_remaining'] = (int)$row['fast_poll_remaining'];
+    }
+    return $row ?: null;
+}
+
+/**
+ * Delete entry/entries by content_address, optionally filtered by healthcheck_address.
+ * If $healthcheck_address is provided, deletes only that specific row.
+ * Otherwise, deletes all rows for the content_address.
+ */
+function cellar_db_delete_entry($db, $content_address, $healthcheck_address = null) {
+    if ($healthcheck_address !== null) {
+        $stmt = $db->prepare('DELETE FROM registry WHERE content_address = ? AND healthcheck_address = ?');
+        $stmt->execute([$content_address, $healthcheck_address]);
+    } else {
+        $stmt = $db->prepare('DELETE FROM registry WHERE content_address = ?');
+        $stmt->execute([$content_address]);
+    }
     return $db->query("SELECT changes()")->fetchColumn() > 0;
+}
+
+/**
+ * Update specific fields on a single row by (content_address, healthcheck_address).
+ * Only whitelisted columns may be updated.
+ */
+function cellar_db_update_entry($db, $content_address, $healthcheck_address, $fields) {
+    $allowed = ['status', 'fail_count', 'last_contact', 'last_redirect',
+                'takeover_active', 'fast_poll_remaining', 'key_hash', 'version'];
+    $sets = [];
+    $params = [];
+    foreach ($fields as $col => $val) {
+        if (in_array($col, $allowed)) {
+            $sets[] = "$col = ?";
+            $params[] = $val;
+        }
+    }
+    if (empty($sets)) {
+        return false;
+    }
+    $params[] = $content_address;
+    $params[] = $healthcheck_address;
+    $sql = 'UPDATE registry SET ' . implode(', ', $sets)
+         . ' WHERE content_address = ? AND healthcheck_address = ?';
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
+    return $db->query("SELECT changes()")->fetchColumn() > 0;
+}
+
+/**
+ * Update specific fields on ALL rows matching a content_address.
+ * Used for last_redirect (applies to all instances of the same .onion).
+ */
+function cellar_db_update_by_content($db, $content_address, $fields) {
+    $allowed = ['status', 'fail_count', 'last_contact', 'last_redirect',
+                'takeover_active', 'fast_poll_remaining'];
+    $sets = [];
+    $params = [];
+    foreach ($fields as $col => $val) {
+        if (in_array($col, $allowed)) {
+            $sets[] = "$col = ?";
+            $params[] = $val;
+        }
+    }
+    if (empty($sets)) {
+        return 0;
+    }
+    $params[] = $content_address;
+    $sql = 'UPDATE registry SET ' . implode(', ', $sets) . ' WHERE content_address = ?';
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
+    return (int)$db->query("SELECT changes()")->fetchColumn();
 }
 
 /**
@@ -264,10 +410,11 @@ if (php_sapi_name() === 'cli' && isset($argv[0]) && realpath($argv[0]) === realp
             case 'delete-entry':
                 $addr = $argv[2] ?? '';
                 if ($addr === '') {
-                    fwrite(STDERR, "Usage: delete-entry <content_address>\n");
+                    fwrite(STDERR, "Usage: delete-entry <content_address> [healthcheck_address]\n");
                     exit(1);
                 }
-                $deleted = cellar_db_delete_entry($db, $addr);
+                $ha = $argv[3] ?? null;
+                $deleted = cellar_db_delete_entry($db, $addr, $ha !== '' ? $ha : null);
                 echo json_encode(['ok' => true, 'deleted' => $deleted]) . "\n";
                 break;
 

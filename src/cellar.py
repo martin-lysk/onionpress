@@ -12,6 +12,7 @@ The cellar poller (healthcheck monitoring, takeover, release) runs inside the
 tor-polling container as cellar-poller.py — not in this module.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -234,8 +235,6 @@ def unregister_from_cellar(app, content_address=None):
     Runs synchronously — caller should invoke from a background thread if needed.
     Best-effort: logs failures but does not raise.
     """
-    import hashlib
-
     # Don't unregister the cellar from itself
     if getattr(app, 'is_cellar', False):
         return
@@ -310,6 +309,115 @@ def unregister_from_cellar(app, content_address=None):
             time.sleep(delay)
 
     app.log(f"OnionCellar: unregister failed after {max_attempts} attempts (best-effort, continuing) — last response: {last_output!r}")
+
+
+# ---------------------------------------------------------------------------
+# Online/offline notifications (runs on normal OnionPress instances)
+# ---------------------------------------------------------------------------
+
+def _send_cellar_notification(app, endpoint, log_label, max_attempts=1, max_time=10):
+    """Send a lifecycle notification (/online or /offline) to the cellar.
+
+    Builds payload with content_address, healthcheck_address, and proof.
+    Uses docker exec curl through the Tor SOCKS proxy.
+
+    Returns True on success, False on failure.
+    """
+    if getattr(app, 'is_cellar', False):
+        return False
+
+    # Check if we ever registered
+    status = _load_registration_status(app)
+    if not status.get("registered"):
+        return False
+
+    content_addr = getattr(app, 'onion_address', None)
+    hc_addr = getattr(app, 'healthcheck_address', None)
+
+    if not content_addr or not content_addr.endswith('.onion'):
+        return False
+    if not hc_addr or not hc_addr.endswith('.onion'):
+        return False
+
+    # Compute proof = sha256(secret_key_bytes)
+    try:
+        import key_manager
+        secret_key_bytes = key_manager.extract_private_key()
+        proof = hashlib.sha256(secret_key_bytes).hexdigest()
+    except Exception as e:
+        app.log(f"OnionCellar: failed to extract key for /{endpoint} proof: {e}")
+        return False
+
+    payload = json.dumps({
+        "content_address": content_addr,
+        "healthcheck_address": hc_addr,
+        "proof": proof,
+    })
+
+    backoff = [10, 30]
+    last_output = ""
+
+    for attempt in range(max_attempts):
+        ok, output = _run_docker(app, [
+            "exec", "onionpress-wordpress",
+            "curl", "-s", "-X", "POST",
+            "--socks5-hostname", "onionpress-tor:9050",
+            "-H", "Content-Type: application/json",
+            "-d", payload,
+            "--max-time", str(max_time),
+            f"http://{CELLAR_ADDRESS}/{endpoint}"
+        ], timeout=max_time + 15)
+        last_output = output
+
+        if ok and output:
+            try:
+                resp = json.loads(output)
+                if resp.get("online" if endpoint == "online" else "offline"):
+                    app.log(f"OnionCellar: /{endpoint} notification sent")
+                    return True
+                error_msg = resp.get("error", "unknown error")
+                app.log(f"OnionCellar: /{endpoint} rejected: {error_msg}")
+                return False
+            except json.JSONDecodeError:
+                pass
+
+        if attempt < max_attempts - 1:
+            delay = backoff[min(attempt, len(backoff) - 1)]
+            app.log(f"OnionCellar: /{endpoint} attempt {attempt + 1} failed, retrying in {delay}s...")
+            time.sleep(delay)
+
+    app.log(f"OnionCellar: /{endpoint} failed after {max_attempts} attempts — last response: {last_output!r}")
+    return False
+
+
+def notify_cellar_offline(app):
+    """Notify the cellar that this instance is going offline (sleep/quit).
+
+    Runs synchronously with a single attempt and short timeout —
+    must complete before the system sleeps or the app quits.
+    """
+    if getattr(app, 'is_cellar', False):
+        return False
+    app.log("Notifying cellar: going offline")
+    return _send_cellar_notification(app, "offline", "offline", max_attempts=1, max_time=10)
+
+
+def notify_cellar_online(app):
+    """Notify the cellar that this instance is back online (wake/reconnect).
+
+    Retries with backoff since Tor circuits may take time to rebuild after wake.
+    """
+    if getattr(app, 'is_cellar', False):
+        return False
+    app.log("Notifying cellar: coming online")
+    return _send_cellar_notification(app, "online", "online", max_attempts=3, max_time=30)
+
+
+def start_online_notification_thread(app):
+    """Spawn a daemon thread to send /online notification."""
+    thread = threading.Thread(target=notify_cellar_online, args=(app,), daemon=True)
+    thread.start()
+    return thread
 
 
 # ---------------------------------------------------------------------------

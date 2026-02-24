@@ -21,6 +21,8 @@ require_once __DIR__ . '/onionpress-cellar-db.php';
  */
 add_action('muplugins_loaded', 'onionpress_cellar_handle_register');
 add_action('muplugins_loaded', 'onionpress_cellar_handle_unregister');
+add_action('muplugins_loaded', 'onionpress_cellar_handle_online');
+add_action('muplugins_loaded', 'onionpress_cellar_handle_offline');
 
 function onionpress_cellar_handle_register() {
     // Only handle POST /register
@@ -177,9 +179,9 @@ function onionpress_cellar_handle_register() {
     $db = cellar_db_connect();
     cellar_db_ensure_schema($db);
 
-    // Check if entry already exists
-    $existing = $db->prepare('SELECT 1 FROM registry WHERE content_address = ?');
-    $existing->execute([$content_address]);
+    // Check if entry already exists (by composite key)
+    $existing = $db->prepare('SELECT 1 FROM registry WHERE content_address = ? AND healthcheck_address = ?');
+    $existing->execute([$content_address, $healthcheck_address]);
     $found = (bool)$existing->fetchColumn();
 
     cellar_db_upsert_register($db, [
@@ -295,6 +297,202 @@ function onionpress_cellar_handle_unregister() {
         'unregistered' => true,
         'content_address' => $content_address,
         'takeover_was_active' => $takeover_was_active,
+    ]);
+}
+
+/**
+ * Handle POST /online — instance notifies cellar it is back online.
+ *
+ * Request body: {"content_address": "xxx.onion", "healthcheck_address": "yyy.onion", "proof": "<sha256 hex>"}
+ *
+ * Sets status='healthy', fail_count=0, fast_poll_remaining=20.
+ * Does NOT require cellar to be unlocked — only updates DB state.
+ * The poller detects takeover_active=1 + status='healthy' and triggers release.
+ */
+function onionpress_cellar_handle_online() {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        return;
+    }
+
+    $request_uri = strtok($_SERVER['REQUEST_URI'], '?');
+    if ($request_uri !== '/online') {
+        return;
+    }
+
+    $body = file_get_contents('php://input');
+    $data = json_decode($body, true);
+
+    if (!$data) {
+        onionpress_cellar_respond(400, ['error' => 'Invalid JSON']);
+        return;
+    }
+
+    if (empty($data['content_address'])) {
+        onionpress_cellar_respond(400, ['error' => 'Missing required field: content_address']);
+        return;
+    }
+    if (empty($data['healthcheck_address'])) {
+        onionpress_cellar_respond(400, ['error' => 'Missing required field: healthcheck_address']);
+        return;
+    }
+
+    $content_address = $data['content_address'];
+    $healthcheck_address = $data['healthcheck_address'];
+
+    if (!preg_match('/^[a-z2-7]{56}\.onion$/', $content_address)) {
+        onionpress_cellar_respond(400, ['error' => 'Invalid content_address format']);
+        return;
+    }
+    if (!preg_match('/^[a-z2-7]{56}\.onion$/', $healthcheck_address)) {
+        onionpress_cellar_respond(400, ['error' => 'Invalid healthcheck_address format']);
+        return;
+    }
+
+    $db = cellar_db_connect();
+    cellar_db_ensure_schema($db);
+    $entry = cellar_db_get_entry_by_pair($db, $content_address, $healthcheck_address);
+
+    if (!$entry) {
+        onionpress_cellar_respond(404, ['error' => 'Entry not found']);
+        return;
+    }
+
+    // Auth check — same pattern as /unregister
+    $remote_addr = $_SERVER['REMOTE_ADDR'] ?? '';
+    $is_local = ($remote_addr === '127.0.0.1'
+        || $remote_addr === '::1'
+        || strpos($remote_addr, '172.') === 0);
+
+    if (!$is_local) {
+        $proof = $data['proof'] ?? '';
+        $stored_hash = $entry['key_hash'] ?? '';
+
+        if ($stored_hash === '' || $stored_hash === null) {
+            onionpress_cellar_respond(403, [
+                'error' => 'No key_hash on file — re-register first',
+            ]);
+            return;
+        }
+
+        if ($proof === '' || !hash_equals($stored_hash, $proof)) {
+            onionpress_cellar_respond(403, ['error' => 'Invalid proof']);
+            return;
+        }
+    }
+
+    $takeover_was_active = (bool)$entry['takeover_active'];
+    $now = gmdate('Y-m-d\TH:i:s\Z');
+
+    cellar_db_update_entry($db, $content_address, $healthcheck_address, [
+        'status' => 'healthy',
+        'fail_count' => 0,
+        'fast_poll_remaining' => 20,
+        'last_contact' => $now,
+    ]);
+
+    onionpress_cellar_respond(200, [
+        'online' => true,
+        'content_address' => $content_address,
+        'takeover_was_active' => $takeover_was_active,
+    ]);
+}
+
+/**
+ * Handle POST /offline — instance notifies cellar it is going offline.
+ *
+ * Request body: {"content_address": "xxx.onion", "healthcheck_address": "yyy.onion", "proof": "<sha256 hex>"}
+ *
+ * Sets status='failing', fail_count=10 (== FAIL_THRESHOLD in cellar-poller.py),
+ * fast_poll_remaining=20. The poller sees fail_count >= threshold on next pass
+ * and triggers takeover immediately.
+ * Does NOT require cellar to be unlocked — only updates DB state.
+ */
+function onionpress_cellar_handle_offline() {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        return;
+    }
+
+    $request_uri = strtok($_SERVER['REQUEST_URI'], '?');
+    if ($request_uri !== '/offline') {
+        return;
+    }
+
+    $body = file_get_contents('php://input');
+    $data = json_decode($body, true);
+
+    if (!$data) {
+        onionpress_cellar_respond(400, ['error' => 'Invalid JSON']);
+        return;
+    }
+
+    if (empty($data['content_address'])) {
+        onionpress_cellar_respond(400, ['error' => 'Missing required field: content_address']);
+        return;
+    }
+    if (empty($data['healthcheck_address'])) {
+        onionpress_cellar_respond(400, ['error' => 'Missing required field: healthcheck_address']);
+        return;
+    }
+
+    $content_address = $data['content_address'];
+    $healthcheck_address = $data['healthcheck_address'];
+
+    if (!preg_match('/^[a-z2-7]{56}\.onion$/', $content_address)) {
+        onionpress_cellar_respond(400, ['error' => 'Invalid content_address format']);
+        return;
+    }
+    if (!preg_match('/^[a-z2-7]{56}\.onion$/', $healthcheck_address)) {
+        onionpress_cellar_respond(400, ['error' => 'Invalid healthcheck_address format']);
+        return;
+    }
+
+    $db = cellar_db_connect();
+    cellar_db_ensure_schema($db);
+    $entry = cellar_db_get_entry_by_pair($db, $content_address, $healthcheck_address);
+
+    if (!$entry) {
+        onionpress_cellar_respond(404, ['error' => 'Entry not found']);
+        return;
+    }
+
+    // Auth check — same pattern as /unregister
+    $remote_addr = $_SERVER['REMOTE_ADDR'] ?? '';
+    $is_local = ($remote_addr === '127.0.0.1'
+        || $remote_addr === '::1'
+        || strpos($remote_addr, '172.') === 0);
+
+    if (!$is_local) {
+        $proof = $data['proof'] ?? '';
+        $stored_hash = $entry['key_hash'] ?? '';
+
+        if ($stored_hash === '' || $stored_hash === null) {
+            onionpress_cellar_respond(403, [
+                'error' => 'No key_hash on file — re-register first',
+            ]);
+            return;
+        }
+
+        if ($proof === '' || !hash_equals($stored_hash, $proof)) {
+            onionpress_cellar_respond(403, ['error' => 'Invalid proof']);
+            return;
+        }
+    }
+
+    $takeover_was_active = (bool)$entry['takeover_active'];
+    $now = gmdate('Y-m-d\TH:i:s\Z');
+
+    // fail_count=10 matches FAIL_THRESHOLD in cellar-poller.py
+    cellar_db_update_entry($db, $content_address, $healthcheck_address, [
+        'status' => 'failing',
+        'fail_count' => 10,
+        'fast_poll_remaining' => 20,
+        'last_contact' => $now,
+    ]);
+
+    onionpress_cellar_respond(200, [
+        'offline' => true,
+        'content_address' => $content_address,
+        'takeover_active' => $takeover_was_active,
     ]);
 }
 
