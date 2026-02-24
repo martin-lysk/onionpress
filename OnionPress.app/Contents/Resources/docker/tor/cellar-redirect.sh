@@ -62,16 +62,16 @@ handle_request() {
     # Record redirect timestamp in DB (best-effort, don't block response)
     # Updates all rows for this content_address since the redirect applies to the address, not a specific instance.
     if [ -n "$host" ] && command -v sqlite3 >/dev/null 2>&1; then
-        # Validate host looks like a .onion address before using in SQL
-        case "$host" in
-            *[!a-z2-7.]*)
-                # Contains invalid characters — skip DB update
-                ;;
-            *.onion)
-                sqlite3 /var/lib/onionpress/cellar/registry.db \
-                    "UPDATE registry SET last_redirect=datetime('now') WHERE content_address='${host}'" 2>/dev/null || true
-                ;;
-        esac
+        # Validate host: strip valid base32 + dots, check nothing remains
+        safe=$(printf '%s' "$host" | LC_ALL=C tr -d 'a-z2-7.')
+        if [ -z "$safe" ]; then
+            case "$host" in
+                *.onion)
+                    sqlite3 /var/lib/onionpress/cellar/registry.db \
+                        "UPDATE registry SET last_redirect=datetime('now') WHERE content_address='${host}'" 2>/dev/null || true
+                    ;;
+            esac
+        fi
     fi
 }
 
