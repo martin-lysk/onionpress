@@ -259,6 +259,31 @@ detect_container_runtime() {
     if command_exists colima; then
         if [ -f "$COLIMA_HOME/.initialized" ]; then
             if "$BIN_DIR/colima" status >/dev/null 2>&1; then
+                # Check if configured VM memory differs from running VM
+                _cfg_mem=1
+                if [ -f "$DATA_DIR/config" ]; then
+                    _tmp_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+                    [ -n "$_tmp_mem" ] && _cfg_mem="$_tmp_mem"
+                fi
+                # Get actual VM memory in GB (MemTotal is in kB)
+                _vm_mem_kb=$(docker exec onionpress-tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
+                _vm_mem_kb="${_vm_mem_kb:-0}"
+                _vm_mem_gb=$(( (_vm_mem_kb + 524288) / 1048576 ))  # round to nearest GB
+                if [ "$_cfg_mem" -gt 0 ] 2>/dev/null && [ "$_vm_mem_gb" -gt 0 ] 2>/dev/null && [ "$_cfg_mem" -ne "$_vm_mem_gb" ]; then
+                    log "VM memory mismatch: config=${_cfg_mem}GB, running=${_vm_mem_gb}GB — restarting VM..."
+                    cd "$DOCKER_DIR"
+                    docker compose down >> "$LOG_FILE" 2>&1 || true
+                    "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
+                    "$BIN_DIR/colima" start \
+                        --mount "$DATA_DIR/shared:w" \
+                        --memory "$_cfg_mem" \
+                        >> "$LOG_FILE" 2>&1
+                    if [ $? -eq 0 ]; then
+                        log "VM restarted with ${_cfg_mem}GB"
+                    else
+                        log "WARNING: VM restart failed"
+                    fi
+                fi
                 echo "colima-bundled"
                 return 0
             else

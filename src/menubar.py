@@ -3058,8 +3058,8 @@ class OnionPressApp(rumps.App):
             "will be generated. Existing links or bookmarks will break."
         ),
         "VM_MEMORY": (
-            "The VM will restart with the new memory allocation. "
-            "Brief downtime expected."
+            "The VM will be resized on next restart. "
+            "Brief downtime expected while the VM restarts."
         ),
         "PREVENT_SLEEP": {
             "yes": "Mac will stay awake on AC power.",
