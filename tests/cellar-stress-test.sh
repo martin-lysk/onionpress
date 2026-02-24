@@ -152,6 +152,13 @@ preflight() {
     fi
     log "  Cellar registration API is ready"
 
+    # Ensure sqlite3 is available in onioncellar (image may not include it yet)
+    if ! docker_cmd exec onioncellar sqlite3 --version >/dev/null 2>&1; then
+        log "  Installing sqlite3 in onioncellar..."
+        docker_cmd exec onioncellar sh -c "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1"
+    fi
+    log "  sqlite3 available in onioncellar"
+
     log "Preflight OK"
 }
 
