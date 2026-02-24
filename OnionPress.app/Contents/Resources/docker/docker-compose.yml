@@ -59,10 +59,10 @@ services:
     networks:
       - onionpress-network
 
-  tor-polling:
+  onioncellar:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
-    container_name: onionpress-tor-polling
+    container_name: onioncellar
     environment:
       - POLLING_ONLY=1
       - ONIONPRESS_CELLAR=${ONIONPRESS_CELLAR:-0}

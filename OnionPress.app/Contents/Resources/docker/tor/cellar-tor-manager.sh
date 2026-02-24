@@ -6,7 +6,7 @@
 #   cellar-tor-manager.sh takeover <content_address>
 #   cellar-tor-manager.sh release <content_address>
 #
-# On takeover: decrypts Arti PEM key from cellar storage, installs into Arti keystore,
+# On takeover: copies plaintext Arti PEM key from cellar storage into Arti keystore,
 #              appends service config to arti.toml, signals Arti to reload.
 # On release: removes service config from arti.toml, cleans up keystore directory,
 #              signals Arti to reload.
@@ -49,42 +49,11 @@ NICKNAME="cellar_${ADDR_PREFIX}"
 # Keystore directory for this service
 KEYSTORE_DIR="${ARTI_KEYSTORE}/${NICKNAME}"
 
-# Decrypt an .enc file using the master key (AES-256-CBC).
-# Format: [16-byte IV][ciphertext with PKCS7 padding]
-# Writes decrypted output to $2.
-decrypt_file() {
-    local enc_file="$1"
-    local out_file="$2"
-    local master_key_hex
-
-    master_key_hex=$(od -A n -t x1 "$CELLAR_UNLOCKED_FILE" | tr -d ' \n')
-
-    # Extract IV (first 16 bytes)
-    local iv_hex
-    iv_hex=$(dd if="$enc_file" bs=1 count=16 2>/dev/null | od -A n -t x1 | tr -d ' \n')
-
-    # Ciphertext starts at byte 16
-    local file_size ct_size
-    file_size=$(wc -c < "$enc_file")
-    ct_size=$((file_size - 16))
-    dd if="$enc_file" bs=1 skip=16 count="$ct_size" 2>/dev/null | \
-        openssl enc -d -aes-256-cbc \
-            -K "$master_key_hex" \
-            -iv "$iv_hex" \
-            -out "$out_file" 2>/dev/null
-
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to decrypt ${enc_file}"
-        return 1
-    fi
-    return 0
-}
-
 do_takeover() {
     local keys_src="${CELLAR_KEYS_DIR}/${CONTENT_ADDRESS}"
 
-    # Check for encrypted Arti PEM key
-    if [ ! -f "${keys_src}/ks_hs_id.ed25519_expanded_private.enc" ]; then
+    # Check for plaintext Arti PEM key
+    if [ ! -f "${keys_src}/ks_hs_id.ed25519_expanded_private" ]; then
         echo "ERROR: No Arti key found for ${CONTENT_ADDRESS}"
         exit 1
     fi
@@ -92,9 +61,9 @@ do_takeover() {
     # Create the Arti keystore directory for this service
     mkdir -p "$KEYSTORE_DIR"
 
-    # Decrypt the PEM key to the keystore
-    if ! decrypt_file "${keys_src}/ks_hs_id.ed25519_expanded_private.enc" "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"; then
-        echo "ERROR: Failed to decrypt key for ${CONTENT_ADDRESS}"
+    # Copy the plaintext PEM key to the keystore
+    if ! cp "${keys_src}/ks_hs_id.ed25519_expanded_private" "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"; then
+        echo "ERROR: Failed to copy key for ${CONTENT_ADDRESS}"
         rm -rf "$KEYSTORE_DIR"
         exit 1
     fi

@@ -128,10 +128,10 @@ preflight() {
         fi
     done
 
-    if docker_cmd inspect --format='{{.State.Running}}' onionpress-tor-polling 2>/dev/null | grep -q true; then
-        log "  onionpress-tor-polling is running (dedicated polling Tor)"
+    if docker_cmd inspect --format='{{.State.Running}}' onioncellar 2>/dev/null | grep -q true; then
+        log "  onioncellar is running (dedicated polling Tor)"
     else
-        log "  WARNING: onionpress-tor-polling is not running"
+        log "  WARNING: onioncellar is not running"
     fi
 
     # Get the Arti image from the running tor container
@@ -142,15 +142,15 @@ preflight() {
     fi
     log "  Arti image: $ARTI_IMAGE"
 
-    # Check if cellar is unlocked (registrations will fail if locked)
-    local lock_check
-    lock_check=$(docker_cmd exec onionpress-wordpress curl -s --max-time 5 http://localhost:80/register 2>/dev/null || echo "")
-    if echo "$lock_check" | grep -q '"locked":true'; then
-        echo "ERROR: Cellar is LOCKED — registrations will fail"
-        echo "  Log into WordPress admin in a browser to unlock the cellar"
+    # Check if cellar registration API is responding
+    local status_check
+    status_check=$(docker_cmd exec onioncellar curl -s --max-time 5 http://localhost:8083/status 2>/dev/null || echo "")
+    if [ -z "$status_check" ]; then
+        echo "ERROR: Cellar registration API is not responding"
+        echo "  Check onioncellar container logs"
         exit 1
     fi
-    log "  Cellar is unlocked"
+    log "  Cellar registration API is ready"
 
     log "Preflight OK"
 }
@@ -332,8 +332,8 @@ print(sum(1 for x in w if x.get('registered')))
 
         # Also check cellar registry for real-time registration count
         local db_count
-        db_count=$(docker_cmd exec onionpress-wordpress \
-            php "$CELLAR_DB_PHP" count "WHERE version='stress-test'" 2>/dev/null | tr -d ' \n\r')
+        db_count=$(docker_cmd exec onioncellar \
+            sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test'" 2>/dev/null | tr -d ' \n\r')
         [ -n "$db_count" ] && registered_count=$db_count
 
         local now
@@ -382,26 +382,26 @@ except: print(0)
 
 # ── Metrics collection ────────────────────────────────────────────────────────
 
-CELLAR_DB_PHP="/var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php"
+CELLAR_DB_PATH="/var/lib/onionpress/cellar/registry.db"
 
 get_registry_count() {
-    docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" count "" 2>/dev/null | tr -d ' \n\r'
+    docker_cmd exec onioncellar \
+        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_stress_fail_count() {
-    docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" count "WHERE version='stress-test' AND status='failing'" 2>/dev/null | tr -d ' \n\r'
+    docker_cmd exec onioncellar \
+        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test' AND status='failing'" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_takeover_count() {
-    docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" count "WHERE takeover_active=1" 2>/dev/null | tr -d ' \n\r'
+    docker_cmd exec onioncellar \
+        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE takeover_active=1" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_healthy_count() {
-    docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" count "WHERE version='stress-test' AND status='healthy' AND last_contact IS NOT NULL" 2>/dev/null | tr -d ' \n\r'
+    docker_cmd exec onioncellar \
+        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test' AND status='healthy' AND last_contact IS NOT NULL" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_container_mem_mb() {
@@ -420,7 +420,7 @@ get_container_mem_mb() {
 }
 
 get_last_poll_duration() {
-    docker_cmd logs --tail 100 onionpress-tor-polling 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r'
+    docker_cmd logs --tail 100 onioncellar 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r'
 }
 
 get_system_mem_pct() {
@@ -592,7 +592,7 @@ subprocess.run([
     '-H', 'Content-Type: application/json',
     '-d', payload,
     '--max-time', '60',
-    'http://${CELLAR_ADDR}/register',
+    'http://${CELLAR_ADDR}:8083/register',
 ], capture_output=True, timeout=75)
 print(f'Re-registered {w[\"content_address\"]}')
 " 2>/dev/null &
@@ -689,8 +689,8 @@ cleanup_stress_test() {
 
     # Get stress-test addresses before unregistering
     local stress_addrs
-    stress_addrs=$(docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" query-addresses "WHERE version='stress-test'" 2>/dev/null) || true
+    stress_addrs=$(docker_cmd exec onioncellar \
+        sqlite3 "$CELLAR_DB_PATH" "SELECT DISTINCT content_address FROM registry WHERE version='stress-test'" 2>/dev/null) || true
 
     local count=0
     local released_arti=0
@@ -699,10 +699,10 @@ cleanup_stress_test() {
             addr=$(echo "$addr" | tr -d '\r\n ')
             [ -z "$addr" ] && continue
 
-            # POST /unregister — handles DB + key file cleanup
+            # POST /unregister via cellar-server API
             local resp
-            resp=$(docker_cmd exec onionpress-wordpress \
-                curl -s -X POST http://localhost:80/unregister \
+            resp=$(docker_cmd exec onioncellar \
+                curl -s -X POST http://localhost:8083/unregister \
                 -H "Content-Type: application/json" \
                 -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
 
@@ -843,8 +843,8 @@ run_cleanup() {
 
     # Get stress-test addresses
     local stress_addrs
-    stress_addrs=$(docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" query-addresses "WHERE version='stress-test'" 2>/dev/null) || true
+    stress_addrs=$(docker_cmd exec onioncellar \
+        sqlite3 "$CELLAR_DB_PATH" "SELECT DISTINCT content_address FROM registry WHERE version='stress-test'" 2>/dev/null) || true
 
     local count
     count=$(echo "$stress_addrs" | grep -c '\.onion' 2>/dev/null || true)
@@ -856,17 +856,17 @@ run_cleanup() {
         return
     fi
 
-    # Unregister each entry via /unregister endpoint
+    # Unregister each entry via cellar-server API
     local unregistered=0
     local released_arti=0
     for addr in $stress_addrs; do
         addr=$(echo "$addr" | tr -d '\r\n ')
         [ -z "$addr" ] && continue
 
-        # POST /unregister — handles DB + key file cleanup
+        # POST /unregister via cellar-server API
         local resp
-        resp=$(docker_cmd exec onionpress-wordpress \
-            curl -s -X POST http://localhost:80/unregister \
+        resp=$(docker_cmd exec onioncellar \
+            curl -s -X POST http://localhost:8083/unregister \
             -H "Content-Type: application/json" \
             -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
 

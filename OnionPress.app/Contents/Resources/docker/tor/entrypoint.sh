@@ -11,8 +11,8 @@ chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 # Polling-only mode
 if [ "${POLLING_ONLY}" = "1" ]; then
     if [ "${ONIONPRESS_CELLAR}" = "1" ]; then
-        # Cellar polling mode: Arti with keystore (for takeover) + cellar-poller + redirect
-        echo "Cellar polling mode: starting Arti (SOCKS + keystore), redirect service, and poller..."
+        # Cellar polling mode: Arti with keystore (for takeover) + cellar-server + cellar-poller + redirect
+        echo "Cellar polling mode: starting Arti (SOCKS + keystore), registration server, redirect service, and poller..."
 
         # Start cellar redirect service in background (port 8082)
         /cellar-redirect.sh &
@@ -20,6 +20,14 @@ if [ "${POLLING_ONLY}" = "1" ]; then
         sleep 1
         if ! kill -0 $CELLAR_REDIRECT_PID 2>/dev/null; then
             echo "ERROR: cellar-redirect.sh failed to start"
+        fi
+
+        # Start cellar registration API server (port 8083)
+        python3 /cellar-server.py &
+        CELLAR_SERVER_PID=$!
+        sleep 1
+        if ! kill -0 $CELLAR_SERVER_PID 2>/dev/null; then
+            echo "ERROR: cellar-server.py failed to start"
         fi
 
         # Start Arti with cellar config (SOCKS + keystore)
@@ -61,6 +69,19 @@ SOCAT_PID=$!
 sleep 1
 if ! kill -0 $SOCAT_PID 2>/dev/null; then
     echo "ERROR: socat (port 8080 forward) failed to start"
+fi
+
+# Cellar mode: forward port 8083 to onioncellar container's registration API
+# and add port 8083 to the onion service config in arti.toml
+if [ "${ONIONPRESS_CELLAR}" = "1" ]; then
+    socat TCP-LISTEN:8083,reuseaddr,fork TCP:onioncellar:8083 &
+    SOCAT_API_PID=$!
+    sleep 1
+    if ! kill -0 $SOCAT_API_PID 2>/dev/null; then
+        echo "ERROR: socat (port 8083 forward to onioncellar) failed to start"
+    fi
+    # Add port 8083 to the wordpress onion service proxy_ports
+    sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
 fi
 
 # Start healthcheck HTTP server in background (port 8081)

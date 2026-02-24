@@ -16,5 +16,6 @@ COPY healthcheck-server.sh /healthcheck-server.sh
 COPY cellar-redirect.sh /cellar-redirect.sh
 COPY cellar-tor-manager.sh /cellar-tor-manager.sh
 COPY cellar-poller.py /cellar-poller.py
-RUN chmod +x /entrypoint.sh /healthcheck-server.sh /cellar-redirect.sh /cellar-tor-manager.sh /cellar-poller.py
+COPY cellar-server.py /cellar-server.py
+RUN chmod +x /entrypoint.sh /healthcheck-server.sh /cellar-redirect.sh /cellar-tor-manager.sh /cellar-poller.py /cellar-server.py
 ENTRYPOINT ["/entrypoint.sh"]

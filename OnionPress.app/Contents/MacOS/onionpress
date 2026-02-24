@@ -164,15 +164,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 curl &&
 COPY entrypoint.sh /entrypoint.sh
 COPY arti-cellar.toml /etc/arti/arti-cellar.toml
 COPY cellar-poller.py /cellar-poller.py
+COPY cellar-server.py /cellar-server.py
 COPY cellar-tor-manager.sh /cellar-tor-manager.sh
-RUN chmod +x /entrypoint.sh /cellar-poller.py /cellar-tor-manager.sh
+RUN chmod +x /entrypoint.sh /cellar-poller.py /cellar-server.py /cellar-tor-manager.sh
 CELLAR_DOCKERFILE
-        # Start dedicated polling Tor container (SOCKS + keystore + cellar-poller)
-        # This keeps HSDir lookups off the main Tor instance and runs the cellar poller
-        if docker compose --profile cellar up -d tor-polling >> "$LOG_FILE" 2>&1; then
-            log "OnionCellar: started polling Tor container (onionpress-tor-polling)"
+        # Start onioncellar container (SOCKS + keystore + cellar-server + cellar-poller)
+        # This keeps HSDir lookups off the main Tor instance and runs the cellar services
+        if docker compose --profile cellar up -d onioncellar >> "$LOG_FILE" 2>&1; then
+            log "OnionCellar: started onioncellar container"
         else
-            log "WARNING: Failed to start tor-polling container"
+            log "WARNING: Failed to start onioncellar container"
         fi
         return 0
     fi
@@ -1066,62 +1067,19 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     return 0
 }
 
-# Function to install OnionCellar registration mu-plugin (cellar mode only)
+# Function to set up OnionCellar data directories (cellar mode only)
+# Registration API now runs in the onioncellar container (cellar-server.py),
+# so PHP mu-plugins are no longer installed into WordPress.
 install_cellar_plugin() {
     if [ "$ONIONPRESS_CELLAR" != "1" ]; then
         return 0
     fi
 
-    local plugins_dir="$RESOURCES_DIR/plugins"
-
-    if [ -f "$plugins_dir/onionpress-cellar-register.php" ]; then
-        docker exec onionpress-wordpress mkdir -p \
-            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1 \
-            || log "WARNING: Failed to create mu-plugins directory"
-        if docker cp "$plugins_dir/onionpress-cellar-register.php" \
-            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1; then
-            docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1 \
-                || log "WARNING: Failed to chown onionpress-cellar-register.php"
-            log "✓ onionpress-cellar-register.php mu-plugin installed"
-        else
-            log "WARNING: Failed to copy onionpress-cellar-register.php"
-        fi
-    fi
-
-    # Install cellar crypto helper library
-    if [ -f "$plugins_dir/onionpress-cellar-crypto.php" ]; then
-        if docker cp "$plugins_dir/onionpress-cellar-crypto.php" \
-            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php >> "$LOG_FILE" 2>&1; then
-            docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php >> "$LOG_FILE" 2>&1 \
-                || log "WARNING: Failed to chown onionpress-cellar-crypto.php"
-            log "✓ onionpress-cellar-crypto.php installed"
-        else
-            log "WARNING: Failed to copy onionpress-cellar-crypto.php"
-        fi
-    fi
-
-    # Install cellar SQLite DB access layer
-    if [ -f "$plugins_dir/onionpress-cellar-db.php" ]; then
-        if docker cp "$plugins_dir/onionpress-cellar-db.php" \
-            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php >> "$LOG_FILE" 2>&1; then
-            docker exec onionpress-wordpress chown www-data:www-data \
-                /var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php >> "$LOG_FILE" 2>&1 \
-                || log "WARNING: Failed to chown onionpress-cellar-db.php"
-            log "✓ onionpress-cellar-db.php installed"
-        else
-            log "WARNING: Failed to copy onionpress-cellar-db.php"
-        fi
-    fi
-
-    # Create cellar data directory inside containers
+    # Create cellar data directory on shared volume
+    # Both onioncellar (cellar-server.py writes keys) and tor (cellar-tor-manager.sh reads keys) need access
     docker exec onionpress-wordpress mkdir -p \
         /var/lib/onionpress/cellar/keys >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to create cellar data directory in wordpress container"
-    docker exec onionpress-wordpress chown -R www-data:www-data \
-        /var/lib/onionpress/cellar >> "$LOG_FILE" 2>&1 \
-        || log "WARNING: Failed to chown cellar data directory"
+        || log "WARNING: Failed to create cellar data directory"
 
     return 0
 }
@@ -1513,7 +1471,7 @@ main() {
             cd "$DOCKER_DIR"
             docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor container started"
-            # Detect cellar mode and start tor-polling if applicable
+            # Detect cellar mode and start onioncellar if applicable
             detect_cellar_mode
             ;;
 

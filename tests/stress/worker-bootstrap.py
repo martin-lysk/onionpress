@@ -111,7 +111,7 @@ def register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
                     "-H", "Content-Type: application/json",
                     "-d", payload,
                     "--max-time", "90",
-                    f"http://{CELLAR_ADDR}/register",
+                    f"http://{CELLAR_ADDR}:8083/register",
                 ],
                 capture_output=True, text=True, timeout=105,
             )

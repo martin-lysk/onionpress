@@ -2,7 +2,8 @@
 """
 OnionCellar Poller — containerized healthcheck monitor
 
-Runs inside the tor-polling container alongside Arti (SOCKS + keystore).
+Runs inside the onioncellar container alongside Arti (SOCKS + keystore),
+cellar-server.py (registration API), and cellar-redirect.sh (302 redirects).
 Monitors registered OnionPress instances, takes over failed addresses,
 and releases them when they recover.
 
@@ -10,7 +11,6 @@ All operations are local:
   - SQLite via Python sqlite3 (shared volume)
   - Healthchecks via curl through local Arti SOCKS (127.0.0.1:9050)
   - Takeover/release via /cellar-tor-manager.sh (same container)
-  - Cellar lock check via filesystem (shared volume)
 
 Schema uses composite primary key (content_address, healthcheck_address) to
 support multiple instances registering the same .onion address. Takeover

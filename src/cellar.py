@@ -9,7 +9,7 @@ This module handles the registration client (normal instances send keys to the c
 and cellar mode detection for the menubar UI.
 
 The cellar poller (healthcheck monitoring, takeover, release) runs inside the
-tor-polling container as cellar-poller.py — not in this module.
+onioncellar container as cellar-poller.py — not in this module.
 """
 
 import hashlib
@@ -22,6 +22,9 @@ from datetime import datetime, timezone
 
 # The cellar's .onion address — placeholder until a real address is generated
 CELLAR_ADDRESS = "ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+
+# Registration API port (served by cellar-server.py in the onioncellar container)
+CELLAR_API_PORT = 8083
 
 # Wayback Machine .onion address
 WAYBACK_ONION = "web.archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
@@ -183,7 +186,7 @@ def register_with_cellar(app):
             "-H", "Content-Type: application/json",
             "-d", payload,
             "--max-time", "60",
-            f"http://{CELLAR_ADDRESS}/register"
+            f"http://{CELLAR_ADDRESS}:{CELLAR_API_PORT}/register"
         ], timeout=75)
         last_output = output
 
@@ -279,7 +282,7 @@ def unregister_from_cellar(app, content_address=None):
             "-H", "Content-Type: application/json",
             "-d", payload,
             "--max-time", "60",
-            f"http://{CELLAR_ADDRESS}/unregister"
+            f"http://{CELLAR_ADDRESS}:{CELLAR_API_PORT}/unregister"
         ], timeout=75)
         last_output = output
 
@@ -365,7 +368,7 @@ def _send_cellar_notification(app, endpoint, log_label, max_attempts=1, max_time
             "-H", "Content-Type: application/json",
             "-d", payload,
             "--max-time", str(max_time),
-            f"http://{CELLAR_ADDRESS}/{endpoint}"
+            f"http://{CELLAR_ADDRESS}:{CELLAR_API_PORT}/{endpoint}"
         ], timeout=max_time + 15)
         last_output = output
 
@@ -421,7 +424,7 @@ def start_online_notification_thread(app):
 
 
 # ---------------------------------------------------------------------------
-# Cellar mode detection and UI helpers (poller runs in tor-polling container)
+# Cellar mode detection and UI helpers (poller runs in onioncellar container)
 # ---------------------------------------------------------------------------
 
 def is_cellar_instance(onion_address):

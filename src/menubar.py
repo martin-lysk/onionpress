@@ -1747,7 +1747,7 @@ class OnionPressApp(rumps.App):
                     self._cellar_checked = True
                     if cellar.is_cellar_instance(self.onion_address):
                         self.is_cellar = True
-                        self.log("OnionCellar mode activated (poller runs in tor-polling container)")
+                        self.log("OnionCellar mode activated (poller runs in onioncellar container)")
                         self.update_menu()
                     elif not self._cellar_registration_started:
                         # First time — full registration with keys
