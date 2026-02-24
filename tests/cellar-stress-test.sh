@@ -401,7 +401,7 @@ get_takeover_count() {
 
 get_healthy_count() {
     docker_cmd exec onionpress-wordpress \
-        php "$CELLAR_DB_PHP" count "WHERE version='stress-test' AND status='healthy' AND last_healthcheck IS NOT NULL" 2>/dev/null | tr -d ' \n\r'
+        php "$CELLAR_DB_PHP" count "WHERE version='stress-test' AND status='healthy' AND last_contact IS NOT NULL" 2>/dev/null | tr -d ' \n\r'
 }
 
 get_container_mem_mb() {
