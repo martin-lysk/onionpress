@@ -1196,6 +1196,82 @@ start_containers() {
         else
             log "Using random onion address"
         fi
+    else
+        # Not first run — check for prefix mismatch
+        # Read configured prefix (same logic as first-run block)
+        ADDRESS_PREFIX="op2"
+        if [ -f "$DATA_DIR/config" ]; then
+            CUSTOM_PREFIX=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+            if [ -z "$CUSTOM_PREFIX" ]; then
+                CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+            fi
+            if [ -n "$CUSTOM_PREFIX" ]; then
+                ADDRESS_PREFIX="$CUSTOM_PREFIX"
+            fi
+        fi
+
+        # Validate prefix: base32 only (a-z, 2-7), max 5 chars
+        if [ ${#ADDRESS_PREFIX} -gt 5 ]; then
+            log "WARNING: ADDRESS_PREFIX '$ADDRESS_PREFIX' is too long (max 5). Using default 'op2'."
+            ADDRESS_PREFIX="op2"
+        elif ! echo "$ADDRESS_PREFIX" | grep -qE '^[a-z2-7]+$'; then
+            log "WARNING: ADDRESS_PREFIX '$ADDRESS_PREFIX' contains invalid characters. Using default 'op2'."
+            ADDRESS_PREFIX="op2"
+        fi
+
+        # Get current onion address from vanity-keys directory
+        CURRENT_ADDR=""
+        if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
+            CURRENT_DIR=$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)
+            if [ -n "$CURRENT_DIR" ]; then
+                CURRENT_ADDR=$(basename "$CURRENT_DIR")
+            fi
+        fi
+
+        # Compare prefix if we have a current address
+        if [ -n "$CURRENT_ADDR" ]; then
+            ADDR_BASE="${CURRENT_ADDR%.onion}"
+            case "$ADDR_BASE" in
+                ${ADDRESS_PREFIX}*)
+                    # Prefix matches — nothing to do
+                    ;;
+                *)
+                    log "PREFIX MISMATCH: current address '$CURRENT_ADDR' does not start with '$ADDRESS_PREFIX'"
+                    log "Regenerating onion address with new prefix..."
+
+                    # Stop and remove containers that use the arti-state volume
+                    docker compose down >> "$LOG_FILE" 2>&1 || true
+                    docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+
+                    # Remove old vanity-key directory
+                    rm -rf "$DATA_DIR/shared/vanity-keys"
+
+                    # Generate new address
+                    if VANITY_DIR=$(generate_vanity_address "$ADDRESS_PREFIX"); then
+                        log "New address generated successfully"
+
+                        # Create arti-state volume and install key (same as first-run)
+                        if ! docker volume create onionpress-arti-state >> "$LOG_FILE" 2>&1; then
+                            log "ERROR: Failed to create arti-state volume"
+                            return 1
+                        fi
+                        if ! docker run --rm \
+                            -v onionpress-arti-state:/dest \
+                            --mount type=bind,source="$VANITY_DIR",target=/src \
+                            alpine sh -c 'mkdir -p /dest/state/keystore/hss/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/state/keystore/hss/wordpress/ && chown -R 100:100 /dest/state && chmod 700 /dest/state /dest/state/keystore /dest/state/keystore/hss /dest/state/keystore/hss/wordpress && chmod 600 /dest/state/keystore/hss/wordpress/*' >> "$LOG_FILE" 2>&1; then
+                            log "ERROR: Failed to copy address key to arti-state volume"
+                            return 1
+                        fi
+
+                        log "Address key installed to arti-state volume"
+                        log "New onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
+                    else
+                        log "ERROR: Failed to generate new address with prefix '$ADDRESS_PREFIX'"
+                        return 1
+                    fi
+                    ;;
+            esac
+        fi
     fi
 
     # Update images if enabled in config
