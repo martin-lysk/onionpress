@@ -1066,6 +1066,16 @@ class OnionPressApp(rumps.App):
         except Exception:
             pass
 
+        # Log cached onion address from previous run if available
+        try:
+            cached_addr_file = os.path.join(self.app_support, "onion_address")
+            with open(cached_addr_file) as f:
+                cached = f.read().strip()
+            if cached and cached.endswith('.onion'):
+                self.log(f"Onion address: {cached}")
+        except (OSError, IOError):
+            pass
+
         self.log("=" * 60)
 
     def _web_log_reader_thread(self, process, raw_path, filtered_path):
