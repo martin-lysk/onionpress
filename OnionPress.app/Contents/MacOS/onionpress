@@ -115,7 +115,7 @@ detect_cellar_mode() {
         log "OnionCellar mode activated (address: $our_address)"
 
         # Cellar needs more memory for polling, takeover services, etc.
-        # If VM_MEMORY is below 5GB, bump it so the next restart gets more RAM.
+        # If VM_MEMORY is below 5GB, bump to 5GB (preserve higher values).
         local current_mem
         current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
         current_mem="${current_mem:-1}"
@@ -841,10 +841,10 @@ install_docker() {
         fi
     fi
 
-    # Pre-check: if cellar key is imported, start with 5GB to avoid a restart
+    # Pre-check: if cellar key is imported, ensure at least 5GB (preserve higher values)
     local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
     if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
-        log "Cellar key detected — starting VM with 5GB"
+        log "Cellar key detected — starting VM with 5GB (was ${VM_MEMORY}GB)"
         VM_MEMORY=5
     fi
 
@@ -1481,12 +1481,12 @@ wait_for_services() {
 main() {
     case "${1:-start}" in
         start)
-            # Pre-check: if cellar key is imported, ensure VM has 5GB
+            # Pre-check: if cellar key is imported, ensure VM has at least 5GB (preserve higher values)
             local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
             if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ]; then
                 local current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
                 if [ -z "$current_mem" ] || [ "$current_mem" -lt 5 ] 2>/dev/null; then
-                    log "Cellar key detected — setting VM_MEMORY=5"
+                    log "Cellar key detected — setting VM_MEMORY to 5GB (was ${current_mem:-unset})"
                     mkdir -p "$DATA_DIR"
                     if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
                         sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
