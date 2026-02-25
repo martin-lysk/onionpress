@@ -55,6 +55,20 @@
 - All other container data uses Docker named volumes (which live inside the VM)
 - **Do not add additional `--mount` flags without considering security implications**
 
+## Multi-User Support (v2.4.11+)
+- Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
+- Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers
+- **Port offsets**: second user auto-detects port 8080 is taken and offsets all ports by +10000 (18080/19050/19077), third user by +20000, etc. Max ~5 users.
+- **Detection uses socket bind test**, not `lsof` — `lsof` only sees the current user's processes and cannot detect ports bound by other users
+- **Port detection must happen in the MenubarApp's `__init__`** (Python socket bind), not in the shell scripts — the MenubarApp launches first and needs the correct ports before the `onionpress` script runs
+- **Module-level constants in `onion_proxy.py`** (`PROXY_PORT`, `PHP_PROXY_PORT`) are set at import time. The MenubarApp must update these globals after detecting the offset: `onion_proxy.PROXY_PORT = self.proxy_port`
+- The `onionpress` shell script also has detection as a fallback (for standalone use), but respects pre-set `ONIONPRESS_PORT_OFFSET` env var from the MenubarApp
+- **`LSMultipleInstancesProhibited` must NOT be in any Info.plist** — macOS enforces it across ALL users sharing the same app bundle, not just per-user
+- **`pgrep` in the launcher must use `-u $(whoami)`** to restrict to the current user's processes
+- **PID lock file** (`~/.onionpress/onionpress.pid`) prevents the same user from double-launching; cleaned up via `trap` on EXIT/INT/TERM/HUP
+- **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
+- **`git add -f OnionPress.app/`** after a build will pick up large downloaded binaries (docker, limactl, docker-compose) — always stage specific paths instead
+
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed
 - **For ANY communication over Tor from the Mac, always use `docker exec` into the tor container** — this is reliable
