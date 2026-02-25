@@ -674,6 +674,7 @@ class OnionPressApp(rumps.App):
         self._cellar_checked = False       # Whether cellar mode has been checked
         self._cellar_registration_started = False  # Whether registration thread is running
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
+        self._quitting = False                 # True once quit cleanup has started
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -2098,7 +2099,13 @@ class OnionPressApp(rumps.App):
             None,
             AppKit.NSOperationQueue.mainQueue(),
             lambda notification: self.handle_wake())
-        self.log("Registered for system sleep/wake notifications")
+        # Register for app termination (catches osascript quit / Apple Event quit)
+        AppKit.NSNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
+            AppKit.NSApplicationWillTerminateNotification,
+            None,
+            None,  # Deliver on posting thread (main thread)
+            lambda notification: self._handle_terminate())
+        self.log("Registered for system sleep/wake/terminate notifications")
 
     def handle_sleep(self):
         """Handle system sleep — notify cellar and release caffeinate.
@@ -2112,6 +2119,49 @@ class OnionPressApp(rumps.App):
                 except Exception:
                     pass
             self.stop_caffeinate()
+
+    def _handle_terminate(self):
+        """Handle app termination (osascript quit, Apple Event, etc.).
+        Runs synchronously before the app exits to ensure proper cleanup."""
+        if self._quitting:
+            return  # Already cleaning up via Quit button
+        self._quitting = True
+        self.log("="*60)
+        self.log("APP TERMINATING (Apple Event / osascript quit)")
+        self.log("="*60)
+
+        # Notify cellar before stopping services
+        if self._cellar_registration_started:
+            try:
+                cellar.notify_cellar_offline(self)
+            except Exception:
+                pass
+
+        # Stop services
+        try:
+            self.log("Stopping services...")
+            subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
+            self.log("Services stopped")
+        except Exception as e:
+            self.log(f"Warning: Stop failed: {e}")
+
+        self.stop_caffeinate()
+        self.stop_onion_proxy()
+
+        try:
+            colima_bin = os.path.join(self.bin_dir, "colima")
+            self.log("Stopping Colima VM...")
+            env = os.environ.copy()
+            env["COLIMA_HOME"] = self.colima_home
+            env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
+            env["LIMA_INSTANCE"] = "onionpress"
+            subprocess.run([colima_bin, "stop"], capture_output=True, timeout=60, env=env)
+            self.log("Colima stopped")
+        except Exception as e:
+            self.log(f"Warning: Colima stop failed: {e}")
+
+        self._remove_pid_file()
+        self.log("Cleanup complete")
 
     def handle_wake(self):
         """Handle system wake — Tor circuits are dead, go yellow immediately"""
@@ -4052,6 +4102,7 @@ License: AGPL v3"""
         self.log("="*60)
         self.log("QUIT BUTTON CLICKED - v2.4.1 RUNNING")
         self.log("="*60)
+        self._quitting = True  # Prevent _handle_terminate from running again
 
         # Stop monitoring immediately
         self.monitoring_tor_install = False

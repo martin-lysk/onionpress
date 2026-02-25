@@ -325,7 +325,16 @@ fi
 # Install the built MenubarApp into the app bundle
 MENUBAR_APP_DIR="$APP_PATH/Contents/Resources/MenubarApp"
 rm -rf "$MENUBAR_APP_DIR"
-mv "$MENUBAR_BUILD_DIR/dist/menubar.app" "$MENUBAR_APP_DIR"
+# py2app names the .app from CFBundleName (OnionPress.app) or script name (menubar.app)
+if [ -d "$MENUBAR_BUILD_DIR/dist/OnionPress.app" ]; then
+    mv "$MENUBAR_BUILD_DIR/dist/OnionPress.app" "$MENUBAR_APP_DIR"
+elif [ -d "$MENUBAR_BUILD_DIR/dist/menubar.app" ]; then
+    mv "$MENUBAR_BUILD_DIR/dist/menubar.app" "$MENUBAR_APP_DIR"
+else
+    echo "ERROR: py2app output not found in $MENUBAR_BUILD_DIR/dist/"
+    ls "$MENUBAR_BUILD_DIR/dist/"
+    exit 1
+fi
 
 # Universal binaries in MenubarApp are fine — macOS runs the arm64 slice
 # natively on Apple Silicon without triggering a Rosetta prompt.

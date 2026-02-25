@@ -31,7 +31,7 @@ OPTIONS = {
     'argv_emulation': False,
     'iconfile': 'OnionPress.app/Contents/Resources/AppIcon.icns',
     'plist': {
-        'CFBundleName': 'menubar',
+        'CFBundleName': 'OnionPress',
         'CFBundleDisplayName': 'OnionPress',
         'CFBundleIdentifier': 'press.onion.app',
         'CFBundleVersion': '2.4.1',
