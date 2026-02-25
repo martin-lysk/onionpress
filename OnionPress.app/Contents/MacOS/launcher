@@ -171,7 +171,7 @@ initialize_colima() {
 }
 
 # Check if menubar app is already running
-if pgrep -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&1; then
+if pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&1; then
     log "Menubar app already running — triggering reopen"
     # Signal the running instance to open browser by touching a sentinel file
     touch "$DATA_DIR/.reopen"

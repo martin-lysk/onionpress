@@ -106,6 +106,8 @@ export DOCKER_CONFIG="$DATA_DIR/docker-config"
 # Detect per-user port offset for multi-user support
 # When multiple macOS users run OnionPress, each needs unique host ports.
 # Try binding the WordPress port; if in use, bump offset by 10000.
+# NOTE: Must use actual socket bind (not lsof) because lsof only shows
+# the current user's processes and cannot detect ports bound by other users.
 detect_port_offset() {
     local offset=0
     while true; do
@@ -115,8 +117,16 @@ detect_port_offset() {
             offset=0  # fall back to default
             break
         fi
-        # Check if port is free (not in use by another process)
-        if ! lsof -i ":$test_port" -sTCP:LISTEN >/dev/null 2>&1; then
+        # Try to bind the port — fails with EADDRINUSE regardless of which user owns it
+        if bundled_python -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.bind(('127.0.0.1', int(sys.argv[1])))
+    s.close()
+except OSError:
+    sys.exit(1)
+" "$test_port" 2>/dev/null; then
             break
         fi
         log "Port $test_port in use, trying offset $((offset + 10000))"
