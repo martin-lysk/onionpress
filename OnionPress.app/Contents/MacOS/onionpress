@@ -5,6 +5,9 @@
 
 set -e
 
+# Clear py2app PYTHONPATH so subprocess python calls are not confused.
+unset PYTHONPATH
+
 # Ensure we run natively on Apple Silicon (not under Rosetta).
 # Universal binaries inherit the parent's architecture, so if this script
 # was started under Rosetta we must re-exec to get native arm64 execution.
@@ -21,6 +24,11 @@ SCRIPTS_DIR="$RESOURCES_DIR/scripts"
 DATA_DIR="$HOME/.onionpress"
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
+
+# Use the Python bundled inside the py2app MenubarApp so we never depend on
+# system Python (which may not exist — macOS does not ship a usable python3).
+BUNDLED_PYTHON="$RESOURCES_DIR/MenubarApp/Contents/MacOS/python"
+export PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
 
 # Ensure data directory exists
 mkdir -p "$DATA_DIR"
@@ -352,7 +360,7 @@ generate_vanity_address() {
 
     # Convert mkp224o C Tor format to Arti OpenSSH format
     if [ -f "$VANITY_DIR/hs_ed25519_secret_key" ] && [ -f "$VANITY_DIR/hs_ed25519_public_key" ]; then
-        python3 -c "
+        "$BUNDLED_PYTHON" -c "
 import base64, os, struct, sys
 
 secret_path = sys.argv[1]
@@ -432,7 +440,7 @@ import_key() {
 
     # Show help if no argument or --help
     if [ -z "$key_b32" ] || [ "$key_b32" = "--help" ] || [ "$key_b32" = "-h" ]; then
-        cat <<'HELPEOF'
+        cat <<HELPEOF
 Usage: onionpress import-key <base32-secret-key>
 
 Import a pre-generated ed25519 key for your onion service.
@@ -446,7 +454,7 @@ HOW TO GET THE KEY FROM mkp224o OUTPUT:
   Each address has its own directory containing hs_ed25519_secret_key.
   Encode that file to base32:
 
-    python3 -c "import base64; print(base64.b32encode(open('$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())"
+    $BUNDLED_PYTHON -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())"
 
   If you ran mkp224o yourself, substitute the path to your output directory.
 
@@ -455,8 +463,8 @@ HOW TO GET THE KEY FROM mkp224o OUTPUT:
 
 EXAMPLE:
 
-  KEY=$(python3 -c "import base64; print(base64.b32encode(open('$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())")
-  ./onionpress import-key "$KEY"
+  KEY=\$($BUNDLED_PYTHON -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())")
+  ./onionpress import-key "\$KEY"
 
 WHAT THIS COMMAND DOES:
 
@@ -475,10 +483,10 @@ HELPEOF
         return 0
     fi
 
-    # Decode base32, validate length, derive public key and address — all in one python3 call
+    # Decode base32, validate length, derive public key and address — all in one call
     # The public key must be derived via ed25519 scalar multiplication (not a simple slice)
     local result
-    result=$(python3 -c "
+    result=$("$BUNDLED_PYTHON" -c "
 import base64, hashlib, sys, binascii
 
 key_b32 = sys.argv[1]
@@ -626,7 +634,7 @@ print(binascii.hexlify(pubkey).decode())
     mkdir -p "$output_dir"
 
     # Write OpenSSH PEM key file for Arti (same format as key_manager.build_openssh_key)
-    python3 -c "
+    "$BUNDLED_PYTHON" -c "
 import base64, binascii, os, struct, sys
 
 hex_key = sys.argv[1]
