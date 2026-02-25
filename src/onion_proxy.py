@@ -935,44 +935,67 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         """Attempt to log in to archive.org and retrieve S3 API keys.
 
         Returns dict with 'access' and 'secret' on success, None on failure.
-        Uses the archive.org login form + S3 keys page (no undocumented APIs).
+        Uses the archive.org xauthn JSON API.
         """
         import urllib.request
         import urllib.parse
-        import http.cookiejar
 
         try:
-            cj = http.cookiejar.CookieJar()
-            opener = urllib.request.build_opener(
-                urllib.request.HTTPCookieProcessor(cj)
-            )
-            opener.addheaders = [
-                ('User-Agent', 'OnionPress (+https://github.com/brewsterkahle/onionpress)')
-            ]
-
-            # Step 1: POST login
+            # Step 1: Authenticate via xauthn API
             login_data = urllib.parse.urlencode({
-                'username': email,
+                'email': email,
                 'password': password,
-                'action': 'login',
-                'remember': 'CHECKED',
             }).encode()
-            opener.open('https://archive.org/account/login', login_data, timeout=15)
+            req = urllib.request.Request(
+                'https://archive.org/services/xauthn/?op=login',
+                data=login_data,
+                headers={'User-Agent': 'OnionPress (+https://github.com/brewsterkahle/onionpress)'},
+            )
+            resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read())
 
-            # Check if we got a logged-in cookie
-            logged_in = any(c.name.startswith('logged-in-') for c in cj)
-            if not logged_in:
+            if not data.get('success'):
+                reason = data.get('values', {}).get('reason', 'unknown')
+                if self.server.log_func:
+                    self.server.log_func(f"archive.org login failed: {reason}")
                 return None
 
-            # Step 2: Fetch S3 keys
-            resp = opener.open(
-                'https://archive.org/account/s3.php?output_json=1', timeout=15
-            )
-            data = json.loads(resp.read())
-            access = data.get('key', {}).get('s3accesskey', '')
-            secret = data.get('key', {}).get('s3secretkey', '')
-            if access and secret:
-                return {'access': access, 'secret': secret}
+            # Step 2: Fetch S3 keys using the returned auth
+            s3_access = data.get('values', {}).get('s3', {}).get('access', '')
+            s3_secret = data.get('values', {}).get('s3', {}).get('secret', '')
+
+            if s3_access and s3_secret:
+                return {'access': s3_access, 'secret': s3_secret}
+
+            # If S3 keys not in login response, fetch separately
+            cookies = data.get('values', {}).get('cookies', {})
+            logged_in_sig = cookies.get('logged-in-sig', '')
+            logged_in_user = cookies.get('logged-in-user', '')
+
+            if logged_in_sig and logged_in_user:
+                req2 = urllib.request.Request(
+                    'https://archive.org/account/s3.php?output_json=1',
+                    headers={
+                        'User-Agent': 'OnionPress (+https://github.com/brewsterkahle/onionpress)',
+                        'Cookie': f'logged-in-sig={logged_in_sig}; logged-in-user={logged_in_user}',
+                    },
+                )
+                resp2 = urllib.request.urlopen(req2, timeout=15)
+                s3_data = json.loads(resp2.read())
+                access = s3_data.get('key', {}).get('s3accesskey', '')
+                secret = s3_data.get('key', {}).get('s3secretkey', '')
+                if access and secret:
+                    return {'access': access, 'secret': secret}
+
+        except urllib.error.HTTPError as e:
+            body = e.read().decode('utf-8', errors='replace')
+            try:
+                err_data = json.loads(body)
+                reason = err_data.get('values', {}).get('reason', str(e))
+            except Exception:
+                reason = str(e)
+            if self.server.log_func:
+                self.server.log_func(f"archive.org auth failed: {reason}")
         except Exception as e:
             if self.server.log_func:
                 self.server.log_func(f"archive.org S3 key fetch failed: {e}")

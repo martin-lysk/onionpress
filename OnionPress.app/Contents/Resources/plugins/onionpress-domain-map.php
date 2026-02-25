@@ -47,4 +47,13 @@ if (
     add_filter( 'script_loader_src',     'onionpress_rewrite_url' );
     add_filter( 'wp_get_attachment_url', 'onionpress_rewrite_url' );
     add_filter( 'includes_url',          'onionpress_rewrite_url' );
+
+    // REST API URL (required for Gutenberg block editor to save posts).
+    add_filter( 'rest_url',              'onionpress_rewrite_url' );
+
+    // Redirect URL used after post save, login, etc.
+    add_filter( 'wp_redirect',           'onionpress_rewrite_url' );
+
+    // Admin ajax URL.
+    add_filter( 'admin_url',             'onionpress_rewrite_url' );
 }
