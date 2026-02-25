@@ -679,6 +679,173 @@ wait_for_recovery() {
     return 1
 }
 
+# ── Graceful offline/online notification ─────────────────────────────────────
+
+# POST /offline to cellar for a range of workers (instant fail_count=10).
+# This simulates a real OnionPress instance calling /offline before sleeping/quitting.
+notify_offline() {
+    local start="$1"
+    local count="$2"
+
+    log "Sending /offline notifications for workers ${start}..$(( start + count - 1 ))..."
+
+    local notified=0
+    for i in $(seq "$start" $((start + count - 1))); do
+        local ctr_idx=$((i / PER_CTR))
+        local local_idx=$((i % PER_CTR))
+        local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
+
+        # Extract content_address from local worker info
+        local content_addr
+        content_addr=$(python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
+    if w and w.get('content_address'):
+        print(w['content_address'])
+    else:
+        sys.exit(1)
+except:
+    sys.exit(1)
+" 2>/dev/null) || continue
+
+        # POST /offline via localhost inside onioncellar (no auth needed)
+        docker_cmd exec onioncellar \
+            curl -s -X POST http://localhost:8083/offline \
+            -H "Content-Type: application/json" \
+            -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+
+        notified=$((notified + 1))
+    done
+
+    log "Sent /offline for ${notified} workers"
+    log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified}"
+}
+
+# POST /online to cellar for a range of workers (instant reset to healthy).
+# This simulates a real OnionPress instance calling /online after waking up.
+notify_online() {
+    local start="$1"
+    local count="$2"
+
+    log "Sending /online notifications for workers ${start}..$(( start + count - 1 ))..."
+
+    local notified=0
+    for i in $(seq "$start" $((start + count - 1))); do
+        local ctr_idx=$((i / PER_CTR))
+        local local_idx=$((i % PER_CTR))
+        local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
+
+        # Extract content_address from local worker info
+        local content_addr
+        content_addr=$(python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
+    if w and w.get('content_address'):
+        print(w['content_address'])
+    else:
+        sys.exit(1)
+except:
+    sys.exit(1)
+" 2>/dev/null) || continue
+
+        # POST /online via localhost inside onioncellar (no auth needed)
+        docker_cmd exec onioncellar \
+            curl -s -X POST http://localhost:8083/online \
+            -H "Content-Type: application/json" \
+            -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+
+        notified=$((notified + 1))
+    done
+
+    log "Sent /online for ${notified} workers"
+    log_json "\"event\":\"online_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified}"
+}
+
+# Get content addresses that have active takeovers (one per line).
+get_taken_over_addresses() {
+    docker_cmd exec onioncellar \
+        sqlite3 "$CELLAR_DB_PATH" "SELECT content_address FROM registry WHERE takeover_active=1" 2>/dev/null || true
+}
+
+# Verify that taken-over addresses serve 302 redirects to the Wayback Machine.
+# Samples $sample_size random addresses to keep timing reasonable.
+verify_redirects() {
+    local phase_label="$1"
+    local sample_size="${2:-5}"
+
+    log "${phase_label}: Verifying 302 redirects on sample of taken-over addresses..."
+
+    # Wait for descriptor propagation after takeover
+    log "  Waiting 60s for onion descriptor propagation..."
+    sleep 60
+
+    local addrs
+    addrs=$(get_taken_over_addresses)
+
+    if [ -z "$addrs" ]; then
+        log "${phase_label}: No taken-over addresses found — skipping redirect verification"
+        log_json "\"event\":\"redirect_verify\",\"phase\":\"${phase_label}\",\"sampled\":0,\"passed\":0,\"failed\":0,\"skipped\":true"
+        return 0
+    fi
+
+    # Count total taken-over
+    local total_taken=0
+    while IFS= read -r line; do
+        line=$(echo "$line" | tr -d '\r\n ')
+        [ -n "$line" ] && total_taken=$((total_taken + 1))
+    done <<< "$addrs"
+
+    # Portable random sampling (no sort -R on macOS)
+    local sampled_addrs
+    sampled_addrs=$(echo "$addrs" | awk 'BEGIN{srand()}{print rand()"\t"$0}' | sort -n | cut -f2 | head -n "$sample_size")
+
+    local sampled=0
+    local passed=0
+    local failed=0
+
+    while IFS= read -r addr; do
+        addr=$(echo "$addr" | tr -d '\r\n ')
+        [ -z "$addr" ] && continue
+        sampled=$((sampled + 1))
+
+        # Make HTTP request over Tor via onioncellar's SOCKS proxy
+        # Use -I for HEAD request (faster), -L to not follow redirects
+        local http_response
+        http_response=$(docker_cmd exec onioncellar \
+            curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
+            --socks5-hostname 127.0.0.1:9050 \
+            --max-time 60 \
+            "http://${addr}" 2>/dev/null) || http_response="000"
+
+        local http_code redirect_url
+        http_code=$(echo "$http_response" | awk '{print $1}')
+        redirect_url=$(echo "$http_response" | awk '{print $2}')
+
+        if [ "$http_code" = "302" ]; then
+            # Check that redirect points to Wayback Machine
+            if echo "$redirect_url" | grep -qi 'web.archive.org\|wayback\|archiveiya74codqgiixo3q.onion'; then
+                log "  PASS: ${addr} → 302 → ${redirect_url}"
+                passed=$((passed + 1))
+            else
+                log "  FAIL: ${addr} → 302 but redirect to unexpected: ${redirect_url}"
+                failed=$((failed + 1))
+            fi
+        else
+            log "  FAIL: ${addr} → HTTP ${http_code} (expected 302)"
+            failed=$((failed + 1))
+        fi
+    done <<< "$sampled_addrs"
+
+    log "${phase_label}: Redirect verification — ${passed}/${sampled} passed, ${failed} failed (${total_taken} total taken over)"
+    log_json "\"event\":\"redirect_verify\",\"phase\":\"${phase_label}\",\"total_taken\":${total_taken},\"sampled\":${sampled},\"passed\":${passed},\"failed\":${failed}"
+}
+
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
 cleanup_stress_test() {
@@ -773,21 +940,63 @@ run_worker() {
     echo ""
 
     if [ "$FAILING" -gt 0 ]; then
-        # Phase 4: Trigger failures
         local fail_start=$((TOTAL - FAILING))
-        log "Phase 4: Triggering failures for ${FAILING} workers..."
+
+        # ── Graceful offline/online lifecycle ──
+
+        # Phase 4: Graceful offline — POST /offline + disable responders
+        # This matches real behavior: instance calls /offline then shuts down
+        log "Phase 4: Graceful offline — sending /offline + disabling responders for ${FAILING} workers..."
+        notify_offline "$fail_start" "$FAILING"
         disable_workers "$fail_start" "$FAILING"
         echo ""
 
-        # Phase 5: Wait for cellar to detect failures and takeover
+        # Phase 5: Wait for cellar to takeover (from graceful offline)
+        log "Phase 5: Waiting for takeovers from graceful offline..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
         fi
         echo ""
 
-        # Phase 6: Recovery — workers come back online and re-register over Tor
+        # Phase 5b: Verify 302 redirects on taken-over addresses
+        verify_redirects "Phase 5b" 5
+        echo ""
+
+        # Phase 6: Graceful recovery — re-enable responders + POST /online
+        # Re-enable HTTP first (so healthchecks pass), then /online (instant reset)
+        log "Phase 6: Graceful recovery — re-enabling responders + sending /online..."
+        enable_workers "$fail_start" "$FAILING"
+        notify_online "$fail_start" "$FAILING"
+        echo ""
+
+        # Phase 6b: Wait for recovery from graceful offline
+        log "Phase 6b: Waiting for recovery from graceful offline..."
+        if ! wait_for_recovery "$TOTAL" 600; then
+            log "WARNING: Not all workers recovered from graceful offline"
+        fi
+        echo ""
+
+        # ── Crash simulation (existing behavior, renumbered) ──
+
+        # Phase 7: Crash simulation — disable responders only (no /offline)
+        log "Phase 7: Crash simulation — disabling responders for ${FAILING} workers (no /offline)..."
+        disable_workers "$fail_start" "$FAILING"
+        echo ""
+
+        # Phase 8: Wait for cellar to detect failures and takeover
+        log "Phase 8: Waiting for takeovers from crash simulation..."
+        if ! wait_for_takeover "$FAILING" 600; then
+            log "WARNING: Not all expected takeovers happened"
+        fi
+        echo ""
+
+        # Phase 8b: Verify 302 redirects again (after crash takeover)
+        verify_redirects "Phase 8b" 5
+        echo ""
+
+        # Phase 9: Recovery — workers come back online and re-register over Tor
         # (just like a real OnionPress instance restarting)
-        log "Phase 6: Workers coming back online — re-enabling + re-registering over Tor..."
+        log "Phase 9: Workers coming back online — re-enabling + re-registering over Tor..."
         enable_workers "$fail_start" "$FAILING"
         echo ""
 
@@ -800,8 +1009,8 @@ run_worker() {
         echo ""
     fi
 
-    # Final dashboard
-    log "=== Final metrics ==="
+    # Phase 10: Final dashboard + cleanup
+    log "=== Phase 10: Final metrics ==="
     print_dashboard
     echo ""
 
