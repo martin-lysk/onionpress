@@ -36,6 +36,24 @@ bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" "$_BUNDLED_PYTHON_BIN" "$@"
 # Ensure data directory exists
 mkdir -p "$DATA_DIR"
 
+# Per-user lock file to prevent the same user from launching multiple instances.
+# Different users have different $HOME so each gets their own lock file.
+PIDFILE="$DATA_DIR/onionpress.pid"
+if [ -f "$PIDFILE" ]; then
+    old_pid=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+        echo "OnionPress is already running (PID $old_pid)." >&2
+        # Try to show a macOS dialog so GUI users see the message
+        osascript -e 'display dialog "OnionPress is already running." buttons {"OK"} default button "OK" with icon caution with title "OnionPress"' 2>/dev/null || true
+        exit 1
+    fi
+    # Stale pid file — process no longer running
+    rm -f "$PIDFILE"
+fi
+echo $$ > "$PIDFILE"
+# Clean up lock file on exit (normal exit, SIGTERM, SIGINT, SIGHUP)
+trap 'rm -f "$PIDFILE"' EXIT INT TERM HUP
+
 # Detect architecture (use sysctl to get actual hardware, not process architecture)
 if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
     VM_ARCH="aarch64"
