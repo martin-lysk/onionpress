@@ -27,8 +27,11 @@ COLIMA_HOME="$DATA_DIR/colima"
 
 # Use the Python bundled inside the py2app MenubarApp so we never depend on
 # system Python (which may not exist — macOS does not ship a usable python3).
-BUNDLED_PYTHON="$RESOURCES_DIR/MenubarApp/Contents/MacOS/python"
-export PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
+# PYTHONHOME is set inline per-call (not exported) to avoid polluting the
+# environment for docker, docker compose, and other child processes.
+_BUNDLED_PYTHON_BIN="$RESOURCES_DIR/MenubarApp/Contents/MacOS/python"
+_BUNDLED_PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
+bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" "$_BUNDLED_PYTHON_BIN" "$@"; }
 
 # Ensure data directory exists
 mkdir -p "$DATA_DIR"
@@ -360,7 +363,7 @@ generate_vanity_address() {
 
     # Convert mkp224o C Tor format to Arti OpenSSH format
     if [ -f "$VANITY_DIR/hs_ed25519_secret_key" ] && [ -f "$VANITY_DIR/hs_ed25519_public_key" ]; then
-        "$BUNDLED_PYTHON" -c "
+        bundled_python -c "
 import base64, os, struct, sys
 
 secret_path = sys.argv[1]
@@ -454,7 +457,7 @@ HOW TO GET THE KEY FROM mkp224o OUTPUT:
   Each address has its own directory containing hs_ed25519_secret_key.
   Encode that file to base32:
 
-    $BUNDLED_PYTHON -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())"
+    PYTHONHOME=$_BUNDLED_PYTHONHOME $_BUNDLED_PYTHON_BIN -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())"
 
   If you ran mkp224o yourself, substitute the path to your output directory.
 
@@ -463,7 +466,7 @@ HOW TO GET THE KEY FROM mkp224o OUTPUT:
 
 EXAMPLE:
 
-  KEY=\$($BUNDLED_PYTHON -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())")
+  KEY=\$(PYTHONHOME=$_BUNDLED_PYTHONHOME $_BUNDLED_PYTHON_BIN -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())")
   ./onionpress import-key "\$KEY"
 
 WHAT THIS COMMAND DOES:
@@ -486,7 +489,7 @@ HELPEOF
     # Decode base32, validate length, derive public key and address — all in one call
     # The public key must be derived via ed25519 scalar multiplication (not a simple slice)
     local result
-    result=$("$BUNDLED_PYTHON" -c "
+    result=$(bundled_python -c "
 import base64, hashlib, sys, binascii
 
 key_b32 = sys.argv[1]
@@ -634,7 +637,7 @@ print(binascii.hexlify(pubkey).decode())
     mkdir -p "$output_dir"
 
     # Write OpenSSH PEM key file for Arti (same format as key_manager.build_openssh_key)
-    "$BUNDLED_PYTHON" -c "
+    bundled_python -c "
 import base64, binascii, os, struct, sys
 
 hex_key = sys.argv[1]
@@ -1358,7 +1361,7 @@ start_containers() {
     # Detect cellar mode BEFORE starting Tor so ONIONPRESS_CELLAR env var
     # is set when docker-compose creates the tor container (exposes port 8083)
     cd "$DOCKER_DIR"
-    detect_cellar_mode
+    detect_cellar_mode || true
 
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
@@ -1610,7 +1613,7 @@ main() {
             cd "$DOCKER_DIR"
             # Detect cellar mode BEFORE starting Tor so ONIONPRESS_CELLAR env var
             # is set when docker-compose creates the tor container (exposes port 8083)
-            detect_cellar_mode
+            detect_cellar_mode || true
             docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor container started"
             ;;
