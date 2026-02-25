@@ -3,7 +3,7 @@
  * Plugin Name: OnionPress Hit Counter
  * Plugin URI: https://github.com/brewsterkahle/onionpress
  * Description: Retro-style animated hit counter with persistent storage that survives reboots and upgrades
- * Version: 1.0.0
+ * Version: 1.1.1
  * Author: OnionPress
  * Author URI: https://github.com/brewsterkahle/onionpress
  * License: AGPL-3.0
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
 class OnionPress_Hit_Counter {
 
     private static $instance = null;
-    private $counter_file;
+    private $option_key = 'onionpress_hit_counter';
 
     public static function get_instance() {
         if (null === self::$instance) {
@@ -27,33 +27,29 @@ class OnionPress_Hit_Counter {
     }
 
     private function __construct() {
-        // Store counter in persistent location outside WordPress directory
-        // This location should be mounted as a Docker volume
-        $this->counter_file = '/var/lib/onionpress/hit-counter.txt';
-
-        // Ensure directory exists
-        $this->ensure_counter_directory();
+        // Migrate from old file-based storage if needed
+        $this->maybe_migrate_from_file();
 
         // Register hooks
         add_shortcode('hit_counter', array($this, 'render_counter'));
         add_action('wp_enqueue_scripts', array($this, 'enqueue_assets'));
         add_action('wp_ajax_increment_counter', array($this, 'ajax_increment_counter'));
         add_action('wp_ajax_nopriv_increment_counter', array($this, 'ajax_increment_counter'));
+        add_action('wp_ajax_get_counter', array($this, 'ajax_get_counter'));
+        add_action('wp_ajax_nopriv_get_counter', array($this, 'ajax_get_counter'));
     }
 
     /**
-     * Ensure the counter directory exists
+     * Migrate counter value from old file-based storage to wp_options
      */
-    private function ensure_counter_directory() {
-        $dir = dirname($this->counter_file);
-        if (!file_exists($dir)) {
-            @mkdir($dir, 0755, true);
-        }
-
-        // Initialize counter file if it doesn't exist
-        if (!file_exists($this->counter_file)) {
-            file_put_contents($this->counter_file, '0');
-            @chmod($this->counter_file, 0644);
+    private function maybe_migrate_from_file() {
+        $old_file = '/var/lib/onionpress/hit-counter.txt';
+        if (file_exists($old_file) && get_option($this->option_key) === false) {
+            $count = (int) @file_get_contents($old_file);
+            if ($count > 0) {
+                update_option($this->option_key, $count, 'no');
+            }
+            @unlink($old_file);
         }
     }
 
@@ -61,24 +57,15 @@ class OnionPress_Hit_Counter {
      * Get current counter value
      */
     private function get_counter() {
-        if (!file_exists($this->counter_file)) {
-            return 0;
-        }
-
-        $count = @file_get_contents($this->counter_file);
-        return (int) $count;
+        return (int) get_option($this->option_key, 0);
     }
 
     /**
      * Increment counter and return new value
      */
     private function increment_counter() {
-        $count = $this->get_counter();
-        $count++;
-
-        // Write new count
-        file_put_contents($this->counter_file, $count);
-
+        $count = $this->get_counter() + 1;
+        update_option($this->option_key, $count, 'no');
         return $count;
     }
 
@@ -91,6 +78,18 @@ class OnionPress_Hit_Counter {
         wp_send_json_success(array(
             'count' => $new_count,
             'formatted' => $this->format_counter($new_count)
+        ));
+    }
+
+    /**
+     * AJAX handler to get current counter
+     */
+    public function ajax_get_counter() {
+        $count = $this->get_counter();
+
+        wp_send_json_success(array(
+            'count' => $count,
+            'formatted' => $this->format_counter($count)
         ));
     }
 
@@ -152,14 +151,14 @@ class OnionPress_Hit_Counter {
             'onionpress-hit-counter',
             plugins_url('assets/hit-counter.css', __FILE__),
             array(),
-            '1.0.0'
+            '1.1.1'
         );
 
         wp_enqueue_script(
             'onionpress-hit-counter',
             plugins_url('assets/hit-counter.js', __FILE__),
             array('jquery'),
-            '1.0.0',
+            '1.1.1',
             true
         );
 

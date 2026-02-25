@@ -1,0 +1,457 @@
+<!-- wp:html -->
+<style>
+/* OnionPress Product Page Styles */
+.op-page * { margin: 0; padding: 0; box-sizing: border-box; }
+.op-page {
+    --onion-purple: #B896D6;
+    --onion-dark-purple: #7B5FA3;
+    --onion-orange: #FFA500;
+    --onion-cream: #E8D9C5;
+    --onion-pink: #FFB3D9;
+    --rainbow-start: #FF69B4;
+    --rainbow-end: #00CED1;
+    --retro-black: #000000;
+    --retro-white: #FFFFFF;
+    --netscape-gray: #C0C0C0;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--retro-black);
+    background-color: var(--netscape-gray);
+    max-width: 100vw;
+    margin: -30px -30px 0 -30px;
+    padding: 0;
+}
+.op-page a { color: var(--onion-dark-purple); }
+.op-header {
+    background: linear-gradient(135deg, var(--onion-purple) 0%, var(--onion-dark-purple) 100%);
+    color: var(--retro-white);
+    border-bottom: 5px solid var(--retro-black);
+    padding: 30px 20px;
+    text-align: center;
+    box-shadow: 0 5px 0 var(--onion-pink);
+}
+.op-header-inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    margin-bottom: 15px;
+}
+.op-header img.construction { width: 77px; height: 107px; image-rendering: pixelated; }
+.op-header img.logo { max-width: 280px; width: 100%; height: auto; filter: drop-shadow(5px 5px 0px rgba(0,0,0,0.3)); }
+.op-tagline {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 16px;
+    color: var(--retro-white);
+    text-shadow: 2px 2px 0px var(--retro-black);
+    font-weight: bold;
+}
+.op-container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.op-hero {
+    background: linear-gradient(135deg, var(--rainbow-start) 0%, var(--onion-purple) 50%, var(--rainbow-end) 100%);
+    color: var(--retro-white);
+    border: 5px solid var(--retro-black);
+    padding: 60px 40px;
+    text-align: center;
+    margin: 30px 0;
+    box-shadow: 10px 10px 0px rgba(0,0,0,0.3);
+    position: relative;
+}
+.op-hero::after {
+    content: '';
+    position: absolute;
+    bottom: -8px;
+    left: 20%;
+    width: 60%;
+    margin-left: auto;
+    margin-right: auto;
+    height: 8px;
+    background: linear-gradient(90deg, #FF69B4 0%, #FFB3D9 20%, #FFA500 40%, #FFD700 60%, #90EE90 80%, #00CED1 100%);
+    border-radius: 4px;
+}
+.op-hero-subtitle {
+    font-size: 20px;
+    font-weight: bold;
+    margin: 20px auto;
+    text-shadow: 2px 2px 0px var(--retro-black);
+    max-width: 700px;
+    line-height: 1.5;
+}
+.op-button {
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 16px;
+    background: var(--onion-orange);
+    color: var(--retro-white) !important;
+    border: 3px solid var(--retro-black);
+    padding: 15px 30px;
+    text-transform: uppercase;
+    cursor: pointer;
+    box-shadow: 5px 5px 0px var(--retro-black);
+    text-decoration: none !important;
+    display: inline-block;
+    margin: 10px;
+    -webkit-text-stroke: 1px var(--retro-black);
+}
+.op-button:hover {
+    background: var(--onion-pink);
+    box-shadow: 3px 3px 0px var(--retro-black);
+}
+.op-button-secondary {
+    background: var(--onion-purple);
+}
+.op-button-secondary:hover { background: var(--onion-dark-purple); }
+.op-pillar { margin: 50px 0; }
+.op-pillar h2 {
+    font-family: Impact, 'Arial Black', sans-serif;
+    font-size: 32px;
+    color: var(--onion-dark-purple);
+    border-left: 8px solid var(--onion-orange);
+    padding-left: 20px;
+    margin: 40px 0 20px 0;
+    text-transform: uppercase;
+}
+.op-pillar h2 img { width: 32px; height: 32px; vertical-align: middle; margin-right: 12px; }
+.op-pillar-desc {
+    font-size: 18px;
+    margin: 10px 0 20px 28px;
+    line-height: 1.6;
+    color: #333;
+}
+.op-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+    margin: 20px 0 40px 0;
+}
+.op-feature {
+    border: 3px solid var(--retro-black);
+    padding: 30px 20px;
+    background: var(--retro-white);
+    text-align: center;
+    box-shadow: 5px 5px 0px rgba(0,0,0,0.2);
+}
+.op-feature h3 {
+    font-family: Impact, 'Arial Black', sans-serif;
+    color: var(--onion-dark-purple);
+    font-size: 20px;
+    margin-bottom: 15px;
+    text-transform: uppercase;
+}
+.op-feature .icon { font-size: 48px; margin-bottom: 15px; }
+.op-steps {
+    border: 3px solid var(--retro-black);
+    padding: 30px;
+    margin: 40px 0;
+    background: #FFFFE0;
+}
+.op-steps h2 { border: none; margin-top: 0; }
+.op-steps ol { font-size: 18px; line-height: 2; padding-left: 20px; }
+.op-steps small { font-size: 14px; }
+.op-footer {
+    background: var(--retro-black);
+    color: var(--onion-cream);
+    border-top: 5px solid var(--onion-purple);
+    padding: 40px 20px;
+    text-align: center;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 14px;
+    margin-top: 60px;
+}
+.op-footer a { color: var(--onion-orange) !important; text-decoration: underline; }
+.op-footer a:hover { color: var(--onion-pink) !important; }
+.op-footer-brand { font-size: 18px; color: var(--onion-purple); font-weight: bold; margin-bottom: 15px; }
+
+/* Hit Counter */
+.op-hit-counter { text-align: center; margin: 60px 0; }
+.hit-counter-display {
+    display: inline-flex;
+    gap: 2px;
+    background: #000;
+    padding: 15px 20px;
+    border: 3px solid var(--onion-purple);
+    border-radius: 8px;
+    box-shadow: inset 0 0 20px rgba(0,0,0,0.5), 0 5px 15px rgba(0,0,0,0.3);
+    margin-bottom: 10px;
+}
+.counter-digit {
+    display: inline-block;
+    width: 40px;
+    height: 60px;
+    background: linear-gradient(180deg, #1a1a1a 0%, #0a0a0a 100%);
+    border: 2px solid #444;
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+    box-shadow: inset 0 2px 4px rgba(255,255,255,0.1), inset 0 -2px 4px rgba(0,0,0,0.5);
+}
+.digit-inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    font-size: 36px;
+    font-weight: bold;
+    color: var(--onion-pink);
+    text-shadow: 0 0 10px var(--onion-pink), 0 0 20px var(--onion-pink);
+    font-family: 'Courier New', Courier, monospace;
+}
+.digit-inner:empty { opacity: 0; }
+.hit-counter-label { margin-top: 8px; font-size: 14px; color: #666; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+
+.op-spinning-heart {
+    display: inline-block;
+    animation: heart-spin 3s linear infinite;
+}
+@keyframes heart-spin {
+    from { transform: rotateY(0deg); }
+    to { transform: rotateY(360deg); }
+}
+
+@media (max-width: 768px) {
+    .op-hero-subtitle { font-size: 16px; }
+    .op-header img.logo { max-width: 180px; }
+    .op-header img.construction { width: 50px; height: 70px; }
+    .op-header-inner { flex-direction: column; gap: 10px; }
+    .op-grid { grid-template-columns: 1fr; }
+    .op-button { font-size: 14px; padding: 12px 20px; }
+    .op-pillar h2 { font-size: 24px; }
+}
+</style>
+
+<div class="op-page">
+
+<header class="op-header">
+    <div class="op-header-inner">
+        <img class="construction" src="/wp-content/uploads/2026/02/construction.gif" alt="Under Construction">
+        <picture>
+            <source srcset="/wp-content/uploads/2026/02/logo.webp" type="image/webp">
+            <img class="logo" src="/wp-content/uploads/2026/02/logo.png" alt="OnionPress">
+        </picture>
+        <img class="construction" src="/wp-content/uploads/2026/02/construction.gif" alt="Under Construction">
+    </div>
+    <div class="op-tagline">Your Decentralized Web Server</div>
+</header>
+
+<div class="op-container">
+
+    <div class="op-hero">
+        <div class="op-hero-subtitle">
+            OnionPress turns your Mac into a web server with its own permanent address on the open Tor network. No hosting company. No monthly bill. No one can take it down but you.
+        </div>
+        <a href="https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg" class="op-button"><span class="op-spinning-heart">&#x1F49C;</span> &#x1F4BE; Download to Mac Now &#x1F4BE; <span class="op-spinning-heart">&#x1F49C;</span></a>
+        <a href="https://addons.mozilla.org/addon/onionpress/" class="op-button op-button-secondary" style="font-size: 13px; padding: 10px 20px;">&#x1F98A; Firefox Extension</a>
+        <div style="margin-top: 30px; font-size: 18px; font-weight: bold;">
+            Your Site is viewable by anyone with a Tor or Brave Browser
+        </div>
+    </div>
+
+    <div class="op-pillar">
+        <h2>
+            <img src="/wp-content/uploads/2026/02/icon-face-transparent.png" alt="">
+            Robust
+        </h2>
+        <div class="op-pillar-desc">Always up, because it is backed up and served on the Internet Archive's Wayback Machine by default, and a friend can run a mirror to make it available when your machine is not up.</div>
+        <div class="op-grid">
+            <div class="op-feature">
+                <div class="icon">&#x1F3E0;</div>
+                <h3>Runs on Your Mac</h3>
+                <p>Your laptop is your web server. No cloud, no hosting company, no middleman. Open the lid and you're live.</p>
+            </div>
+            <div class="op-feature">
+                <div class="icon"><img src="/wp-content/uploads/2026/02/wayback-logo.png" alt="Wayback Machine" style="height: 48px;"></div>
+                <h3>Archived and Replayed</h3>
+                <p>Your posts are archived in the Internet Archive's Wayback Machine, and when you are not online, your readers get the archived version!</p>
+            </div>
+            <div class="op-feature">
+                <div class="icon">&#x1F310;</div>
+                <h3>Works Anywhere</h3>
+                <p>Tor punches through firewalls and NATs. Home network, coffee shop, campus Wi-Fi -- it just works.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="op-pillar">
+        <h2>
+            <img src="/wp-content/uploads/2026/02/icon-face-transparent.png" alt="">
+            Private but Social
+        </h2>
+        <div class="op-pillar-desc">You control what you publish. Connect with Readers.</div>
+        <div class="op-grid">
+            <div class="op-feature">
+                <div class="icon">&#x1F6E1;&#xFE0F;</div>
+                <h3>Private by Default</h3>
+                <p>No analytics, no tracking, no ads. Your readers aren't the product.</p>
+            </div>
+            <div class="op-feature">
+                <div class="icon">&#x1F4AC;</div>
+                <h3>Connect with Readers</h3>
+                <p>Follow the posts of your readers. Build a community around your site on your own terms.</p>
+            </div>
+            <div class="op-feature">
+                <div class="icon">&#x1F193;</div>
+                <h3>Free as in Freedom</h3>
+                <p>Free and Open Source AGPL 3. No fees, no subscriptions, no strings attached.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="op-pillar">
+        <h2>
+            <img src="/wp-content/uploads/2026/02/icon-face-transparent.png" alt="">
+            Fun
+        </h2>
+        <div class="op-pillar-desc">Customizable WordPress with built-in retro features.</div>
+        <div class="op-grid">
+            <div class="op-feature">
+                <div class="icon">&#x26A1;</div>
+                <h3>Five-Minute Setup</h3>
+                <p>Download, install, launch. Your site is live before your coffee gets cold.</p>
+            </div>
+            <div class="op-feature">
+                <div class="icon">&#x1F3A8;</div>
+                <h3>Full WordPress</h3>
+                <p>Familiar interface. Any theme, any plugin. Total creative freedom.</p>
+            </div>
+            <div class="op-feature">
+                <div class="icon">&#x1F4BE;</div>
+                <h3>Your Own Corner of the Web</h3>
+                <p>Like GeoCities, but it's really yours. Make it weird. Make it wonderful. Make it you.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hit Counter -->
+    <div class="op-hit-counter">
+        <div class="hit-counter-display">
+            <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+            <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+            <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+            <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+            <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+            <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+        </div>
+        <div class="hit-counter-label">
+            <span style="font-size: 18px;">&#x1F441;&#xFE0F;</span>
+            <span>VISITORS</span>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var ajaxURL = '/wp-admin/admin-ajax.php';
+        var hasIncremented = false;
+        var currentCount = 0;
+        var pollingInterval = null;
+        function updateDisplay(formattedCount, animate) {
+            var digits = formattedCount.split('');
+            var digitElements = document.querySelectorAll('.counter-digit');
+            digitElements.forEach(function(elem, index) {
+                var currentDigit = elem.getAttribute('data-digit');
+                var newDigit = digits[index];
+                if (currentDigit !== newDigit) {
+                    var inner = elem.querySelector('.digit-inner');
+                    var shouldAnimate = animate && currentDigit !== '';
+                    if (shouldAnimate) {
+                        elem.classList.add('spinning');
+                        setTimeout(function() {
+                            inner.textContent = newDigit;
+                            elem.setAttribute('data-digit', newDigit);
+                            elem.classList.remove('spinning');
+                        }, 300);
+                    } else {
+                        inner.textContent = newDigit;
+                        elem.setAttribute('data-digit', newDigit);
+                    }
+                }
+            });
+        }
+        function ajaxPost(action) {
+            return fetch(ajaxURL, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'action=' + action
+            }).then(function(r) { return r.json(); });
+        }
+        function initializeCounter() {
+            ajaxPost('get_counter')
+            .then(function(data) {
+                if (data.success) {
+                    updateDisplay(data.data.formatted, false);
+                    currentCount = data.data.count;
+                    setTimeout(incrementCounter, 100);
+                }
+            })
+            .catch(function() { incrementCounter(); });
+        }
+        function incrementCounter() {
+            if (hasIncremented) return;
+            ajaxPost('increment_counter')
+            .then(function(data) {
+                if (data.success) {
+                    updateDisplay(data.data.formatted, true);
+                    currentCount = data.data.count;
+                    hasIncremented = true;
+                    startPolling();
+                }
+            })
+            .catch(function() {});
+        }
+        function checkForUpdates() {
+            ajaxPost('get_counter')
+            .then(function(data) {
+                if (data.success && data.data.count > currentCount) {
+                    updateDisplay(data.data.formatted, true);
+                    currentCount = data.data.count;
+                }
+            })
+            .catch(function() {});
+        }
+        function startPolling() {
+            if (!pollingInterval) {
+                pollingInterval = setInterval(checkForUpdates, 2000);
+            }
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initializeCounter);
+        } else {
+            initializeCounter();
+        }
+    })();
+    </script>
+
+    <div class="op-steps">
+        <h2>
+            <img src="/wp-content/uploads/2026/02/icon-face-transparent.png" alt="" style="width:20px;height:20px;vertical-align:middle;margin-right:8px;">
+            Get Started in 3 Steps
+        </h2>
+        <ol>
+            <li><strong>Download</strong> the OnionPress app (82 MB)</li>
+            <li><strong>Install</strong> and launch from your Applications folder<br>
+                <small>(Work through the <a href="https://github.com/brewsterkahle/onionpress#requirements" style="color: var(--onion-dark-purple);">security prompts</a> - we'll guide you step-by-step)</small>
+            </li>
+            <li><strong>Create</strong> your first post and share your OnionPress address!</li>
+        </ol>
+        <div style="text-align: center; margin-top: 30px;">
+            <a href="https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg" class="op-button"><span class="op-spinning-heart">&#x1F49C;</span> &#x1F4BE; Download to Mac Now &#x1F4BE; <span class="op-spinning-heart">&#x1F49C;</span></a>
+        </div>
+    </div>
+
+</div>
+
+<footer class="op-footer">
+    <div class="op-footer-brand">Your Decentralized Web Server</div>
+    <div style="margin-bottom: 15px;">Free and Open Source (AGPL 3)</div>
+    <div style="margin-bottom: 15px;">
+        <a href="https://github.com/brewsterkahle/onionpress#readme">How it Works</a> |
+        <a href="http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/">Locking the Web Open</a> |
+        <a href="https://donate.torproject.org/">Donate</a>
+    </div>
+    <div style="margin-top: 15px; font-size: 12px;">
+        <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>
+    </div>
+</footer>
+
+</div>
+<!-- /wp:html -->

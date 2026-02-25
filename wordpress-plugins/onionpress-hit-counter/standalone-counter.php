@@ -2,7 +2,7 @@
 /**
  * Standalone Hit Counter API Endpoint
  *
- * This file can be called directly without WordPress for use in static pages
+ * Bootstraps WordPress to use wp_options for persistent counter storage.
  * Place in wp-content/plugins/onionpress-hit-counter/
  *
  * Usage:
@@ -10,39 +10,30 @@
  * POST /wp-content/plugins/onionpress-hit-counter/standalone-counter.php?action=increment
  */
 
-// Counter storage file
-$counter_file = '/var/lib/onionpress/hit-counter.txt';
-
-// Ensure directory exists
-$dir = dirname($counter_file);
-if (!file_exists($dir)) {
-    @mkdir($dir, 0755, true);
+// Bootstrap WordPress
+$wp_load = dirname(dirname(dirname(dirname(__FILE__)))) . '/wp-load.php';
+if (!file_exists($wp_load)) {
+    header('Content-Type: application/json');
+    echo json_encode(array('success' => false, 'error' => 'WordPress not found'));
+    exit;
 }
+require_once $wp_load;
 
-// Initialize counter if doesn't exist
-if (!file_exists($counter_file)) {
-    file_put_contents($counter_file, '0');
-    @chmod($counter_file, 0644);
-}
+$option_key = 'onionpress_hit_counter';
 
 /**
  * Get current counter value
  */
-function get_counter($file) {
-    if (!file_exists($file)) {
-        return 0;
-    }
-    $count = @file_get_contents($file);
-    return (int) $count;
+function get_counter($option_key) {
+    return (int) get_option($option_key, 0);
 }
 
 /**
  * Increment counter
  */
-function increment_counter($file) {
-    $count = get_counter($file);
-    $count++;
-    file_put_contents($file, $count);
+function increment_counter($option_key) {
+    $count = get_counter($option_key) + 1;
+    update_option($option_key, $count, 'no');
     return $count;
 }
 
@@ -59,14 +50,14 @@ header('Content-Type: application/json');
 $action = isset($_GET['action']) ? $_GET['action'] : (isset($_POST['action']) ? $_POST['action'] : 'get');
 
 if ($action === 'increment') {
-    $new_count = increment_counter($counter_file);
+    $new_count = increment_counter($option_key);
     echo json_encode(array(
         'success' => true,
         'count' => $new_count,
         'formatted' => format_counter($new_count)
     ));
 } else {
-    $count = get_counter($counter_file);
+    $count = get_counter($option_key);
     echo json_encode(array(
         'success' => true,
         'count' => $count,
