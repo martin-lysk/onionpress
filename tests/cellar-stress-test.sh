@@ -691,7 +691,7 @@ cleanup_stress_test() {
     # Also catch any extras
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
         docker_cmd rm -f "$ctr" 2>/dev/null || true
-    done
+    done || true
     log "  Removed worker containers"
 
     # Get stress-test addresses before unregistering
@@ -843,7 +843,7 @@ run_cleanup() {
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
         docker_cmd rm -f "$ctr" 2>/dev/null || true
         log "Removed container: $ctr"
-    done
+    done || true
 
     # Also remove old-style container
     docker_cmd rm -f stress-worker-tor 2>/dev/null || true

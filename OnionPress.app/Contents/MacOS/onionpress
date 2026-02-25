@@ -1347,6 +1347,11 @@ start_containers() {
         wp_check=$((wp_check + 1))
     done
 
+    # Detect cellar mode BEFORE starting Tor so ONIONPRESS_CELLAR env var
+    # is set when docker-compose creates the tor container (exposes port 8083)
+    cd "$DOCKER_DIR"
+    detect_cellar_mode
+
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
         docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
@@ -1369,9 +1374,8 @@ start_containers() {
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
 
-    # Detect cellar mode and install cellar plugin if applicable
+    # Install cellar plugin if applicable
     cd "$DOCKER_DIR"
-    detect_cellar_mode
     install_cellar_plugin
 
     # Conditionally start Cloudflare Tunnel
@@ -1596,10 +1600,11 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
+            # Detect cellar mode BEFORE starting Tor so ONIONPRESS_CELLAR env var
+            # is set when docker-compose creates the tor container (exposes port 8083)
+            detect_cellar_mode
             docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor container started"
-            # Detect cellar mode and start onioncellar if applicable
-            detect_cellar_mode
             ;;
 
         import-key)
