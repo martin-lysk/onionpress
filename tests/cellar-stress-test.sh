@@ -815,14 +815,23 @@ verify_redirects() {
         [ -z "$addr" ] && continue
         sampled=$((sampled + 1))
 
-        # Make HTTP request over Tor via onioncellar's SOCKS proxy
-        # Use -I for HEAD request (faster), -L to not follow redirects
-        local http_response
-        http_response=$(docker_cmd exec onioncellar \
-            curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
-            --socks5-hostname 127.0.0.1:9050 \
-            --max-time 60 \
-            "http://${addr}" 2>/dev/null) || http_response="000"
+        # Make HTTP request over Tor via onioncellar's SOCKS proxy.
+        # This simulates a real external Tor user visiting the taken-over address.
+        # Retry up to 3 times with 30s gaps — descriptor propagation through
+        # Tor's DHT can take longer than the initial 60s wait.
+        local http_response="000"
+        local attempt
+        for attempt in 1 2 3; do
+            http_response=$(docker_cmd exec onioncellar \
+                curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
+                --socks5-hostname 127.0.0.1:9050 \
+                --max-time 60 \
+                "http://${addr}" 2>/dev/null) || http_response="000"
+            local code
+            code=$(echo "$http_response" | awk '{print $1}')
+            [ "$code" != "000" ] && break
+            [ "$attempt" -lt 3 ] && { log "  Retry ${attempt}/3 for ${addr} (descriptor not yet available)..."; sleep 30; }
+        done
 
         local http_code redirect_url
         http_code=$(echo "$http_response" | awk '{print $1}')
@@ -830,7 +839,7 @@ verify_redirects() {
 
         if [ "$http_code" = "302" ]; then
             # Check that redirect points to Wayback Machine
-            if echo "$redirect_url" | grep -qi 'web.archive.org\|wayback\|archiveiya74codqgiixo3q.onion'; then
+            if echo "$redirect_url" | grep -qi 'web.archive.org\|archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion'; then
                 log "  PASS: ${addr} → 302 → ${redirect_url}"
                 passed=$((passed + 1))
             else
