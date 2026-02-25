@@ -359,6 +359,22 @@ echo "  Version verified: $BUILT_VERSION"
 
 cd "$PROJECT_DIR"
 echo "Standalone MenubarApp built successfully"
+
+# Ad-hoc sign the entire app bundle (inside-out)
+# This ensures macOS treats the app consistently across multiple users.
+echo "Signing application bundle..."
+# Sign all .so extension modules in MenubarApp
+find "$MENUBAR_APP_DIR/Contents/Resources/lib" -name "*.so" -exec codesign -f -s - {} \; 2>/dev/null
+# Sign dylibs and frameworks
+find "$MENUBAR_APP_DIR/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "Python" \) -exec codesign -f -s - {} \; 2>/dev/null
+codesign -f -s - "$MENUBAR_APP_DIR/Contents/Frameworks/Python.framework" 2>/dev/null || true
+# Sign MenubarApp executables and bundle
+codesign -f -s - "$MENUBAR_APP_DIR/Contents/MacOS/python" 2>/dev/null || true
+codesign -f -s - "$MENUBAR_APP_DIR" 2>/dev/null || true
+# Sign the outer OnionPress.app bundle
+codesign -f -s - --deep "$APP_PATH" 2>/dev/null || true
+echo "Application bundle signed"
+
 # Clean up old builds
 echo "Cleaning up old builds..."
 rm -f "$DMG_PATH"
