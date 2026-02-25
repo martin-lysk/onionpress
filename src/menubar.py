@@ -844,6 +844,33 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             print(f"Error writing to log: {e}")
 
+    def _caffeinate_pid_file(self):
+        """Path to the file tracking our caffeinate PID."""
+        return os.path.join(self.app_support, "caffeinate.pid")
+
+    def _cleanup_stale_caffeinate(self):
+        """Kill any orphaned caffeinate process from a previous OnionPress run."""
+        pid_file = self._caffeinate_pid_file()
+        if not os.path.exists(pid_file):
+            return
+        try:
+            with open(pid_file) as f:
+                old_pid = int(f.read().strip())
+            # Verify it's actually a caffeinate process before killing
+            result = subprocess.run(
+                ["ps", "-p", str(old_pid), "-o", "comm="],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and "caffeinate" in result.stdout:
+                os.kill(old_pid, 15)  # SIGTERM
+                self.log(f"Cleaned up orphaned caffeinate (PID {old_pid}) from previous run")
+            os.remove(pid_file)
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            try:
+                os.remove(pid_file)
+            except OSError:
+                pass
+
     def start_caffeinate(self):
         """Start caffeinate to prevent Mac from sleeping while service runs"""
         # Check if already running
@@ -854,6 +881,9 @@ class OnionPressApp(rumps.App):
                     return  # Already running
             except Exception:
                 pass
+
+        # Clean up any orphaned caffeinate from a previous crash/force-quit
+        self._cleanup_stale_caffeinate()
 
         # Check config setting
         prevent_sleep = self.read_config_value("PREVENT_SLEEP", "yes").lower()
@@ -875,6 +905,12 @@ class OnionPressApp(rumps.App):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
+            # Write PID file so we can clean up if we crash
+            try:
+                with open(self._caffeinate_pid_file(), 'w') as f:
+                    f.write(str(self.caffeinate_process.pid))
+            except OSError:
+                pass
             self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - {caff_msg}")
         except Exception as e:
             self.log(f"Failed to start caffeinate: {e}")
@@ -895,6 +931,11 @@ class OnionPressApp(rumps.App):
                     pass
             finally:
                 self.caffeinate_process = None
+                # Remove PID file
+                try:
+                    os.remove(self._caffeinate_pid_file())
+                except OSError:
+                    pass
 
     def start_onion_proxy(self):
         """Start the local .onion proxy server in a background thread."""
