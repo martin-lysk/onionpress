@@ -547,12 +547,14 @@ enable_workers() {
         # This triggers immediate release of the taken-over address.
         docker_cmd exec -d "$ctr_name" \
             python3 -c "
-import json, subprocess, sys
+import json, subprocess, sys, time
 with open('/worker-info.json') as f:
     workers = json.load(f)
 w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
 if not w or not w.get('content_address'):
     sys.exit(0)
+# Stagger to avoid overwhelming Tor circuit builder (2s per worker)
+time.sleep(${local_idx} * 2)
 # Re-read PEM from keystore
 import base64
 nick = 'w${ctr_idx}_${local_idx}_content'
@@ -605,9 +607,8 @@ print(f'Re-registered {w[\"content_address\"]}')
 " 2>/dev/null &
     done
 
-    # Wait briefly for the background re-registrations to start
-    wait
-    log "Re-enabled and re-registering ${count} workers over Tor"
+    # Don't wait for re-registrations — they stagger themselves inside the container
+    log "Re-enabled ${count} workers, re-registrations staggering over Tor (2s apart)"
 }
 
 wait_for_takeover() {
