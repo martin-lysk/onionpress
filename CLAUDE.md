@@ -25,8 +25,16 @@
 
 ## Build & Release Process
 - MenubarApp built with py2app via `setup.py` (extracted from `build/build-dmg-simple.sh` lines 228-276)
-- Must copy `key_manager.py` and `bip39_words.py` to venv site-packages before build
-- After editing `src/menubar.py`, rebuild binary and replace `OnionPress.app/Contents/Resources/MenubarApp/`
+- Must copy `key_manager.py`, `backup_manager.py`, and `setup_window.py` to venv site-packages before build
+- **After editing ANY of these `src/` files, you MUST rebuild the MenubarApp** and replace `OnionPress.app/Contents/Resources/MenubarApp/`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app:
+  - `src/menubar.py` — main app (entry point)
+  - `src/onion_proxy.py` — HTTP proxy, setup form, Wayback Machine login
+  - `src/key_manager.py` — vanity key management
+  - `src/backup_manager.py` — backup/restore
+  - `src/setup_window.py` — native setup window
+  - `src/cellar.py` — OnionCellar integration
+  - `src/install_native_messaging.py` — browser extension support
+  - `setup.py` — py2app config (if you add a new local module, add it to `includes` AND the build script's `cp` lines)
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
 - Version must be bumped in **all 5 locations** (Finder shows the MenubarApp plist version in Get Info):
   1. `src/menubar.py` — `self.version = "X.Y.Z"` (~line 529)
