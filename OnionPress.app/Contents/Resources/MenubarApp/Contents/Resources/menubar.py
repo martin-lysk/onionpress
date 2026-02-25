@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.0"
+        self.version = "2.4.1"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1776,6 +1776,10 @@ class OnionPressApp(rumps.App):
                     if cellar.is_cellar_instance(self.onion_address):
                         self.is_cellar = True
                         self.log("OnionCellar mode activated (poller runs in onioncellar container)")
+                        # Restart caffeinate with -i (idle sleep prevention)
+                        # since it was started with -s before cellar was detected
+                        self.stop_caffeinate()
+                        self.start_caffeinate()
                         self.update_menu()
                     elif not self._cellar_registration_started:
                         # First time — full registration with keys
@@ -4046,7 +4050,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.0 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.1 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
