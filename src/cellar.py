@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 
 # The cellar's .onion address — placeholder until a real address is generated
-CELLAR_ADDRESS = "ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+CELLAR_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
 
 # Registration API port (served by cellar-server.py in the onioncellar container)
 CELLAR_API_PORT = 8083

@@ -99,7 +99,7 @@ fi
 export ONIONPRESS_CELLAR="0"
 
 detect_cellar_mode() {
-    local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+    local cellar_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
     local our_address=""
     # Check vanity-keys directory first (works even before containers start)
     if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
@@ -867,7 +867,7 @@ install_docker() {
     fi
 
     # Pre-check: if cellar key is imported, ensure at least 5GB (preserve higher values)
-    local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+    local cellar_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
     if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
         log "Cellar key detected — starting VM with 5GB (was ${VM_MEMORY}GB)"
         VM_MEMORY=5
@@ -1507,7 +1507,7 @@ main() {
     case "${1:-start}" in
         start)
             # Pre-check: if cellar key is imported, ensure VM has at least 5GB (preserve higher values)
-            local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+            local cellar_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
             if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ]; then
                 local current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
                 if [ -z "$current_mem" ] || [ "$current_mem" -lt 5 ] 2>/dev/null; then

@@ -163,7 +163,7 @@ preflight() {
 }
 
 # ── Auto-detect cellar address ────────────────────────────────────────────────
-KNOWN_CELLAR_ADDR="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+KNOWN_CELLAR_ADDR="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
 
 detect_cellar_addr() {
     if [ -n "$CELLAR_ADDR" ]; then

@@ -3701,7 +3701,7 @@ class OnionPressApp(rumps.App):
                 notes = [f"Onion address: {restored_addr}"]
 
                 # Check if cellar mode was restored
-                cellar_addr = "ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
+                cellar_addr = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
                 if restored_addr == cellar_addr:
                     cur_mem = self._read_config_value("VM_MEMORY", "1")
                     try:
