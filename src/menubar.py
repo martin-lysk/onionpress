@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.10"
+        self.version = "2.4.11"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -586,9 +586,13 @@ class OnionPressApp(rumps.App):
         self.wp_port = 8080 + port_offset
         self.socks_port = 9050 + port_offset
         self.proxy_port = 9077 + port_offset
+        os.environ["ONIONPRESS_PORT_OFFSET"] = str(port_offset)
         os.environ["ONIONPRESS_WP_PORT"] = str(self.wp_port)
         os.environ["ONIONPRESS_SOCKS_PORT"] = str(self.socks_port)
         os.environ["ONIONPRESS_PROXY_PORT"] = str(self.proxy_port)
+        # Update onion_proxy module globals (already imported with defaults)
+        onion_proxy.PROXY_PORT = self.proxy_port
+        onion_proxy.PHP_PROXY_PORT = self.wp_port
 
         # Do slow I/O operations in background after icon appears
         def background_init():
@@ -980,7 +984,7 @@ class OnionPressApp(rumps.App):
         def run_proxy():
             try:
                 server = onion_proxy.ThreadingHTTPServer(
-                    ("127.0.0.1", onion_proxy.PROXY_PORT),
+                    ("127.0.0.1", self.proxy_port),
                     onion_proxy.OnionProxyHandler
                 )
                 server.docker_bin = docker_bin
@@ -992,7 +996,7 @@ class OnionPressApp(rumps.App):
                 server.log_func = self.log
                 server.launcher_script = self.launcher_script
                 self.proxy_server = server
-                self.log(f"Onion proxy listening on http://127.0.0.1:{onion_proxy.PROXY_PORT}")
+                self.log(f"Onion proxy listening on http://127.0.0.1:{self.proxy_port}")
                 server.serve_forever()
             except Exception as e:
                 self.log(f"Onion proxy failed to start: {e}")
@@ -1336,9 +1340,8 @@ class OnionPressApp(rumps.App):
                     lambda: rumps.alert(
                         title="OnionPress Cannot Start",
                         message=f"Port(s) {ports_str} already in use.\n\n"
-                                "Another instance of OnionPress may be running, "
-                                "possibly under a different user account.\n\n"
-                                "Only one OnionPress can run at a time on this Mac."
+                                "Another process is using these ports.\n\n"
+                                "Close the conflicting application and try again."
                     )
                 )
                 self.menu["Starting..."].title = "Status: Port conflict"
@@ -4167,7 +4170,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.10 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.11 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
