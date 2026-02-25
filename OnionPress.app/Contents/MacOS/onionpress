@@ -78,6 +78,7 @@ fi
 
 # Prefer bundled binaries
 export PATH="$BIN_DIR:$PATH"
+export PYTHONDONTWRITEBYTECODE=1
 export COLIMA_HOME="$COLIMA_HOME"
 export LIMA_HOME="$COLIMA_HOME/_lima"
 export LIMA_INSTANCE="onionpress"

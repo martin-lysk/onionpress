@@ -180,6 +180,7 @@ fi
 
 # Launch menubar app immediately so icon appears fast (gray = starting)
 log "Launching menu bar application..."
+export PYTHONDONTWRITEBYTECODE=1
 arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/OnionPress" >> "$LOG_FILE" 2>&1 &
 MENUBAR_PID=$!
 log "Menu bar app launched (PID: $MENUBAR_PID)"
