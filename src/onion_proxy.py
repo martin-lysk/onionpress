@@ -124,12 +124,8 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
             <p class="description">Save this password somewhere safe.</p>
           </td>
         </tr>
-        <tr>
-          <th><label for="admin_email">Your Email</label></th>
-          <td>
-            <input type="email" name="admin_email" id="admin_email" value="admin@example.com" />
-            <p class="description">Used for admin notifications only.</p>
-          </td>
+        <tr style="display:none;">
+          <td><input type="hidden" name="admin_email" id="admin_email" value="admin@onionpress.local" /></td>
         </tr>
         <tr>
           <th>Site Type</th>
@@ -142,7 +138,8 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
         </tr>
         <tr>
           <td colspan="2" style="padding-top:16px; border-top:1px solid #dcdcde;">
-            <strong style="font-size:1.05em;">Wayback Machine</strong>
+            <strong style="font-size:1.05em;">Internet Archive Wayback Machine</strong>
+            <span style="font-size:12px; color:#646970;">(required until requested upgrade goes through)</span>
           </td>
         </tr>
         <tr>
@@ -744,7 +741,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         # Also preserve other field values via JavaScript
         blog_title = html_mod.escape(params.get('blog_title', ['My OnionPress Site'])[0])
         user_name = html_mod.escape(params.get('user_name', ['admin'])[0])
-        admin_email = html_mod.escape(params.get('admin_email', ['admin@example.com'])[0])
         theme = params.get('theme_choice', ['blog'])[0]
 
         # Inject script to restore form values
@@ -752,7 +748,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             '<script>'
             f'document.getElementById("blog_title").value={json.dumps(blog_title)};'
             f'document.getElementById("user_name").value={json.dumps(user_name)};'
-            f'document.getElementById("admin_email").value={json.dumps(admin_email)};'
             f'var radios=document.querySelectorAll("input[name=theme_choice]");'
             f'radios.forEach(function(r){{r.checked=r.value==={json.dumps(theme)}}});'
             '</script>'
