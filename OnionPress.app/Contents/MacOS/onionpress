@@ -85,6 +85,34 @@ export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 export DOCKER_CONFIG="$DATA_DIR/docker-config"
 
+# Detect per-user port offset for multi-user support
+# When multiple macOS users run OnionPress, each needs unique host ports.
+# Try binding the WordPress port; if in use, bump offset by 10000.
+detect_port_offset() {
+    local offset=0
+    while true; do
+        local test_port=$((8080 + offset))
+        if [ $test_port -gt 65535 ]; then
+            log "ERROR: No available ports (tried offsets 0-$((offset - 10000)))"
+            offset=0  # fall back to default
+            break
+        fi
+        # Check if port is free (not in use by another process)
+        if ! lsof -i ":$test_port" -sTCP:LISTEN >/dev/null 2>&1; then
+            break
+        fi
+        log "Port $test_port in use, trying offset $((offset + 10000))"
+        offset=$((offset + 10000))
+    done
+    echo "$offset"
+}
+
+ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
+export ONIONPRESS_PORT_OFFSET
+export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
+export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
+export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
+
 # Read version from Info.plist
 ONIONPRESS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist" 2>/dev/null || echo "unknown")
 export ONIONPRESS_VERSION
@@ -159,7 +187,7 @@ detect_cellar_mode() {
                     # Wait for WordPress to be ready
                     local mem_wp_wait=0
                     while [ $mem_wp_wait -lt 60 ]; do
-                        if curl -s --max-time 3 http://localhost:8080 >/dev/null 2>&1; then
+                        if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT:-8080}" >/dev/null 2>&1; then
                             break
                         fi
                         sleep 2
@@ -1338,7 +1366,7 @@ start_containers() {
     # Wait for WordPress container to be ready before checking install status
     local wp_wait=0
     while [ $wp_wait -lt 60 ]; do
-        if curl -s --max-time 3 http://localhost:8080 >/dev/null 2>&1; then
+        if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT:-8080}" >/dev/null 2>&1; then
             break
         fi
         sleep 2
@@ -1461,8 +1489,8 @@ wait_for_services() {
 
         # Step 2: Check if WordPress is responding locally
         if [ "$wp_ready" = false ]; then
-            if curl -s --max-time 3 http://localhost:8080 >/dev/null 2>&1; then
-                log "✓ WordPress is responding on localhost:8080"
+            if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT:-8080}" >/dev/null 2>&1; then
+                log "✓ WordPress is responding on localhost:${ONIONPRESS_WP_PORT:-8080}"
                 wp_ready=true
 
                 # If WordPress is not yet installed, skip waiting for Tor
@@ -1585,7 +1613,7 @@ main() {
 
             log "OnionPress is running!"
             log "Onion address: $ONION_ADDR"
-            log "Local access: http://localhost:8080"
+            log "Local access: http://localhost:${ONIONPRESS_WP_PORT:-8080}"
             log "OnionPress is now running! Check the menu bar for status."
             ;;
 

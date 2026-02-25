@@ -29,8 +29,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 
-PROXY_PORT = 9077
-PHP_PROXY_PORT = 8080  # WordPress container's mapped port
+PROXY_PORT = int(os.environ.get("ONIONPRESS_PROXY_PORT", 9077))
+PHP_PROXY_PORT = int(os.environ.get("ONIONPRESS_WP_PORT", 8080))
 PHP_PROXY_PATH = "/__op_proxy.php"
 ONION_PATTERN = re.compile(r'^[a-z0-9.-]+\.onion$')
 # Match https .onion URLs in HTML for downgrading to http

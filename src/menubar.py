@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.5"
+        self.version = "2.4.6"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -566,6 +566,15 @@ class OnionPressApp(rumps.App):
         os.environ["LIMA_INSTANCE"] = "onionpress"
         os.environ["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
         os.environ["DOCKER_CONFIG"] = docker_config_dir
+
+        # Read port offset from environment (set by launcher for multi-user support)
+        port_offset = int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0"))
+        self.wp_port = 8080 + port_offset
+        self.socks_port = 9050 + port_offset
+        self.proxy_port = 9077 + port_offset
+        os.environ["ONIONPRESS_WP_PORT"] = str(self.wp_port)
+        os.environ["ONIONPRESS_SOCKS_PORT"] = str(self.socks_port)
+        os.environ["ONIONPRESS_PROXY_PORT"] = str(self.proxy_port)
 
         # Do slow I/O operations in background after icon appears
         def background_init():
@@ -1234,7 +1243,7 @@ class OnionPressApp(rumps.App):
 
     def check_port_conflict(self):
         """Check if required ports are already in use by another process."""
-        ports = [8080, 9050, onion_proxy.PROXY_PORT]
+        ports = [self.wp_port, self.socks_port, self.proxy_port]
         in_use = []
         for port in ports:
             try:
@@ -1402,10 +1411,10 @@ class OnionPressApp(rumps.App):
         """Check if WordPress is actually responding to requests"""
         try:
             if log_result:
-                self.log("Checking local access: http://localhost:8080")
+                self.log(f"Checking local access: http://localhost:{self.wp_port}")
             # Use curl instead of urllib to avoid "local network" permission prompt
             result = subprocess.run(
-                ["curl", "-s", "--max-time", "3", "-H", "User-Agent: OnionPress-HealthCheck", "http://localhost:8080"],
+                ["curl", "-s", "--max-time", "3", "-H", "User-Agent: OnionPress-HealthCheck", f"http://localhost:{self.wp_port}"],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -2552,7 +2561,7 @@ class OnionPressApp(rumps.App):
         for attempt in range(30):  # Up to 90s (30 x 3s)
             try:
                 result = subprocess.run(
-                    ["curl", "--socks5-hostname", "127.0.0.1:9050",
+                    ["curl", "--socks5-hostname", f"127.0.0.1:{self.socks_port}",
                      "-s", "-o", "/dev/null", "--max-time", "10",
                      onion_url],
                     capture_output=True, timeout=15
@@ -4144,7 +4153,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.5 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.6 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 

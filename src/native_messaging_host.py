@@ -19,7 +19,7 @@ import sys
 import time
 
 APP_SUPPORT = os.path.expanduser("~/.onionpress")
-PROXY_PORT = 9077
+PROXY_PORT = int(os.environ.get("ONIONPRESS_PROXY_PORT", 9077))
 
 
 def read_message():
