@@ -61,8 +61,8 @@ else
 fi
 
 # Check if standalone menubar app exists
-if [ ! -f "$MENUBAR_APP/Contents/MacOS/menubar" ]; then
-    log "ERROR: Standalone menubar app not found at $MENUBAR_APP/Contents/MacOS/menubar"
+if [ ! -f "$MENUBAR_APP/Contents/MacOS/OnionPress" ]; then
+    log "ERROR: Standalone menubar app not found at $MENUBAR_APP/Contents/MacOS/OnionPress"
     echo "ERROR: Application bundle is corrupted. Please reinstall OnionPress." >&2
     exit 1
 fi
@@ -171,7 +171,7 @@ initialize_colima() {
 }
 
 # Check if menubar app is already running
-if pgrep -f "MenubarApp/Contents/MacOS/menubar" >/dev/null 2>&1; then
+if pgrep -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&1; then
     log "Menubar app already running — triggering reopen"
     # Signal the running instance to open browser by touching a sentinel file
     touch "$DATA_DIR/.reopen"
@@ -180,7 +180,7 @@ fi
 
 # Launch menubar app immediately so icon appears fast (gray = starting)
 log "Launching menu bar application..."
-arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/menubar" >> "$LOG_FILE" 2>&1 &
+arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/OnionPress" >> "$LOG_FILE" 2>&1 &
 MENUBAR_PID=$!
 log "Menu bar app launched (PID: $MENUBAR_PID)"
 
