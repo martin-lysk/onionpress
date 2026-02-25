@@ -1523,9 +1523,9 @@ class OnionPressApp(rumps.App):
             pass
 
     def _signal_handler(self, signum, frame):
-        """Handle SIGTERM/SIGINT — clean up PID file and exit"""
-        self._remove_pid_file()
-        os._exit(0)
+        """Handle SIGTERM/SIGINT — trigger graceful quit (same as Quit button)"""
+        self.log(f"Received signal {signum}, initiating graceful shutdown...")
+        _main_thread(lambda: self.quit_app(None))
 
     def handle_reopen(self):
         """Handle reopen signal from launcher (user double-clicked app while running)"""

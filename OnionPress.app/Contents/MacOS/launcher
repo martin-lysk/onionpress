@@ -205,3 +205,9 @@ if [ -S "$COLIMA_SOCKET" ]; then
 fi
 
 log "Setup complete"
+
+# Stay alive so macOS can send us Apple Event quit (osascript -e 'quit app').
+# Forward SIGTERM to the MenubarApp so it runs its full cleanup.
+trap 'kill -TERM $MENUBAR_PID 2>/dev/null; wait $MENUBAR_PID 2>/dev/null' TERM INT HUP
+wait $MENUBAR_PID 2>/dev/null
+log "MenubarApp exited, launcher done"
