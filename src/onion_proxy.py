@@ -146,7 +146,7 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
           <th><label for="archive_email">Archive.org Email</label></th>
           <td>
             <input type="email" name="archive_email" id="archive_email" value="{{ARCHIVE_EMAIL}}" />
-            <p class="description">Every post you publish will be automatically saved to the <a href="https://web.archive.org/" target="_blank" style="color:#7b4e9e;">Wayback Machine</a>. <a href="https://archive.org/account/signup" target="_blank" style="color:#7b4e9e;">Create a free account</a> if you don&rsquo;t have one.</p>
+            <p class="description">OnionPress posts are available even when you are offline because they are saved in the <a href="https://web.archive.org/" target="_blank" style="color:#7b4e9e;">Wayback Machine</a>. <a href="https://archive.org/account/signup" target="_blank" style="color:#7b4e9e;">Create a free account</a> if you don&rsquo;t have one.</p>
           </td>
         </tr>
         <tr>
