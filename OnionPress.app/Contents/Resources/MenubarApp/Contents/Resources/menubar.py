@@ -1937,6 +1937,9 @@ class OnionPressApp(rumps.App):
                 if "Clearnet: Active (via Cloudflare)" in self.menu:
                     del self.menu["Clearnet: Active (via Cloudflare)"]
 
+            if self._quitting:
+                return  # Don't update icon/menu during shutdown
+
             if state == "available":
                 self.icon = self.icon_running
                 if self.is_cellar:

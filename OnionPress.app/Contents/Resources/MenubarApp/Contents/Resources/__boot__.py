@@ -120,7 +120,7 @@ def _setup_openssl():
     os.environ["SSL_CERT_FILE"] = os.path.join(
         resourcepath, "openssl.ca", "cert.pem")
     os.environ["SSL_CERT_DIR"] = os.path.join(
-        resourcepath, "openssl.ca", "certs")
+        resourcepath, "openssl.ca", "cert.pem")
 
 _setup_openssl()
 
