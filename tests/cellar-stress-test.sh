@@ -45,9 +45,13 @@ PER_CTR=100       # workers per container
 BATCH_SIZE=0      # 0 = start all containers at once
 STRESS_VERSION="stress-test"
 BASE_PORT=9100    # port range start inside each container
+IS_CELLAR_HOST=false  # auto-detected in preflight
 
 DATA_DIR="$HOME/.onionpress"
-DOCKER_HOST_SOCK="unix://${DATA_DIR}/colima/default/docker.sock"
+DOCKER_HOST_SOCK=""
+if [ -S "${DATA_DIR}/colima/default/docker.sock" ]; then
+    DOCKER_HOST_SOCK="unix://${DATA_DIR}/colima/default/docker.sock"
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
@@ -97,7 +101,11 @@ if [ -x "/Applications/OnionPress.app/Contents/Resources/bin/docker" ]; then
 fi
 
 docker_cmd() {
-    DOCKER_HOST="$DOCKER_HOST_SOCK" "$DOCKER_BIN" "$@"
+    if [ -n "$DOCKER_HOST_SOCK" ]; then
+        DOCKER_HOST="$DOCKER_HOST_SOCK" "$DOCKER_BIN" "$@"
+    else
+        "$DOCKER_BIN" "$@"
+    fi
 }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -116,8 +124,12 @@ preflight() {
     log "Preflight checks..."
 
     if ! docker_cmd info >/dev/null 2>&1; then
-        echo "ERROR: Cannot reach Docker (is Colima running?)"
-        echo "  Expected socket: $DOCKER_HOST_SOCK"
+        echo "ERROR: Cannot reach Docker"
+        if [ -n "$DOCKER_HOST_SOCK" ]; then
+            echo "  Using socket: $DOCKER_HOST_SOCK (is Colima running?)"
+        else
+            echo "  No OnionPress Colima socket found — is Docker available?"
+        fi
         exit 1
     fi
 
@@ -132,6 +144,18 @@ preflight() {
         log "  onioncellar is running (dedicated polling Tor)"
     else
         log "  WARNING: onioncellar is not running"
+    fi
+
+    # Detect cellar host by checking content onion address
+    local content_addr
+    content_addr=$(docker_cmd exec onionpress-tor \
+        su -s /bin/sh arti -c "arti hss --nickname wordpress onion-address -c /etc/arti/arti.toml" 2>/dev/null) || true
+    if [ "$content_addr" = "$KNOWN_CELLAR_ADDR" ]; then
+        IS_CELLAR_HOST=true
+        log "  Detected cellar host (content address matches)"
+    else
+        IS_CELLAR_HOST=false
+        log "  Not the cellar host — skipping local file injections"
     fi
 
     # Get the Arti image from the running tor container
@@ -159,23 +183,59 @@ preflight() {
     fi
     log "  sqlite3 available in onioncellar"
 
-    # Inject fast-polling cellar-poller.py for faster stress test cycles.
-    # Reduces FAIL_THRESHOLD (10→3) and HEALTHY_INTERVAL (15→5) so takeovers
-    # happen in ~15s instead of ~150s. The modified poller reads these from env.
-    log "  Injecting fast-poll cellar-poller.py..."
-    docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-poller.py" \
-        onioncellar:/cellar-poller.py
-    # Kill the running poller — entrypoint.sh will NOT restart it, so we
-    # restart it ourselves with env overrides.
-    docker_cmd exec onioncellar sh -c 'pkill -f "python3 /cellar-poller.py" 2>/dev/null || true'
-    sleep 1
-    docker_cmd exec -d onioncellar env \
-        CELLAR_HEALTHY_INTERVAL=5 \
-        CELLAR_FAST_POLL_INTERVAL=5 \
-        CELLAR_LONG_FAIL_INTERVAL=30 \
-        CELLAR_FAIL_THRESHOLD=3 \
-        python3 /cellar-poller.py
-    log "  Fast-poll poller started (threshold=3, interval=5s)"
+    # File injections — only on the cellar host (requires local repo files)
+    if [ "$IS_CELLAR_HOST" = true ]; then
+        # Inject debug cellar-redirect.sh (with logging to /tmp/cellar-redirect-debug.log)
+        log "  Injecting debug cellar-redirect.sh..."
+        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-redirect.sh" \
+            onioncellar:/cellar-redirect.sh
+        # Kill existing socat redirect processes (use pidof since pkill is unavailable)
+        docker_cmd exec onioncellar sh -c '
+            for pid in $(pidof socat 2>/dev/null); do
+                if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "TCP-LISTEN:8082"; then
+                    kill "$pid" 2>/dev/null
+                fi
+            done
+        '
+        sleep 1
+        docker_cmd exec onioncellar sh -c 'rm -f /tmp/cellar-redirect-debug.log'
+        docker_cmd exec -d onioncellar sh /cellar-redirect.sh
+        log "  Debug redirect service started"
+
+        # Inject cellar-tor-manager.sh (with pidof fix)
+        log "  Injecting cellar-tor-manager.sh..."
+        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-tor-manager.sh" \
+            onionpress-tor:/cellar-tor-manager.sh
+        docker_cmd exec onionpress-tor chmod +x /cellar-tor-manager.sh
+
+        # Inject fast-polling cellar-poller.py for faster stress test cycles.
+        # Reduces FAIL_THRESHOLD (10→3) and HEALTHY_INTERVAL (15→5) so takeovers
+        # happen in ~15s instead of ~150s. The modified poller reads these from env.
+        log "  Injecting fast-poll cellar-poller.py..."
+        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-poller.py" \
+            onioncellar:/cellar-poller.py
+        # Kill ALL running pollers — there may be stale ones from previous runs.
+        # entrypoint.sh will NOT restart them, so we restart ourselves with env overrides.
+        # Use pidof+kill since pkill may not be available in the container.
+        docker_cmd exec onioncellar sh -c '
+            for pid in $(pidof python3 2>/dev/null); do
+                if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "cellar-poller"; then
+                    kill "$pid" 2>/dev/null
+                fi
+            done
+        '
+        sleep 1
+        docker_cmd exec -d onioncellar env \
+            CELLAR_HEALTHY_INTERVAL=5 \
+            CELLAR_FAST_POLL_INTERVAL=5 \
+            CELLAR_LONG_FAIL_INTERVAL=30 \
+            CELLAR_FAIL_THRESHOLD=3 \
+            python3 /cellar-poller.py
+        log "  Fast-poll poller started (threshold=3, interval=5s)"
+    else
+        log "  Skipping file injections (not cellar host)"
+        log "  Using production poller timing and existing container scripts"
+    fi
 
     log "Preflight OK"
 }
@@ -833,16 +893,17 @@ verify_redirects() {
         [ -z "$addr" ] && continue
         sampled=$((sampled + 1))
 
-        # Make HTTP request over Tor via onioncellar's SOCKS proxy.
-        # This simulates a real external Tor user visiting the taken-over address.
-        # Retry up to 3 times with 30s gaps — descriptor propagation through
-        # Tor's DHT can take longer than the initial 60s wait.
+        # Verify redirect via onionpress-wordpress → onionpress-tor SOCKS.
+        # We CANNOT use onioncellar's own SOCKS proxy — Arti has a bug where
+        # self-connections (SOCKS → own onion service) return empty replies.
+        # Using a different Arti instance (onionpress-tor) works correctly.
         local http_response="000"
         local attempt
         for attempt in 1 2 3; do
-            http_response=$(docker_cmd exec onioncellar \
+            http_response=$(docker_cmd exec onionpress-wordpress \
                 curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
-                --socks5-hostname 127.0.0.1:9050 \
+                --http1.0 \
+                --socks5-hostname onionpress-tor:9050 \
                 --max-time 60 \
                 "http://${addr}" 2>/dev/null) || http_response="000"
             local code
@@ -872,6 +933,12 @@ verify_redirects() {
 
     log "${phase_label}: Redirect verification — ${passed}/${sampled} passed, ${failed} failed (${total_taken} total taken over)"
     log_json "\"event\":\"redirect_verify\",\"phase\":\"${phase_label}\",\"total_taken\":${total_taken},\"sampled\":${sampled},\"passed\":${passed},\"failed\":${failed}"
+
+    # Dump debug log from redirect service
+    log "${phase_label}: Redirect debug log:"
+    docker_cmd exec onioncellar cat /tmp/cellar-redirect-debug.log 2>/dev/null | tail -30 | while IFS= read -r dbgline; do
+        echo "           [redirect-dbg] $dbgline"
+    done || echo "           [redirect-dbg] (no debug log found)"
 }
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
