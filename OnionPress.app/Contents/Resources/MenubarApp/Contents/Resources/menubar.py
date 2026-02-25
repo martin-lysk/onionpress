@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.9"
+        self.version = "2.4.10"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -567,8 +567,22 @@ class OnionPressApp(rumps.App):
         os.environ["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
         os.environ["DOCKER_CONFIG"] = docker_config_dir
 
-        # Read port offset from environment (set by launcher for multi-user support)
-        port_offset = int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0"))
+        # Detect port offset for multi-user support.
+        # Try to bind the WordPress port; if in use (by another user's instance),
+        # bump offset by 10000 until a free port is found.
+        port_offset = 0
+        while True:
+            test_port = 8080 + port_offset
+            if test_port > 65535:
+                port_offset = 0  # fall back to default
+                break
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.bind(('127.0.0.1', test_port))
+                s.close()
+                break
+            except OSError:
+                port_offset += 10000
         self.wp_port = 8080 + port_offset
         self.socks_port = 9050 + port_offset
         self.proxy_port = 9077 + port_offset
@@ -4153,7 +4167,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.9 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.10 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 

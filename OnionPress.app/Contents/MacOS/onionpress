@@ -135,7 +135,10 @@ except OSError:
     echo "$offset"
 }
 
-ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
+# Use pre-set offset from menubar app if available, otherwise detect
+if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
+    ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
+fi
 export ONIONPRESS_PORT_OFFSET
 export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
 export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
