@@ -532,7 +532,10 @@ def main():
                 db_write_poll_updates(conn, list(seen.values()))
 
             conn.close()
-            time.sleep(min_sleep)
+            # Sleep at least as long as the pass took, so we never poll
+            # more aggressively than 50% duty cycle
+            sleep_time = max(min_sleep, elapsed)
+            time.sleep(sleep_time)
 
         except Exception as e:
             log(f"poller error: {e}")
