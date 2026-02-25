@@ -87,6 +87,8 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
   .submit-btn:hover { background: #6a3f8d; }
   .submit-btn:active { background: #5a3280; }
   p.note { text-align: center; margin-top: 16px; font-size: 13px; color: #646970; }
+  .error-banner { background: #fcf0f1; border: 1px solid #d63638; border-radius: 4px; padding: 12px 16px; margin-bottom: 16px; color: #d63638; font-size: 14px; }
+  .error-banner a { color: #d63638; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -97,6 +99,7 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
   <div class="setup-box">
     <h2>Welcome to OnionPress!</h2>
     <p style="margin-bottom:16px;">Set up your WordPress admin account below. Your site will only be accessible through Tor after this step.</p>
+    {{ERROR_BANNER}}
     <form method="post" action="/setup" id="setup-form">
       <table class="form-table">
         <tr>
@@ -135,6 +138,24 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
               <label><input type="radio" name="theme_choice" value="blog" checked /><span>Simple Blog</span><span class="theme-desc">Clean, minimal blog layout</span></label>
               <label><input type="radio" name="theme_choice" value="standard" /><span>Full WordPress</span><span class="theme-desc">Standard WordPress with all features</span></label>
             </div>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" style="padding-top:16px; border-top:1px solid #dcdcde;">
+            <strong style="font-size:1.05em;">Wayback Machine</strong>
+          </td>
+        </tr>
+        <tr>
+          <th><label for="archive_email">Archive.org Email</label></th>
+          <td>
+            <input type="email" name="archive_email" id="archive_email" value="{{ARCHIVE_EMAIL}}" />
+            <p class="description">Every post you publish will be automatically saved to the <a href="https://web.archive.org/" target="_blank" style="color:#7b4e9e;">Wayback Machine</a>. <a href="https://archive.org/account/signup" target="_blank" style="color:#7b4e9e;">Create a free account</a> if you don&rsquo;t have one.</p>
+          </td>
+        </tr>
+        <tr>
+          <th><label for="archive_password">Archive.org Password</label></th>
+          <td>
+            <input type="password" name="archive_password" id="archive_password" value="{{ARCHIVE_PASSWORD}}" />
           </td>
         </tr>
       </table>
@@ -689,7 +710,56 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         generated_password = ''.join(secrets.choice(chars) for _ in range(24))
 
         html = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', generated_password)
+        html = html.replace('{{ERROR_BANNER}}', '')
+        html = html.replace('{{ARCHIVE_EMAIL}}', '')
+        html = html.replace('{{ARCHIVE_PASSWORD}}', '')
         body = html.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_setup_form_with_error(self, params, error_msg):
+        """Re-render the setup form with an error banner and previously entered values."""
+        import html as html_mod
+
+        banner = (
+            '<div class="error-banner">'
+            + html_mod.escape(error_msg)
+            + ' <a href="https://archive.org/account/signup" target="_blank">Create a free account &rarr;</a>'
+            + '</div>'
+        )
+
+        # Preserve previously entered values
+        archive_email = html_mod.escape(params.get('archive_email', [''])[0].strip())
+        archive_password = html_mod.escape(params.get('archive_password', [''])[0])
+        admin_password = params.get('admin_password', [''])[0]
+
+        page = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', admin_password)
+        page = page.replace('{{ERROR_BANNER}}', banner)
+        page = page.replace('{{ARCHIVE_EMAIL}}', archive_email)
+        page = page.replace('{{ARCHIVE_PASSWORD}}', archive_password)
+
+        # Also preserve other field values via JavaScript
+        blog_title = html_mod.escape(params.get('blog_title', ['My OnionPress Site'])[0])
+        user_name = html_mod.escape(params.get('user_name', ['admin'])[0])
+        admin_email = html_mod.escape(params.get('admin_email', ['admin@example.com'])[0])
+        theme = params.get('theme_choice', ['blog'])[0]
+
+        # Inject script to restore form values
+        restore_script = (
+            '<script>'
+            f'document.getElementById("blog_title").value={json.dumps(blog_title)};'
+            f'document.getElementById("user_name").value={json.dumps(user_name)};'
+            f'document.getElementById("admin_email").value={json.dumps(admin_email)};'
+            f'var radios=document.querySelectorAll("input[name=theme_choice]");'
+            f'radios.forEach(function(r){{r.checked=r.value==={json.dumps(theme)}}});'
+            '</script>'
+        )
+        page = page.replace('</body>', restore_script + '</body>')
+
+        body = page.encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -722,6 +792,29 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        # Validate archive.org credentials before installing WordPress
+        # (so we can loop back to the form without side effects)
+        archive_email = params.get('archive_email', [''])[0].strip()
+        archive_password = params.get('archive_password', [''])[0]
+        archive_s3_keys = None
+
+        if archive_email or archive_password:
+            # If either field is filled in, both are required
+            if not archive_email or not archive_password:
+                self._send_setup_form_with_error(
+                    params,
+                    'Please fill in both archive.org email and password. (Required until a fix goes through with the Internet Archive.)'
+                )
+                return
+
+            archive_s3_keys = self._fetch_archive_s3_keys(archive_email, archive_password)
+            if archive_s3_keys is None:
+                self._send_setup_form_with_error(
+                    params,
+                    'Could not log in to archive.org. Please check your email and password.'
+                )
+                return
 
         # Run wp core multisite-install (subdirectory mode)
         try:
@@ -804,6 +897,18 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 if self.server.log_func:
                     self.server.log_func("Multisite constants and .htaccess configured")
 
+                # Save archive.org S3 keys if credentials were validated earlier
+                if archive_s3_keys:
+                    for key, val in [('onionpress_archive_s3_access', archive_s3_keys['access']),
+                                     ('onionpress_archive_s3_secret', archive_s3_keys['secret'])]:
+                        subprocess.run(
+                            wp_exec + ["wp", "option", "update", key, val,
+                                       "--allow-root"],
+                            env=denv, capture_output=True, text=True, timeout=10
+                        )
+                    if self.server.log_func:
+                        self.server.log_func("Archive.org S3 keys saved for Wayback archiving")
+
                 body = SETUP_SUCCESS_HTML.encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -830,6 +935,54 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+    def _fetch_archive_s3_keys(self, email, password):
+        """Attempt to log in to archive.org and retrieve S3 API keys.
+
+        Returns dict with 'access' and 'secret' on success, None on failure.
+        Uses the archive.org login form + S3 keys page (no undocumented APIs).
+        """
+        import urllib.request
+        import urllib.parse
+        import http.cookiejar
+
+        try:
+            cj = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(cj)
+            )
+            opener.addheaders = [
+                ('User-Agent', 'OnionPress (+https://github.com/brewsterkahle/onionpress)')
+            ]
+
+            # Step 1: POST login
+            login_data = urllib.parse.urlencode({
+                'username': email,
+                'password': password,
+                'action': 'login',
+                'remember': 'CHECKED',
+            }).encode()
+            opener.open('https://archive.org/account/login', login_data, timeout=15)
+
+            # Check if we got a logged-in cookie
+            logged_in = any(c.name.startswith('logged-in-') for c in cj)
+            if not logged_in:
+                return None
+
+            # Step 2: Fetch S3 keys
+            resp = opener.open(
+                'https://archive.org/account/s3.php?output_json=1', timeout=15
+            )
+            data = json.loads(resp.read())
+            access = data.get('key', {}).get('s3accesskey', '')
+            secret = data.get('key', {}).get('s3secretkey', '')
+            if access and secret:
+                return {'access': access, 'secret': secret}
+        except Exception as e:
+            if self.server.log_func:
+                self.server.log_func(f"archive.org S3 key fetch failed: {e}")
+
+        return None
 
     def _handle_status(self):
         """Return proxy status as JSON."""

@@ -3,7 +3,7 @@
  * Plugin Name: OnionPress Wayback Archive
  * Description: Automatically archives published posts and the homepage to the
  *              Internet Archive Wayback Machine.
- * Version:     1.1
+ * Version:     1.2
  * Network:     true
  */
 
@@ -19,6 +19,31 @@ function onionpress_version() {
         $ver = file_exists( $f ) ? trim( file_get_contents( $f ) ) : 'unknown';
     }
     return $ver;
+}
+
+/**
+ * Get the archive.org S3 API authorization header, if credentials are configured.
+ *
+ * Returns "LOW access:secret" string or empty string if not configured.
+ * Reads from wp_options (set during OnionPress setup).
+ */
+function onionpress_wayback_auth_header() {
+    static $header = null;
+    if ( $header !== null ) {
+        return $header;
+    }
+
+    // Use main site options (blog 1) for network-wide credentials
+    $access = get_blog_option( 1, 'onionpress_archive_s3_access', '' );
+    $secret = get_blog_option( 1, 'onionpress_archive_s3_secret', '' );
+
+    if ( $access && $secret ) {
+        $header = 'LOW ' . $access . ':' . $secret;
+    } else {
+        $header = '';
+    }
+
+    return $header;
 }
 
 /**
@@ -124,8 +149,10 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
         ),
     );
 
+    $auth = onionpress_wayback_auth_header();
+
     foreach ( $urls as $url ) {
-        onionpress_wayback_submit( $endpoints, $url );
+        onionpress_wayback_submit( $endpoints, $url, $auth );
     }
 }, 10, 3 );
 
@@ -138,7 +165,7 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
  * Tries each endpoint in order; stops on first success.
  * Fire-and-forget: logs result but does not block the post save.
  */
-function onionpress_wayback_submit( $endpoints, $url ) {
+function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
     if ( ! function_exists( 'curl_init' ) ) {
         error_log( '[OnionPress Wayback] curl extension not available' );
         return;
@@ -147,7 +174,12 @@ function onionpress_wayback_submit( $endpoints, $url ) {
     $user_agent = 'OnionPress/' . onionpress_version() . ' (+https://github.com/brewsterkahle/onionpress)';
 
     foreach ( $endpoints as $ep ) {
-        error_log( '[OnionPress Wayback] Archiving: ' . $url . ' via ' . $ep['url'] );
+        error_log( '[OnionPress Wayback] Archiving: ' . $url . ' via ' . $ep['url'] . ( $auth ? ' (authenticated)' : ' (no auth)' ) );
+
+        $headers = array( 'Accept: application/json' );
+        if ( $auth ) {
+            $headers[] = 'Authorization: ' . $auth;
+        }
 
         $ch = curl_init();
         $opts = array(
@@ -160,7 +192,7 @@ function onionpress_wayback_submit( $endpoints, $url ) {
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_MAXREDIRS      => 3,
             CURLOPT_USERAGENT      => $user_agent,
-            CURLOPT_HTTPHEADER     => array( 'Accept: application/json' ),
+            CURLOPT_HTTPHEADER     => $headers,
             // .onion HTTPS uses self-signed certs; safe because Tor provides
             // end-to-end encryption already.
             CURLOPT_SSL_VERIFYPEER => false,
