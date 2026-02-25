@@ -393,28 +393,28 @@ CELLAR_DB_PATH="/var/lib/onionpress/cellar/registry.db"
 
 get_registry_count() {
     docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry" 2>/dev/null | tr -d ' \n\r'
+        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry" 2>/dev/null | tr -d ' \n\r' || echo "0"
 }
 
 get_stress_fail_count() {
     docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test' AND status='failing'" 2>/dev/null | tr -d ' \n\r'
+        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test' AND status='failing'" 2>/dev/null | tr -d ' \n\r' || echo "0"
 }
 
 get_takeover_count() {
     docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE takeover_active=1" 2>/dev/null | tr -d ' \n\r'
+        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE takeover_active=1" 2>/dev/null | tr -d ' \n\r' || echo "0"
 }
 
 get_healthy_count() {
     docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test' AND status='healthy' AND last_contact IS NOT NULL" 2>/dev/null | tr -d ' \n\r'
+        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test' AND status='healthy' AND last_contact IS NOT NULL" 2>/dev/null | tr -d ' \n\r' || echo "0"
 }
 
 get_container_mem_mb() {
     local ctr="$1"
     local mem_bytes
-    mem_bytes=$(docker_cmd stats --no-stream --format '{{.MemUsage}}' "$ctr" 2>/dev/null | awk '{print $1}')
+    mem_bytes=$(docker_cmd stats --no-stream --format '{{.MemUsage}}' "$ctr" 2>/dev/null | awk '{print $1}' || echo "0")
     if echo "$mem_bytes" | grep -qi gib; then
         echo "$mem_bytes" | sed 's/[Gg][Ii][Bb]//' | awk '{printf "%.0f", $1 * 1024}'
     elif echo "$mem_bytes" | grep -qi mib; then
@@ -427,7 +427,7 @@ get_container_mem_mb() {
 }
 
 get_last_poll_duration() {
-    docker_cmd logs --tail 100 onioncellar 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r'
+    docker_cmd logs --tail 100 onioncellar 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r' || echo "0"
 }
 
 get_system_mem_pct() {
