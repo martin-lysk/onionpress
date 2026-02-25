@@ -159,6 +159,24 @@ preflight() {
     fi
     log "  sqlite3 available in onioncellar"
 
+    # Inject fast-polling cellar-poller.py for faster stress test cycles.
+    # Reduces FAIL_THRESHOLD (10→3) and HEALTHY_INTERVAL (15→5) so takeovers
+    # happen in ~15s instead of ~150s. The modified poller reads these from env.
+    log "  Injecting fast-poll cellar-poller.py..."
+    docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-poller.py" \
+        onioncellar:/cellar-poller.py
+    # Kill the running poller — entrypoint.sh will NOT restart it, so we
+    # restart it ourselves with env overrides.
+    docker_cmd exec onioncellar sh -c 'pkill -f "python3 /cellar-poller.py" 2>/dev/null || true'
+    sleep 1
+    docker_cmd exec -d onioncellar env \
+        CELLAR_HEALTHY_INTERVAL=5 \
+        CELLAR_FAST_POLL_INTERVAL=5 \
+        CELLAR_LONG_FAIL_INTERVAL=30 \
+        CELLAR_FAIL_THRESHOLD=3 \
+        python3 /cellar-poller.py
+    log "  Fast-poll poller started (threshold=3, interval=5s)"
+
     log "Preflight OK"
 }
 

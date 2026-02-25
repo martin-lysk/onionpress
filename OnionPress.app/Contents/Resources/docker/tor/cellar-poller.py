@@ -36,17 +36,17 @@ TOR_MANAGER = "/cellar-tor-manager.sh"
 # SOCKS proxy (Arti running in same container)
 SOCKS_ADDR = "127.0.0.1:9050"
 
-# Healthcheck intervals (seconds)
-HEALTHY_INTERVAL = 15
-FAST_POLL_INTERVAL = 15
-LONG_FAIL_INTERVAL = 1800
+# Healthcheck intervals (seconds) — override via env for testing
+HEALTHY_INTERVAL = int(os.environ.get("CELLAR_HEALTHY_INTERVAL", "15"))
+FAST_POLL_INTERVAL = int(os.environ.get("CELLAR_FAST_POLL_INTERVAL", "15"))
+LONG_FAIL_INTERVAL = int(os.environ.get("CELLAR_LONG_FAIL_INTERVAL", "1800"))
 
-# Thresholds
-FAIL_THRESHOLD = 10
-FAST_POLL_COUNT = 20
+# Thresholds — override via env for testing
+FAIL_THRESHOLD = int(os.environ.get("CELLAR_FAIL_THRESHOLD", "10"))
+FAST_POLL_COUNT = int(os.environ.get("CELLAR_FAST_POLL_COUNT", "20"))
 
 # Parallel polling
-MAX_POLL_WORKERS = 20
+MAX_POLL_WORKERS = int(os.environ.get("CELLAR_MAX_POLL_WORKERS", "20"))
 
 
 def log(msg):
