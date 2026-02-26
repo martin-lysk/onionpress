@@ -59,6 +59,18 @@ services:
     networks:
       - onionpress-network
 
+  tor-client:
+    image: ghcr.io/brewsterkahle/onionpress-tor:latest
+    build: ./tor
+    container_name: onionpress-tor-client
+    environment:
+      - POLLING_ONLY=1
+    volumes:
+      - arti-state-client:/var/lib/arti/
+    restart: unless-stopped
+    networks:
+      - onionpress-network
+
   onioncellar:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
@@ -79,6 +91,8 @@ services:
 volumes:
   arti-state:
     name: onionpress-arti-state
+  arti-state-client:
+    name: onionpress-arti-state-client
   arti-state-polling:
     name: onionpress-arti-state-polling
   wordpress-data:

@@ -1551,11 +1551,11 @@ class OnionPressApp(rumps.App):
                 return False
 
             # Check 5: Verify onion service is actually reachable through Tor network
-            # This catches the case where Tor is bootstrapped but service descriptors
-            # haven't propagated yet (common after fresh install with new key)
+            # Uses the independent tor-client container (not onionpress-tor which hosts
+            # the service and can resolve its own .onion via self-connection shortcut)
             probe_result = subprocess.run(
-                [docker_bin, "exec", "onionpress-wordpress",
-                 "curl", "-s", "--socks5-hostname", "onionpress-tor:9050",
+                [docker_bin, "exec", "onionpress-tor-client",
+                 "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
                  "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}",
                  "-H", "User-Agent: OnionPress-HealthCheck",
                  f"http://{self.onion_address}/"],
@@ -2570,22 +2570,29 @@ class OnionPressApp(rumps.App):
 
         self.log("Waiting for onion service to become reachable before opening browser...")
 
-        # Test the actual .onion address through the SOCKS proxy on the Mac.
-        # This is the same path the browser uses, so it only succeeds once
-        # the onion service is fully published on the Tor network.
+        # Test the actual .onion address through the independent tor-client
+        # container. Unlike onionpress-tor (which hosts the service and can
+        # resolve its own .onion locally), tor-client must discover the address
+        # through the real Tor network — giving a true reachability test.
         onion_url = f"http://{self.onion_address}/"
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        docker_env = os.environ.copy()
+        docker_env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+        docker_env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+
         reachable = False
         for attempt in range(30):  # Up to 90s (30 x 3s)
             try:
                 result = subprocess.run(
-                    ["curl", "--socks5-hostname", f"127.0.0.1:{self.socks_port}",
-                     "-s", "-o", "/dev/null", "--max-time", "10",
+                    [docker_bin, "exec", "onionpress-tor-client",
+                     "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
+                     "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}",
                      onion_url],
-                    capture_output=True, timeout=15
+                    capture_output=True, text=True, timeout=15, env=docker_env
                 )
-                if result.returncode == 0:
+                if result.returncode == 0 and result.stdout.strip() in ["200", "301", "302", "303"]:
                     reachable = True
-                    self.log(f"Onion service reachable via Tor after {(attempt + 1) * 3}s")
+                    self.log(f"Onion service reachable via tor-client after {(attempt + 1) * 3}s")
                     break
             except Exception:
                 pass

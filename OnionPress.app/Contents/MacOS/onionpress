@@ -210,7 +210,7 @@ detect_cellar_mode() {
                         sleep 2
                         mem_wp_wait=$((mem_wp_wait + 2))
                     done
-                    docker compose up -d tor >> "$LOG_FILE" 2>&1
+                    docker compose up -d tor tor-client >> "$LOG_FILE" 2>&1
                 else
                     log "OnionCellar: ERROR — VM restart failed, continuing with $(( vm_mem_kb / 1024 ))MB"
                 fi
@@ -1367,18 +1367,18 @@ start_containers() {
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d wordpress db >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d wordpress db tor-client >> "$LOG_FILE" 2>&1; then
             break
         fi
-        log "WARNING: 'docker compose up -d wordpress db' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
+        log "WARNING: 'docker compose up -d wordpress db tor-client' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
         if [ $attempt -eq $max_attempts ]; then
-            log "ERROR: 'docker compose up -d wordpress db' failed after $max_attempts attempts."
+            log "ERROR: 'docker compose up -d wordpress db tor-client' failed after $max_attempts attempts."
             return 1
         fi
         attempt=$((attempt + 1))
         sleep 5
     done
-    log "WordPress and DB containers starting"
+    log "WordPress, DB, and Tor client containers starting"
 
     # Wait for WordPress container to be ready before checking install status
     local wp_wait=0
@@ -1674,8 +1674,8 @@ main() {
             # Detect cellar mode BEFORE starting Tor so ONIONPRESS_CELLAR env var
             # is set when docker-compose creates the tor container (exposes port 8083)
             detect_cellar_mode || true
-            docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
-            log "Tor container started"
+            docker compose up -d tor tor-client >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+            log "Tor containers started"
             ;;
 
         import-key)
@@ -1687,14 +1687,6 @@ main() {
             docker compose logs -f
             ;;
 
-        get)
-            if [ -z "$2" ]; then
-                echo "Usage: onionpress get <url>"
-                exit 1
-            fi
-            docker exec onionpress-wordpress curl -s --max-time 30 --socks5-hostname onionpress-tor:9050 "$2"
-            ;;
-
         launch)
             # Full app launch — opens the OnionPress.app bundle, which runs the
             # launcher script (boots Colima VM, starts MenubarApp, starts containers).
@@ -1704,7 +1696,7 @@ main() {
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|get|launch|logs}"
+            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|launch|logs}"
             exit 1
             ;;
     esac

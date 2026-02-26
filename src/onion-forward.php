@@ -38,7 +38,7 @@ if (!preg_match('/\.onion(\/|$|:)/', $url)) {
 
 $ch = curl_init($url);
 curl_setopt_array($ch, [
-    CURLOPT_PROXY           => 'socks5h://onionpress-tor:9050',
+    CURLOPT_PROXY           => 'socks5h://onionpress-tor-client:9050',
     CURLOPT_RETURNTRANSFER  => true,
     CURLOPT_HEADER          => true,
     CURLOPT_FOLLOWLOCATION  => true,
