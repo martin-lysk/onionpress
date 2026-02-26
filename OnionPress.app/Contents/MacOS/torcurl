@@ -18,6 +18,13 @@ ONIONPRESS="$SCRIPT_DIR/onionpress"
 unset DOCKER_HOST DOCKER_CONTEXT
 DOCKER_ARGS="--host unix://$HOME/.onionpress/colima/default/docker.sock"
 
+# Check if Tor SOCKS proxy can route traffic
+tor_ready() {
+    "$DOCKER" $DOCKER_ARGS exec onionpress-wordpress \
+        curl -s --max-time 5 --socks5-hostname onionpress-tor:9050 \
+        https://example.com -o /dev/null -w '%{http_code}' 2>/dev/null | grep -q 200
+}
+
 # Parse our flags, pass everything else to curl
 FORCE_START=false
 ARGS=()
@@ -58,4 +65,23 @@ if ! "$DOCKER" $DOCKER_ARGS inspect --format='{{.State.Running}}' onionpress-wor
     fi
 fi
 
+# Run the request
 "$DOCKER" $DOCKER_ARGS exec onionpress-wordpress curl -s --max-time 30 --socks5-hostname onionpress-tor:9050 "${ARGS[@]}"
+rc=$?
+
+# If curl failed with SOCKS error (97), Tor may still be building circuits.
+# Wait for Tor to be ready and retry.
+if [ $rc -eq 97 ]; then
+    echo "Tor not ready yet, waiting for circuits..." >&2
+    for i in $(seq 1 30); do
+        if tor_ready; then
+            "$DOCKER" $DOCKER_ARGS exec onionpress-wordpress curl -s --max-time 30 --socks5-hostname onionpress-tor:9050 "${ARGS[@]}"
+            exit $?
+        fi
+        sleep 2
+    done
+    echo "Tor is not ready. Try again in a moment." >&2
+    exit 1
+fi
+
+exit $rc
