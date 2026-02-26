@@ -1687,8 +1687,16 @@ main() {
             docker compose logs -f
             ;;
 
+        get)
+            if [ -z "$2" ]; then
+                echo "Usage: onionpress get <url>"
+                exit 1
+            fi
+            docker exec onionpress-wordpress curl -s --max-time 30 --socks5-hostname onionpress-tor:9050 "$2"
+            ;;
+
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|logs}"
+            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|get|logs}"
             exit 1
             ;;
     esac
