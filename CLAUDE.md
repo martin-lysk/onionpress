@@ -14,7 +14,7 @@
 ## Key Architecture
 - macOS menubar app (py2app built from `src/menubar.py`)
 - Launcher shell script at `OnionPress.app/Contents/MacOS/onionpress`
-- Docker containers (tor, wordpress, mariadb) run inside Colima VM
+- Docker containers (tor, tor-client, wordpress, mariadb) run inside Colima VM
 - Logs at `~/.onionpress/onionpress.log` and `~/.onionpress/launcher.log`
 
 ## Why py2app
@@ -66,15 +66,26 @@
 - **`LSMultipleInstancesProhibited` must NOT be in any Info.plist** — macOS enforces it across ALL users sharing the same app bundle, not just per-user
 - **`pgrep` in the launcher must use `-u $(whoami)`** to restrict to the current user's processes
 - **PID lock file** (`~/.onionpress/onionpress.pid`) prevents the same user from double-launching; cleaned up via `trap` on EXIT/INT/TERM/HUP
-- **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
+- **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `onionpress-tor-client:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
 - **`git add -f OnionPress.app/`** after a build will pick up large downloaded binaries (docker, limactl, docker-compose) — always stage specific paths instead
+
+## Tor Client Container (`onionpress-tor-client`)
+- **Independent Arti SOCKS proxy** for true external reachability tests (~20-50MB RAM)
+- Same image as `onionpress-tor` (`ghcr.io/brewsterkahle/onionpress-tor:latest`) but runs with `POLLING_ONLY=1` (pure SOCKS, no onion services)
+- Has its own Tor circuits and must discover `.onion` addresses through the real Tor network — unlike `onionpress-tor` which resolves its own `.onion` locally via self-connection shortcut
+- **No host port mapping** — accessed only via `docker exec` or container-to-container networking (`onionpress-tor-client:9050`)
+- Started early alongside WordPress and DB (no dependencies), giving it 60+ seconds to bootstrap while WordPress warms up
+- `docker compose down` stops it automatically (no profile needed)
+- **Used by**: `torcurl`, `_auto_open_browser_inner()`, `check_tor_reachability()` Check 5, `onion-forward.php` (browser extension PHP proxy)
+- **NOT used by**: `src/cellar.py` (outbound Tor to external `.onion`), `onionpress-wayback-archive.php` (Wayback Machine), `cellar-poller.py` (runs inside container)
 
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed
-- **For ANY communication over Tor from the Mac, always use `docker exec` into the tor container** — this is reliable
-  - Example: `docker exec onionpress-tor wget -q -O - http://some-address.onion/`
+- **For ANY communication over Tor from the Mac, always use `docker exec` into a tor container** — this is reliable
+  - Example: `docker exec onionpress-tor-client curl -s --socks5-hostname 127.0.0.1:9050 http://some-address.onion/`
   - Do NOT use `curl --socks5-hostname 127.0.0.1:9050` from the Mac host — it will fail
 - This applies to future mirror system communication (health checks, challenge-response, etc.)
-- `wget` is available in the tor container (Alpine-based), `curl` is not
-- WordPress container has `curl`
-- Test onion service path: `docker exec onionpress-tor wget -q -O /dev/null http://wordpress:80/`
+- The tor image is Debian-based and has both `curl` and `wget`
+- WordPress container also has `curl`
+- Test onion service reachability: `docker exec onionpress-tor-client curl -s --socks5-hostname 127.0.0.1:9050 http://<onion-address>/`
+- Test internal WordPress path: `docker exec onionpress-tor curl -s http://wordpress:80/`
