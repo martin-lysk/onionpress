@@ -362,6 +362,8 @@ echo "Standalone MenubarApp built successfully"
 
 # Ad-hoc sign the entire app bundle (inside-out)
 # This ensures macOS treats the app consistently across multiple users.
+# NOTE: No symlinks may exist at the bundle root (outside Contents/) —
+# codesign rejects them as "unsealed contents" and Gatekeeper reports "damaged".
 echo "Signing application bundle..."
 # Sign all .so extension modules in MenubarApp
 find "$MENUBAR_APP_DIR/Contents/Resources/lib" -name "*.so" -exec codesign -f -s - {} \; 2>/dev/null
@@ -372,7 +374,7 @@ codesign -f -s - "$MENUBAR_APP_DIR/Contents/Frameworks/Python.framework" 2>/dev/
 codesign -f -s - "$MENUBAR_APP_DIR/Contents/MacOS/python" 2>/dev/null || true
 codesign -f -s - "$MENUBAR_APP_DIR" 2>/dev/null || true
 # Sign the outer OnionPress.app bundle
-codesign -f -s - --deep "$APP_PATH" 2>/dev/null || true
+codesign -f -s - --deep "$APP_PATH"
 echo "Application bundle signed"
 
 # Clean up old builds
@@ -386,6 +388,22 @@ echo "Using temp directory: $TEMP_DIR"
 # Copy app to temp directory
 echo "Copying application bundle..."
 cp -R "$APP_PATH" "$TEMP_DIR/"
+
+# Re-sign the copy going into the DMG — version bumps in the repo often edit
+# Info.plist after the last build, which invalidates the ad-hoc signature.
+# Signing here ensures the DMG always ships a valid bundle.
+echo "Re-signing app bundle for DMG..."
+DMG_APP="$TEMP_DIR/$(basename "$APP_PATH")"
+DMG_MENUBAR="$DMG_APP/Contents/Resources/MenubarApp"
+# Remove any bundle-root symlinks that would cause "unsealed contents" error
+find "$DMG_APP" -maxdepth 1 -type l -delete
+find "$DMG_MENUBAR/Contents/Resources/lib" -name "*.so" -exec codesign -f -s - {} \; 2>/dev/null
+find "$DMG_MENUBAR/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "Python" \) -exec codesign -f -s - {} \; 2>/dev/null
+codesign -f -s - "$DMG_MENUBAR/Contents/Frameworks/Python.framework" 2>/dev/null || true
+codesign -f -s - "$DMG_MENUBAR/Contents/MacOS/python" 2>/dev/null || true
+codesign -f -s - "$DMG_MENUBAR" 2>/dev/null || true
+codesign -f -s - --deep "$DMG_APP"
+echo "App bundle re-signed"
 
 # Create Applications symlink
 echo "Creating Applications folder symlink..."

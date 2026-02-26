@@ -50,11 +50,11 @@
 		</data>
 		<key>Resources/MenubarApp/Contents/Info.plist</key>
 		<data>
-		46ZtD84Bzs1a9qJe7RR52QuaEMM=
+		9jFVWVSHd5cA2ADEwspR8jTT3xM=
 		</data>
 		<key>Resources/MenubarApp/Contents/MacOS/OnionPress</key>
 		<data>
-		T8+fB7WzortlSgiYcnZZ6zvkjTE=
+		KxR5LTCZhy30w1KCJUgoQj518fE=
 		</data>
 		<key>Resources/MenubarApp/Contents/MacOS/python</key>
 		<data>
@@ -1395,10 +1395,10 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			K9uLVNdUiFizR0Z3GbEzFTDODCk=
+			NSBEgHakz3mNuHqCunE5ZMwC65Y=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"2bdb8b54d7548858b347467719b1331530ce0c29"</string>
+			<string>cdhash H"3520448076a4cf798db87a82ba713964cc02eb96"</string>
 		</dict>
 		<key>MacOS/onionpress-cli</key>
 		<dict>
@@ -1408,6 +1408,15 @@
 			</data>
 			<key>requirement</key>
 			<string>cdhash H"93935b430c896e9322468461a4b241164263d4d6"</string>
+		</dict>
+		<key>MacOS/torcurl</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			ocBR01swtoH0ZoYEx7NmBO1zBmg=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"a1c051d35b30b681f4668604c7b36604ed730668"</string>
 		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>
@@ -1515,14 +1524,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			+XrRIGcu6rXHjWKUXrkyQaj9IsVW0pO/EvAVk63ATNE=
+			r/NeTZYiPeVn5TwKEs4ED36tiGoKyREcUD+wlzS9V/U=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/MacOS/OnionPress</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			3morLDtZ3ns8wFRfaHAVmxQl2z71lkwwNf8k8JpACJg=
+			heaajxhcWrHx1pZ3qIBqcFFz012abdTvmwxXj7RI1sg=
 			</data>
 		</dict>
 		<key>Resources/MenubarApp/Contents/MacOS/python</key>

@@ -69,9 +69,15 @@ fi
 "$DOCKER" $DOCKER_ARGS exec onionpress-wordpress curl -s --max-time 30 --socks5-hostname onionpress-tor:9050 "${ARGS[@]}"
 rc=$?
 
-# If curl failed with SOCKS error (97), Tor may still be building circuits.
-# Wait for Tor to be ready and retry.
+# If curl failed with SOCKS error (97), it could be:
+#   a) Tor still building circuits, or
+#   b) Tor is fine but the target URL failed (e.g. HTTPS on an HTTP-only onion site)
+# Check if Tor is already working before assuming it's not ready.
 if [ $rc -eq 97 ]; then
+    if tor_ready; then
+        echo "Connection failed — Tor is working but the site may not support HTTPS or is unreachable." >&2
+        exit $rc
+    fi
     echo "Tor not ready yet, waiting for circuits..." >&2
     for i in $(seq 1 30); do
         if tor_ready; then
