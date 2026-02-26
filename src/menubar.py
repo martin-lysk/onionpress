@@ -2606,57 +2606,58 @@ class OnionPressApp(rumps.App):
             brave_browser_path = "/Applications/Brave Browser.app"
             url = f"http://{self.onion_address}"
 
-            # Wait for the onion proxy to start (it runs in the monitoring
-            # loop which continues in parallel now)
-            for i in range(15):
-                if self.proxy_server is not None:
-                    break
-                time.sleep(1)
-
-            # Wait up to 5 more seconds for a browser extension to register
-            ext_browser = None
-            for i in range(5):
-                ext_browser = self.extension_connected_recently()
-                if ext_browser:
-                    break
-                self.log(f"Waiting for extension registration... ({i+1}/5)")
-                time.sleep(1)
-            if ext_browser:
-                self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
-                # Open the browser first (without the URL) so the extension
-                # background script starts and can poll /status to set up
-                # SOCKS routing BEFORE we navigate to the .onion address.
-                subprocess.run(["open", "-a", ext_browser])
-                # Wait for extension to poll /status and set up SOCKS routing.
-                # Extension polls every 2s at startup, every 60s thereafter.
-                marker = os.path.join(self.app_support, "extension-connected")
-                for i in range(30):
-                    try:
-                        with open(marker, 'r') as f:
-                            data = json.loads(f.read().strip())
-                        if (time.time() - data["timestamp"]) < 5:
-                            self.log(f"Extension active after {i+1}s, opening .onion URL")
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(1)
-                else:
-                    self.log("Extension did not poll within 30s, opening .onion URL anyway")
-                # Now open the .onion URL — extension should have SOCKS routing active
-                subprocess.run(["open", "-a", ext_browser, url])
-                subprocess.run(["osascript", "-e", f'tell application "{ext_browser}" to activate'])
-            elif os.path.exists(brave_browser_path):
-                self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
-                brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
-                subprocess.run([brave_executable, "--tor", url])
-            elif os.path.exists(tor_browser_path):
+            if os.path.exists(tor_browser_path):
                 self.log(f"Auto-opening Tor Browser: {url}")
                 subprocess.run(["open", "-a", "Tor Browser", url])
             else:
-                self.log("No Tor-capable browser found - showing options dialog")
-                self.dismiss_setup_dialog()
-                self.dismiss_launch_splash()
-                self.show_browser_install_dialog()
+                # Wait for the onion proxy to start (it runs in the monitoring
+                # loop which continues in parallel now)
+                for i in range(15):
+                    if self.proxy_server is not None:
+                        break
+                    time.sleep(1)
+
+                # Wait up to 5 more seconds for a browser extension to register
+                ext_browser = None
+                for i in range(5):
+                    ext_browser = self.extension_connected_recently()
+                    if ext_browser:
+                        break
+                    self.log(f"Waiting for extension registration... ({i+1}/5)")
+                    time.sleep(1)
+                if ext_browser:
+                    self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
+                    # Open the browser first (without the URL) so the extension
+                    # background script starts and can poll /status to set up
+                    # SOCKS routing BEFORE we navigate to the .onion address.
+                    subprocess.run(["open", "-a", ext_browser])
+                    # Wait for extension to poll /status and set up SOCKS routing.
+                    # Extension polls every 2s at startup, every 60s thereafter.
+                    marker = os.path.join(self.app_support, "extension-connected")
+                    for i in range(30):
+                        try:
+                            with open(marker, 'r') as f:
+                                data = json.loads(f.read().strip())
+                            if (time.time() - data["timestamp"]) < 5:
+                                self.log(f"Extension active after {i+1}s, opening .onion URL")
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(1)
+                    else:
+                        self.log("Extension did not poll within 30s, opening .onion URL anyway")
+                    # Now open the .onion URL — extension should have SOCKS routing active
+                    subprocess.run(["open", "-a", ext_browser, url])
+                    subprocess.run(["osascript", "-e", f'tell application "{ext_browser}" to activate'])
+                elif os.path.exists(brave_browser_path):
+                    self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
+                    brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
+                    subprocess.run([brave_executable, "--tor", url])
+                else:
+                    self.log("No Tor-capable browser found - showing options dialog")
+                    self.dismiss_setup_dialog()
+                    self.dismiss_launch_splash()
+                    self.show_browser_install_dialog()
 
     def validate_address_prefix(self, prefix):
         """Validate a address prefix string.
