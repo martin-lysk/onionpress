@@ -1695,8 +1695,16 @@ main() {
             docker exec onionpress-wordpress curl -s --max-time 30 --socks5-hostname onionpress-tor:9050 "$2"
             ;;
 
+        launch)
+            # Full app launch — opens the OnionPress.app bundle, which runs the
+            # launcher script (boots Colima VM, starts MenubarApp, starts containers).
+            # Safe to call when already running (launcher detects and exits).
+            APP_BUNDLE="$(dirname "$APP_DIR")"
+            open "$APP_BUNDLE"
+            ;;
+
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|get|logs}"
+            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|get|launch|logs}"
             exit 1
             ;;
     esac

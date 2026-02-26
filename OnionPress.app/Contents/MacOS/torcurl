@@ -1,0 +1,52 @@
+#!/bin/bash
+# torcurl — curl via OnionPress's Tor network
+# Usage: torcurl [-l|--launch] [curl-options] <url>
+#   -l, --launch  Launch OnionPress first if not running
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$(dirname "$SCRIPT_DIR")"
+DOCKER="$APP_DIR/Resources/bin/docker"
+ONIONPRESS="$SCRIPT_DIR/onionpress"
+export DOCKER_HOST="unix://$HOME/.onionpress/colima/default/docker.sock"
+
+# Parse our flags, pass everything else to curl
+FORCE_START=false
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "-l" ] || [ "$arg" = "--launch" ]; then
+        FORCE_START=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+
+if [ ${#ARGS[@]} -eq 0 ]; then
+    echo "Usage: torcurl [-l|--launch] [curl-options] <url>"
+    echo "  -l, --launch  Launch OnionPress if not running"
+    exit 1
+fi
+
+# Check if WordPress container is running
+if ! "$DOCKER" inspect --format='{{.State.Running}}' onionpress-wordpress 2>/dev/null | grep -q true; then
+    if [ "$FORCE_START" = true ]; then
+        echo "OnionPress not running, launching..." >&2
+        "$ONIONPRESS" launch
+        # Wait for WordPress container to come up
+        echo "Waiting for OnionPress to be ready..." >&2
+        for i in $(seq 1 120); do
+            if "$DOCKER" inspect --format='{{.State.Running}}' onionpress-wordpress 2>/dev/null | grep -q true; then
+                break
+            fi
+            sleep 2
+        done
+        if ! "$DOCKER" inspect --format='{{.State.Running}}' onionpress-wordpress 2>/dev/null | grep -q true; then
+            echo "Timed out waiting for OnionPress to start." >&2
+            exit 1
+        fi
+    else
+        echo "OnionPress is not running. Start it first, or use -l to auto-launch." >&2
+        exit 1
+    fi
+fi
+
+"$DOCKER" exec onionpress-wordpress curl -s --max-time 30 --socks5-hostname onionpress-tor:9050 "${ARGS[@]}"
