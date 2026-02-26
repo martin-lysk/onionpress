@@ -417,10 +417,9 @@ print(sum(1 for x in w if x.get('registered')))
         done
 
         # Also check cellar registry for real-time registration count
-        local db_count
-        db_count=$(docker_cmd exec onioncellar \
-            sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test'" 2>/dev/null | tr -d ' \n\r')
-        [ -n "$db_count" ] && registered_count=$db_count
+        local api_count
+        api_count=$(get_registry_count)
+        [ -n "$api_count" ] && [ "$api_count" -gt 0 ] 2>/dev/null && registered_count=$api_count
 
         local now
         now=$(date +%s)
@@ -470,24 +469,75 @@ except: print(0)
 
 CELLAR_DB_PATH="/var/lib/onionpress/cellar/registry.db"
 
+# Query cellar /status API — locally via docker exec, or remotely via Tor
+# Returns JSON: {"total":N,"healthy":N,"failing":N,"taken_over":N}
+# Caches result for 5s to avoid hammering Tor on every metric call.
+_CELLAR_STATUS_CACHE=""
+_CELLAR_STATUS_TS=0
+
+query_cellar_status() {
+    local now
+    now=$(date +%s)
+    if [ $((now - _CELLAR_STATUS_TS)) -lt 5 ] && [ -n "$_CELLAR_STATUS_CACHE" ]; then
+        echo "$_CELLAR_STATUS_CACHE"
+        return
+    fi
+
+    local result=""
+    if [ "$IS_CELLAR_HOST" = true ]; then
+        result=$(docker_cmd exec onioncellar curl -s --max-time 5 http://localhost:8083/status 2>/dev/null) || result=""
+    else
+        result=$(docker_cmd exec onionpress-tor-client \
+            curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+            "http://${CELLAR_ADDR}:8083/status" 2>/dev/null) || result=""
+    fi
+
+    if echo "$result" | grep -q '"total"'; then
+        _CELLAR_STATUS_CACHE="$result"
+        _CELLAR_STATUS_TS=$now
+        echo "$result"
+    else
+        echo '{"total":0,"healthy":0,"failing":0,"taken_over":0}'
+    fi
+}
+
+# Extract a field from cellar status JSON (lightweight — no python needed)
+_cellar_field() {
+    local field="$1"
+    query_cellar_status | sed 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*//' | sed 's/[^0-9].*//' | tr -d ' \n\r'
+}
+
 get_registry_count() {
-    docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry" 2>/dev/null | tr -d ' \n\r' || echo "0"
-}
-
-get_stress_fail_count() {
-    docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test' AND status='failing'" 2>/dev/null | tr -d ' \n\r' || echo "0"
-}
-
-get_takeover_count() {
-    docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE takeover_active=1" 2>/dev/null | tr -d ' \n\r' || echo "0"
+    _cellar_field "total"
 }
 
 get_healthy_count() {
-    docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT COUNT(*) FROM registry WHERE version='stress-test' AND status='healthy' AND last_contact IS NOT NULL" 2>/dev/null | tr -d ' \n\r' || echo "0"
+    _cellar_field "healthy"
+}
+
+get_stress_fail_count() {
+    _cellar_field "failing"
+}
+
+get_takeover_count() {
+    _cellar_field "taken_over"
+}
+
+# Count workers registered from local containers (works on any machine)
+get_local_registered_count() {
+    local total=0
+    for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
+        local ctr_name="stress-worker-${idx}"
+        local reg
+        reg=$(docker_cmd exec "$ctr_name" python3 -c "
+import json
+with open('/worker-info.json') as f:
+    w = json.load(f)
+print(sum(1 for x in w if x.get('registered')))
+" 2>/dev/null || echo 0)
+        total=$((total + reg))
+    done
+    echo "$total"
 }
 
 get_container_mem_mb() {
@@ -506,7 +556,11 @@ get_container_mem_mb() {
 }
 
 get_last_poll_duration() {
-    docker_cmd logs --tail 100 onioncellar 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r' || echo "0"
+    if [ "$IS_CELLAR_HOST" = true ]; then
+        docker_cmd logs --tail 100 onioncellar 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r' || echo "-"
+    else
+        echo "-"
+    fi
 }
 
 get_system_mem_pct() {
@@ -534,36 +588,104 @@ print_dashboard() {
 
     log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
     echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | VM mem: ${mem_pct}%"
-    echo "           Last poll pass: ${poll_dur}s"
+    if [ "$poll_dur" != "-" ]; then
+        echo "           Last poll pass: ${poll_dur}s"
+    fi
 
     log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"healthy\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\""
 }
 
-# ── Phase: Wait for healthy ──────────────────────────────────────────────────
+# ── Helper: get worker addresses from local info files ──────────────────────
+
+# Get content addresses for a range of workers (from local worker-info files).
+# Usage: get_worker_content_addrs <start> <count>
+get_worker_content_addrs() {
+    local start="$1"
+    local count="$2"
+    for i in $(seq "$start" $((start + count - 1))); do
+        local ctr_idx=$((i / PER_CTR))
+        local local_idx=$((i % PER_CTR))
+        local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
+        python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
+    if w and w.get('content_address'):
+        print(w['content_address'])
+except: pass
+" 2>/dev/null
+    done
+}
+
+# Get healthcheck addresses for a range of workers.
+get_worker_hc_addrs() {
+    local start="$1"
+    local count="$2"
+    for i in $(seq "$start" $((start + count - 1))); do
+        local ctr_idx=$((i / PER_CTR))
+        local local_idx=$((i % PER_CTR))
+        local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
+        python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
+    if w and w.get('healthcheck_address'):
+        print(w['healthcheck_address'])
+except: pass
+" 2>/dev/null
+    done
+}
+
+# ── Phase: Wait for healthy (local state) ───────────────────────────────────
+# Polls our workers' healthcheck .onion addresses via tor-client.
 
 wait_for_healthy() {
     local target="$1"
     local phase_name="$2"
     local timeout_secs="${3:-600}"
 
-    log "${phase_name}: Waiting for ${target} healthy workers (timeout: ${timeout_secs}s)..."
+    log "${phase_name}: Waiting for ${target} workers to be reachable via Tor (timeout: ${timeout_secs}s)..."
 
     local deadline=$(($(date +%s) + timeout_secs))
     local last_dashboard=0
 
+    # Get all our healthcheck addresses
+    local hc_addrs
+    hc_addrs=$(get_worker_hc_addrs 0 "$TOTAL")
+
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        local current_healthy
-        current_healthy=$(get_healthy_count)
+        local reachable=0
+        local total_checked=0
+
+        while IFS= read -r addr; do
+            addr=$(echo "$addr" | tr -d '\r\n ')
+            [ -z "$addr" ] && continue
+            total_checked=$((total_checked + 1))
+
+            local code
+            code=$(docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 15 \
+                -o /dev/null -w "%{http_code}" \
+                "http://${addr}/" 2>/dev/null) || code="000"
+            if [ "$code" = "200" ]; then
+                reachable=$((reachable + 1))
+            fi
+        done <<< "$hc_addrs"
 
         local now
         now=$(date +%s)
         if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
+            log "  (reachable: ${reachable}/${total_checked} workers)"
             last_dashboard=$now
         fi
 
-        if [ "$current_healthy" -ge "$target" ] 2>/dev/null; then
-            log "${phase_name}: Reached ${current_healthy} healthy workers"
+        if [ "$reachable" -ge "$target" ] 2>/dev/null; then
+            log "${phase_name}: ${reachable}/${total_checked} workers reachable via Tor"
             print_dashboard
             return 0
         fi
@@ -571,7 +693,7 @@ wait_for_healthy() {
         sleep 10
     done
 
-    log "${phase_name}: Timed out — only $(get_healthy_count) healthy (wanted ${target})"
+    log "${phase_name}: Timed out — only ${reachable:-0} reachable (wanted ${target})"
     print_dashboard
     return 1
 }
@@ -584,6 +706,8 @@ disable_workers() {
     local fail_count="$2"
 
     log "Disabling responders for workers ${fail_start}..$(( fail_start + fail_count - 1 ))..."
+
+    local affected_containers=""
 
     for i in $(seq "$fail_start" $((fail_start + fail_count - 1))); do
         # Figure out which container and local index
@@ -598,9 +722,45 @@ disable_workers() {
             curl -s -X POST http://127.0.0.1:9000/disable \
             -H "Content-Type: application/json" \
             -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
+
+        # Also shut down Arti onion services for this worker so the cellar's
+        # Arti becomes the sole publisher for these .onion addresses.
+        # Without this, the worker's Arti keeps publishing descriptors and
+        # intercepting connections, preventing the cellar's 302 redirect.
+        local content_nick="w${ctr_idx}_${local_idx}_content"
+        local hc_nick="w${ctr_idx}_${local_idx}_hc"
+        docker_cmd exec "$ctr_name" \
+            sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = true/enabled = false/}" \
+            /etc/arti/arti.toml 2>/dev/null || true
+        docker_cmd exec "$ctr_name" \
+            sed -i "/^\[onion_services\.\"${hc_nick}\"\]/,/^enabled = /{s/^enabled = true/enabled = false/}" \
+            /etc/arti/arti.toml 2>/dev/null || true
+
+        # Track which containers need Arti reload
+        if ! echo "$affected_containers" | grep -q "$ctr_name"; then
+            affected_containers="${affected_containers} ${ctr_name}"
+        fi
     done
 
-    log "Disabled ${fail_count} workers"
+    # Restart Arti in each affected container with the updated config.
+    # A SIGHUP alone does NOT stop Arti from serving disabled onion services —
+    # it continues publishing descriptors and accepting connections for them.
+    # A full restart forces Arti to only serve enabled services.
+    for ctr_name in $affected_containers; do
+        docker_cmd exec "$ctr_name" sh -c '
+            for d in /proc/[0-9]*; do
+                if [ "$(cat $d/comm 2>/dev/null)" = "arti" ]; then
+                    kill $(basename $d) 2>/dev/null
+                fi
+            done
+            # Wait for Arti to exit
+            sleep 2
+            # Restart Arti with updated config (only enabled services)
+            su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+        ' 2>/dev/null || true
+    done
+
+    log "Disabled ${fail_count} workers (HTTP responders + Arti restart)"
 }
 
 enable_workers() {
@@ -609,12 +769,28 @@ enable_workers() {
 
     log "Re-enabling responders and re-registering workers ${start}..$(( start + count - 1 ))..."
 
+    local affected_containers=""
+
     for i in $(seq "$start" $((start + count - 1))); do
         local ctr_idx=$((i / PER_CTR))
         local local_idx=$((i % PER_CTR))
         local ctr_name="stress-worker-${ctr_idx}"
         local cp=$((BASE_PORT + local_idx * 2))
         local hp=$((BASE_PORT + local_idx * 2 + 1))
+
+        # Re-enable Arti onion services first (so descriptor publishing resumes)
+        local content_nick="w${ctr_idx}_${local_idx}_content"
+        local hc_nick="w${ctr_idx}_${local_idx}_hc"
+        docker_cmd exec "$ctr_name" \
+            sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
+            /etc/arti/arti.toml 2>/dev/null || true
+        docker_cmd exec "$ctr_name" \
+            sed -i "/^\[onion_services\.\"${hc_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
+            /etc/arti/arti.toml 2>/dev/null || true
+
+        if ! echo "$affected_containers" | grep -q "$ctr_name"; then
+            affected_containers="${affected_containers} ${ctr_name}"
+        fi
 
         # Re-enable HTTP responders
         docker_cmd exec "$ctr_name" \
@@ -686,32 +862,66 @@ print(f'Re-registered {w[\"content_address\"]}')
 " 2>/dev/null &
     done
 
+    # Restart Arti in each affected container with all services re-enabled
+    for ctr_name in $affected_containers; do
+        docker_cmd exec "$ctr_name" sh -c '
+            for d in /proc/[0-9]*; do
+                if [ "$(cat $d/comm 2>/dev/null)" = "arti" ]; then
+                    kill $(basename $d) 2>/dev/null
+                fi
+            done
+            sleep 2
+            su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+        ' 2>/dev/null || true
+    done
+
     # Don't wait for re-registrations — they stagger themselves inside the container
-    log "Re-enabled ${count} workers, re-registrations staggering over Tor (2s apart)"
+    log "Re-enabled ${count} workers, Arti restarting + re-registrations over Tor (2s apart)"
 }
 
 wait_for_takeover() {
     local expected="$1"
     local timeout_secs="${2:-600}"
 
-    log "Waiting for ${expected} takeovers (timeout: ${timeout_secs}s)..."
+    log "Waiting for ${expected} takeovers — polling disabled workers' .onion addresses for 302 redirects (timeout: ${timeout_secs}s)..."
 
     local deadline=$(($(date +%s) + timeout_secs))
     local last_dashboard=0
 
+    # Get content addresses of the workers we disabled
+    local fail_start=$((TOTAL - FAILING))
+    local content_addrs
+    content_addrs=$(get_worker_content_addrs "$fail_start" "$FAILING")
+
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        local current_takeover
-        current_takeover=$(get_takeover_count)
+        local taken_over=0
+        local total_checked=0
+
+        while IFS= read -r addr; do
+            addr=$(echo "$addr" | tr -d '\r\n ')
+            [ -z "$addr" ] && continue
+            total_checked=$((total_checked + 1))
+
+            local code
+            code=$(docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 15 \
+                -o /dev/null -w "%{http_code}" \
+                "http://${addr}/" 2>/dev/null) || code="000"
+            if [ "$code" = "302" ]; then
+                taken_over=$((taken_over + 1))
+            fi
+        done <<< "$content_addrs"
 
         local now
         now=$(date +%s)
         if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
+            log "  (taken over: ${taken_over}/${total_checked} — looking for 302 redirects)"
             last_dashboard=$now
         fi
 
-        if [ "$current_takeover" -ge "$expected" ] 2>/dev/null; then
-            log "Takeover: ${current_takeover} active (target: ${expected})"
+        if [ "$taken_over" -ge "$expected" ] 2>/dev/null; then
+            log "Takeover: ${taken_over}/${total_checked} returning 302 (target: ${expected})"
             print_dashboard
             return 0
         fi
@@ -719,7 +929,7 @@ wait_for_takeover() {
         sleep 10
     done
 
-    log "Takeover: Timed out — $(get_takeover_count) active (wanted ${expected})"
+    log "Takeover: Timed out — ${taken_over:-0} returning 302 (wanted ${expected})"
     print_dashboard
     return 1
 }
@@ -728,25 +938,48 @@ wait_for_recovery() {
     local expected_healthy="$1"
     local timeout_secs="${2:-600}"
 
-    log "Waiting for recovery — expecting ${expected_healthy} healthy, 0 takeovers (timeout: ${timeout_secs}s)..."
+    log "Waiting for recovery — polling previously-failed workers for 200 OK (timeout: ${timeout_secs}s)..."
 
     local deadline=$(($(date +%s) + timeout_secs))
     local last_dashboard=0
 
+    # Get content addresses of the workers that were disabled
+    local fail_start=$((TOTAL - FAILING))
+    local content_addrs
+    content_addrs=$(get_worker_content_addrs "$fail_start" "$FAILING")
+
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        local current_healthy current_takeover
-        current_healthy=$(get_healthy_count)
-        current_takeover=$(get_takeover_count)
+        local recovered=0
+        local still_taken=0
+        local total_checked=0
+
+        while IFS= read -r addr; do
+            addr=$(echo "$addr" | tr -d '\r\n ')
+            [ -z "$addr" ] && continue
+            total_checked=$((total_checked + 1))
+
+            local code
+            code=$(docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 15 \
+                -o /dev/null -w "%{http_code}" \
+                "http://${addr}/" 2>/dev/null) || code="000"
+            if [ "$code" = "200" ]; then
+                recovered=$((recovered + 1))
+            elif [ "$code" = "302" ]; then
+                still_taken=$((still_taken + 1))
+            fi
+        done <<< "$content_addrs"
 
         local now
         now=$(date +%s)
         if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
+            log "  (recovered: ${recovered}/${total_checked}, still taken over: ${still_taken})"
             last_dashboard=$now
         fi
 
-        if [ "$current_healthy" -ge "$expected_healthy" ] 2>/dev/null && [ "$current_takeover" -eq 0 ] 2>/dev/null; then
-            log "Recovery complete — ${current_healthy} healthy, ${current_takeover} takeovers"
+        if [ "$recovered" -ge "$FAILING" ] 2>/dev/null && [ "$still_taken" -eq 0 ] 2>/dev/null; then
+            log "Recovery complete — ${recovered} workers back to 200 OK, 0 still redirecting"
             print_dashboard
             return 0
         fi
@@ -754,7 +987,7 @@ wait_for_recovery() {
         sleep 10
     done
 
-    log "Recovery: Timed out — $(get_healthy_count) healthy, $(get_takeover_count) takeovers"
+    log "Recovery: Timed out — ${recovered:-0} recovered, ${still_taken:-0} still taken over"
     print_dashboard
     return 1
 }
@@ -791,11 +1024,19 @@ except:
     sys.exit(1)
 " 2>/dev/null) || continue
 
-        # POST /offline via localhost inside onioncellar (no auth needed)
-        docker_cmd exec onioncellar \
-            curl -s -X POST http://localhost:8083/offline \
-            -H "Content-Type: application/json" \
-            -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+        # POST /offline to cellar — locally or over Tor
+        if [ "$IS_CELLAR_HOST" = true ]; then
+            docker_cmd exec onioncellar \
+                curl -s -X POST http://localhost:8083/offline \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+        else
+            docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                -X POST "http://${CELLAR_ADDR}:8083/offline" \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+        fi
 
         notified=$((notified + 1))
     done
@@ -834,11 +1075,19 @@ except:
     sys.exit(1)
 " 2>/dev/null) || continue
 
-        # POST /online via localhost inside onioncellar (no auth needed)
-        docker_cmd exec onioncellar \
-            curl -s -X POST http://localhost:8083/online \
-            -H "Content-Type: application/json" \
-            -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+        # POST /online to cellar — locally or over Tor
+        if [ "$IS_CELLAR_HOST" = true ]; then
+            docker_cmd exec onioncellar \
+                curl -s -X POST http://localhost:8083/online \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+        else
+            docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                -X POST "http://${CELLAR_ADDR}:8083/online" \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+        fi
 
         notified=$((notified + 1))
     done
@@ -849,8 +1098,29 @@ except:
 
 # Get content addresses that have active takeovers (one per line).
 get_taken_over_addresses() {
-    docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT content_address FROM registry WHERE takeover_active=1" 2>/dev/null || true
+    if [ "$IS_CELLAR_HOST" = true ]; then
+        docker_cmd exec onioncellar \
+            sqlite3 "$CELLAR_DB_PATH" "SELECT content_address FROM registry WHERE takeover_active=1" 2>/dev/null || true
+    else
+        # On remote machines, use the disabled workers' addresses from local info files.
+        # These are the workers we know we disabled, so they should be taken over.
+        local fail_start=$((TOTAL - FAILING))
+        for i in $(seq "$fail_start" $((TOTAL - 1))); do
+            local ctr_idx=$((i / PER_CTR))
+            local local_idx=$((i % PER_CTR))
+            local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
+            python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
+    if w and w.get('content_address'):
+        print(w['content_address'])
+except: pass
+" 2>/dev/null
+        done
+    fi
 }
 
 # Verify that taken-over addresses serve 302 redirects to the Wayback Machine.
@@ -935,11 +1205,13 @@ verify_redirects() {
     log "${phase_label}: Redirect verification — ${passed}/${sampled} passed, ${failed} failed (${total_taken} total taken over)"
     log_json "\"event\":\"redirect_verify\",\"phase\":\"${phase_label}\",\"total_taken\":${total_taken},\"sampled\":${sampled},\"passed\":${passed},\"failed\":${failed}"
 
-    # Dump debug log from redirect service
-    log "${phase_label}: Redirect debug log:"
-    docker_cmd exec onioncellar cat /tmp/cellar-redirect-debug.log 2>/dev/null | tail -30 | while IFS= read -r dbgline; do
-        echo "           [redirect-dbg] $dbgline"
-    done || echo "           [redirect-dbg] (no debug log found)"
+    # Dump debug log from redirect service (cellar host only)
+    if [ "$IS_CELLAR_HOST" = true ]; then
+        log "${phase_label}: Redirect debug log:"
+        docker_cmd exec onioncellar cat /tmp/cellar-redirect-debug.log 2>/dev/null | tail -30 | while IFS= read -r dbgline; do
+            echo "           [redirect-dbg] $dbgline"
+        done || echo "           [redirect-dbg] (no debug log found)"
+    fi
 }
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
@@ -957,10 +1229,25 @@ cleanup_stress_test() {
     done || true
     log "  Removed worker containers"
 
-    # Get stress-test addresses before unregistering
-    local stress_addrs
-    stress_addrs=$(docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT DISTINCT content_address FROM registry WHERE version='stress-test'" 2>/dev/null) || true
+    # Unregister stress-test workers from cellar
+    # Get addresses from local worker-info files (works on any machine)
+    local stress_addrs=""
+    for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
+        local info_file="${OUTPUT_DIR}/worker-${idx}-info.json"
+        local addrs
+        addrs=$(python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    for w in workers:
+        if w.get('content_address'):
+            print(w['content_address'])
+except: pass
+" 2>/dev/null) || true
+        [ -n "$addrs" ] && stress_addrs="${stress_addrs}${addrs}
+"
+    done
 
     local count=0
     local released_arti=0
@@ -969,15 +1256,23 @@ cleanup_stress_test() {
             addr=$(echo "$addr" | tr -d '\r\n ')
             [ -z "$addr" ] && continue
 
-            # POST /unregister via cellar-server API
+            # POST /unregister — locally or over Tor
             local resp
-            resp=$(docker_cmd exec onioncellar \
-                curl -s -X POST http://localhost:8083/unregister \
-                -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+            if [ "$IS_CELLAR_HOST" = true ]; then
+                resp=$(docker_cmd exec onioncellar \
+                    curl -s -X POST http://localhost:8083/unregister \
+                    -H "Content-Type: application/json" \
+                    -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+            else
+                resp=$(docker_cmd exec onionpress-tor-client \
+                    curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                    -X POST "http://${CELLAR_ADDR}:8083/unregister" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+            fi
 
-            # If takeover was active, release Arti config in tor container
-            if echo "$resp" | grep -q '"takeover_was_active":true'; then
+            # If takeover was active and we're on cellar host, release Arti config
+            if [ "$IS_CELLAR_HOST" = true ] && echo "$resp" | grep -q '"takeover_was_active":true'; then
                 docker_cmd exec onionpress-tor \
                     /cellar-tor-manager.sh release "$addr" 2>/dev/null || true
                 released_arti=$((released_arti + 1))
@@ -1027,6 +1322,15 @@ run_worker() {
         log "WARNING: Not all workers bootstrapped"
     fi
     extract_all_worker_info
+
+    # Nudge Arti to re-publish onion descriptors (works around slow initial publication)
+    for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
+        local ctr_name="stress-worker-${idx}"
+        docker_cmd exec "$ctr_name" sh -c \
+            'for d in /proc/[0-9]*; do if [ "$(cat $d/comm 2>/dev/null)" = "arti" ]; then kill -HUP $(basename $d); fi; done' \
+            2>/dev/null || true
+    done
+    log "Sent SIGHUP to Arti in all worker containers (descriptor re-publish)"
     echo ""
 
     # Phase 3: Wait for cellar poller to confirm workers are healthy
@@ -1144,6 +1448,17 @@ run_cleanup() {
         exit 1
     fi
 
+    # Detect cellar host (needed for cleanup routing)
+    local content_addr
+    content_addr=$(docker_cmd exec onionpress-tor \
+        su -s /bin/sh arti -c "arti hss --nickname wordpress onion-address -c /etc/arti/arti.toml" 2>/dev/null) || true
+    if [ "$content_addr" = "$KNOWN_CELLAR_ADDR" ]; then
+        IS_CELLAR_HOST=true
+    else
+        IS_CELLAR_HOST=false
+    fi
+    detect_cellar_addr
+
     # Remove all stress-worker containers
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
         docker_cmd rm -f "$ctr" 2>/dev/null || true
@@ -1153,10 +1468,24 @@ run_cleanup() {
     # Also remove old-style container
     docker_cmd rm -f stress-worker-tor 2>/dev/null || true
 
-    # Get stress-test addresses
-    local stress_addrs
-    stress_addrs=$(docker_cmd exec onioncellar \
-        sqlite3 "$CELLAR_DB_PATH" "SELECT DISTINCT content_address FROM registry WHERE version='stress-test'" 2>/dev/null) || true
+    # Get stress-test addresses from local worker-info files
+    local stress_addrs=""
+    for info_file in "${OUTPUT_DIR}"/worker-*-info.json; do
+        [ -f "$info_file" ] || continue
+        local addrs
+        addrs=$(python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    for w in workers:
+        if w.get('content_address'):
+            print(w['content_address'])
+except: pass
+" 2>/dev/null) || true
+        [ -n "$addrs" ] && stress_addrs="${stress_addrs}${addrs}
+"
+    done
 
     local count
     count=$(echo "$stress_addrs" | grep -c '\.onion' 2>/dev/null || true)
@@ -1168,22 +1497,29 @@ run_cleanup() {
         return
     fi
 
-    # Unregister each entry via cellar-server API
+    # Unregister each entry — locally or over Tor
     local unregistered=0
     local released_arti=0
     for addr in $stress_addrs; do
         addr=$(echo "$addr" | tr -d '\r\n ')
         [ -z "$addr" ] && continue
 
-        # POST /unregister via cellar-server API
         local resp
-        resp=$(docker_cmd exec onioncellar \
-            curl -s -X POST http://localhost:8083/unregister \
-            -H "Content-Type: application/json" \
-            -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+        if [ "$IS_CELLAR_HOST" = true ]; then
+            resp=$(docker_cmd exec onioncellar \
+                curl -s -X POST http://localhost:8083/unregister \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+        else
+            resp=$(docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                -X POST "http://${CELLAR_ADDR}:8083/unregister" \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+        fi
 
-        # If takeover was active, release Arti config in tor container
-        if echo "$resp" | grep -q '"takeover_was_active":true'; then
+        # If takeover was active and we're on cellar host, release Arti config
+        if [ "$IS_CELLAR_HOST" = true ] && echo "$resp" | grep -q '"takeover_was_active":true'; then
             docker_cmd exec onionpress-tor \
                 /cellar-tor-manager.sh release "$addr" 2>/dev/null || true
             released_arti=$((released_arti + 1))
