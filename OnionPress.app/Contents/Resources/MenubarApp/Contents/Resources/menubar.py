@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.13"
+        self.version = "2.4.14"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -2445,17 +2445,17 @@ class OnionPressApp(rumps.App):
     ALLOWED_BROWSERS = {"Firefox", "Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"}
 
     def extension_connected_recently(self):
-        """Check if a browser extension was active within the last 24 hours.
+        """Check if a browser extension is actively connected right now.
 
-        Returns the browser app name (e.g. "Firefox") if connected recently,
-        or None if not. Only returns names from ALLOWED_BROWSERS.
+        Returns the browser app name (e.g. "Firefox") if connected in the
+        last 10 seconds, or None if not. Only returns names from ALLOWED_BROWSERS.
         """
         marker = os.path.join(self.app_support, "extension-connected")
         try:
             if os.path.exists(marker):
                 with open(marker, 'r') as f:
                     data = json.loads(f.read().strip())
-                if (time.time() - data["timestamp"]) < 86400:
+                if (time.time() - data["timestamp"]) < 10:
                     browser = data.get("browser")
                     if browser in self.ALLOWED_BROWSERS:
                         return browser
@@ -2468,15 +2468,16 @@ class OnionPressApp(rumps.App):
         tor_browser_path = "/Applications/Tor Browser.app"
         brave_browser_path = "/Applications/Brave Browser.app"
 
-        ext_browser = self.extension_connected_recently()
-        if ext_browser:
-            self.browser_menu_item.title = f"Open in {ext_browser}"
-        elif os.path.exists(brave_browser_path):
-            self.browser_menu_item.title = "Open in Brave Browser"
-        elif os.path.exists(tor_browser_path):
+        if os.path.exists(tor_browser_path):
             self.browser_menu_item.title = "Open in Tor Browser"
         else:
-            self.browser_menu_item.title = "Open in Browser"
+            ext_browser = self.extension_connected_recently()
+            if ext_browser:
+                self.browser_menu_item.title = f"Open in {ext_browser}"
+            elif os.path.exists(brave_browser_path):
+                self.browser_menu_item.title = "Open in Brave Browser"
+            else:
+                self.browser_menu_item.title = "Open in Browser"
 
     def open_tor_browser(self, _):
         """Open the onion address in the best available browser"""
@@ -4178,7 +4179,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.13 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.14 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
