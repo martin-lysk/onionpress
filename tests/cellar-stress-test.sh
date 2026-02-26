@@ -140,12 +140,6 @@ preflight() {
         fi
     done
 
-    if docker_cmd inspect --format='{{.State.Running}}' onioncellar 2>/dev/null | grep -q true; then
-        log "  onioncellar is running (dedicated polling Tor)"
-    else
-        log "  WARNING: onioncellar is not running"
-    fi
-
     # Detect cellar host by checking content onion address
     local content_addr
     content_addr=$(docker_cmd exec onionpress-tor \
@@ -155,7 +149,7 @@ preflight() {
         log "  Detected cellar host (content address matches)"
     else
         IS_CELLAR_HOST=false
-        log "  Not the cellar host — skipping local file injections"
+        log "  Not the cellar host — workers will register over Tor"
     fi
 
     # Get the Arti image from the running tor container
@@ -166,22 +160,29 @@ preflight() {
     fi
     log "  Arti image: $ARTI_IMAGE"
 
-    # Check if cellar registration API is responding
-    local status_check
-    status_check=$(docker_cmd exec onioncellar curl -s --max-time 5 http://localhost:8083/status 2>/dev/null || echo "")
-    if [ -z "$status_check" ]; then
-        echo "ERROR: Cellar registration API is not responding"
-        echo "  Check onioncellar container logs"
-        exit 1
-    fi
-    log "  Cellar registration API is ready"
+    # Cellar-host-only checks: onioncellar container, registration API, sqlite3
+    if [ "$IS_CELLAR_HOST" = true ]; then
+        if docker_cmd inspect --format='{{.State.Running}}' onioncellar 2>/dev/null | grep -q true; then
+            log "  onioncellar is running (dedicated polling Tor)"
+        else
+            log "  WARNING: onioncellar is not running"
+        fi
 
-    # Ensure sqlite3 is available in onioncellar (image may not include it yet)
-    if ! docker_cmd exec onioncellar sqlite3 --version >/dev/null 2>&1; then
-        log "  Installing sqlite3 in onioncellar..."
-        docker_cmd exec onioncellar sh -c "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1"
+        local status_check
+        status_check=$(docker_cmd exec onioncellar curl -s --max-time 5 http://localhost:8083/status 2>/dev/null || echo "")
+        if [ -z "$status_check" ]; then
+            echo "ERROR: Cellar registration API is not responding"
+            echo "  Check onioncellar container logs"
+            exit 1
+        fi
+        log "  Cellar registration API is ready"
+
+        if ! docker_cmd exec onioncellar sqlite3 --version >/dev/null 2>&1; then
+            log "  Installing sqlite3 in onioncellar..."
+            docker_cmd exec onioncellar sh -c "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1"
+        fi
+        log "  sqlite3 available in onioncellar"
     fi
-    log "  sqlite3 available in onioncellar"
 
     # File injections — only on the cellar host (requires local repo files)
     if [ "$IS_CELLAR_HOST" = true ]; then
