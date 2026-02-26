@@ -8,6 +8,7 @@ APP_DIR="$(dirname "$SCRIPT_DIR")"
 DOCKER="$APP_DIR/Resources/bin/docker"
 ONIONPRESS="$SCRIPT_DIR/onionpress"
 export DOCKER_HOST="unix://$HOME/.onionpress/colima/default/docker.sock"
+unset DOCKER_CONTEXT
 
 # Parse our flags, pass everything else to curl
 FORCE_START=false
