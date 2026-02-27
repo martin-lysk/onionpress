@@ -1,6 +1,11 @@
 [proxy]
 socks_listen = "0.0.0.0:9050"
 
+[path_rules]
+# Restrict to IPv4 only — Colima/Docker has no IPv6 routes,
+# so IPv6 relay connections fail with "Network unreachable"
+reachable_addrs = ["0.0.0.0/0:*"]
+
 [storage]
 cache_dir = "/var/lib/arti/cache"
 state_dir = "/var/lib/arti/state"
@@ -13,7 +18,7 @@ enabled = true
 # Arti requires IP addresses (no hostnames). socat on 127.0.0.1:8080
 # forwards to wordpress:80 — started by entrypoint.sh.
 proxy_ports = [["80", "127.0.0.1:8080"]]
-num_intro_points = 20
+num_intro_points = 3
 
 [onion_services."healthcheck"]
 enabled = true
