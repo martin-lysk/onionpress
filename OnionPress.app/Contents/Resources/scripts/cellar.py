@@ -27,7 +27,7 @@ CELLAR_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 CELLAR_API_PORT = 8083
 
 # Wayback Machine .onion address
-WAYBACK_ONION = "web.archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
+WAYBACK_ONION = "web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
 
 # Paths inside containers
 CELLAR_DATA_DIR = "/var/lib/onionpress/cellar"

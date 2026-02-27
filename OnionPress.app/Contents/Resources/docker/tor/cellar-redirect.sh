@@ -7,7 +7,7 @@
 # connections here. Visitors get redirected to the archived version of the site.
 
 REDIRECT_PORT=8082
-WAYBACK_ONION="web.archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
+WAYBACK_ONION="web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
 
 # Handle a single HTTP request (called by socat via --handle-request)
 handle_request() {

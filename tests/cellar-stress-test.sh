@@ -1216,7 +1216,7 @@ verify_redirects() {
 
         if [ "$http_code" = "302" ]; then
             # Check that redirect points to Wayback Machine
-            if echo "$redirect_url" | grep -qi 'web.archive.org\|archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion'; then
+            if echo "$redirect_url" | grep -qi 'web.archive.org\|archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion'; then
                 log "  PASS: ${addr} → 302 → ${redirect_url}"
                 passed=$((passed + 1))
             else
