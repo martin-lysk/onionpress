@@ -21,6 +21,7 @@ import os
 import re
 import sqlite3
 import struct
+import subprocess
 import sys
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -37,6 +38,53 @@ CELLAR_DB_PATH = os.path.join(CELLAR_DATA_DIR, "registry.db")
 CELLAR_KEYS_DIR = os.path.join(CELLAR_DATA_DIR, "keys")
 
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
+TOR_MANAGER = "/cellar-tor-manager.sh"
+
+
+def immediate_release(content_address, conn):
+    """If a takeover is active for this content_address, release it immediately.
+
+    Called from /register and /online so the cellar stops serving the takeover
+    onion service as soon as the worker is confirmed alive. This lets the
+    worker's fresh descriptor win in the Tor DHT faster.
+
+    Returns True if a release was performed, False otherwise.
+    """
+    rows = conn.execute(
+        "SELECT takeover_active FROM registry WHERE content_address = ?",
+        (content_address,)
+    ).fetchall()
+    if not any(row["takeover_active"] for row in rows):
+        return False
+
+    try:
+        result = subprocess.run(
+            [TOR_MANAGER, "release", content_address],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            conn.execute(
+                "UPDATE registry SET takeover_active = 0 WHERE content_address = ?",
+                (content_address,)
+            )
+            conn.commit()
+            sys.stderr.write(
+                f"[immediate_release] Released takeover for {content_address}\n"
+            )
+            sys.stderr.flush()
+            return True
+        else:
+            sys.stderr.write(
+                f"[immediate_release] Failed for {content_address}: {result.stderr}\n"
+            )
+            sys.stderr.flush()
+            return False
+    except Exception as e:
+        sys.stderr.write(
+            f"[immediate_release] Error for {content_address}: {e}\n"
+        )
+        sys.stderr.flush()
+        return False
 
 # ---------------------------------------------------------------------------
 # SQLite helpers (same schema as cellar-poller.py)
@@ -384,11 +432,16 @@ class CellarHandler(BaseHTTPRequestHandler):
                 last_contact = excluded.last_contact""",
             (content_address, healthcheck_address, now, version, key_hash, now))
         conn.commit()
+
+        # If cellar was redirecting this address, release immediately so the
+        # worker's descriptor can take over in the Tor DHT.
+        released = immediate_release(content_address, conn)
         conn.close()
 
         self._send_json(200, {
             "registered": True,
             "content_address": content_address,
+            "released": released,
             "message": "Registration updated" if existing else "Registration created",
         })
 
@@ -512,12 +565,17 @@ class CellarHandler(BaseHTTPRequestHandler):
             WHERE content_address = ? AND healthcheck_address = ?""",
             (now, content_address, healthcheck_address))
         conn.commit()
+
+        # If cellar was redirecting this address, release immediately so the
+        # worker's descriptor can take over in the Tor DHT.
+        released = immediate_release(content_address, conn)
         conn.close()
 
         self._send_json(200, {
             "online": True,
             "content_address": content_address,
             "takeover_was_active": takeover_was_active,
+            "released": released,
         })
 
     # -- POST /offline ------------------------------------------------------
