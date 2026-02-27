@@ -204,10 +204,11 @@ preflight() {
         log "  Debug redirect service started"
 
         # Inject cellar-tor-manager.sh (with pidof fix)
+        # Must go into onioncellar — that's where cellar-poller.py calls it
         log "  Injecting cellar-tor-manager.sh..."
         docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-tor-manager.sh" \
-            onionpress-tor:/cellar-tor-manager.sh
-        docker_cmd exec onionpress-tor chmod +x /cellar-tor-manager.sh
+            onioncellar:/cellar-tor-manager.sh
+        docker_cmd exec onioncellar chmod +x /cellar-tor-manager.sh
 
         # Inject fast-polling cellar-poller.py for faster stress test cycles.
         # Reduces FAIL_THRESHOLD (10→3) and HEALTHY_INTERVAL (15→5) so takeovers
@@ -230,9 +231,10 @@ preflight() {
             CELLAR_HEALTHY_INTERVAL=5 \
             CELLAR_FAST_POLL_INTERVAL=5 \
             CELLAR_LONG_FAIL_INTERVAL=30 \
-            CELLAR_FAIL_THRESHOLD=3 \
+            CELLAR_FAIL_THRESHOLD=2 \
+            CELLAR_FAST_POLL_COUNT=5 \
             python3 /cellar-poller.py
-        log "  Fast-poll poller started (threshold=3, interval=5s)"
+        log "  Fast-poll poller started (threshold=2, interval=5s, fast_polls=5)"
     else
         log "  Skipping file injections (not cellar host)"
         log "  Using production poller timing and existing container scripts"
@@ -640,8 +642,77 @@ except: pass
     done
 }
 
+# ── Parallel reachability check ──────────────────────────────────────────────
+# Runs all docker exec curls concurrently (background subshells + temp files).
+# Sets: PCHECK_MATCHED, PCHECK_TOTAL, PCHECK_200, PCHECK_302
+parallel_check_addrs() {
+    local addrs="$1"
+    local accept_codes="$2"
+    local max_time="${3:-10}"
+    local max_parallel="${4:-20}"
+
+    PCHECK_MATCHED=0
+    PCHECK_TOTAL=0
+    PCHECK_302=0
+    PCHECK_200=0
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local pids=""
+    local idx=0
+
+    while IFS= read -r addr; do
+        addr=$(echo "$addr" | tr -d '\r\n ')
+        [ -z "$addr" ] && continue
+        idx=$((idx + 1))
+
+        (
+            code=$(docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time "$max_time" \
+                -o /dev/null -w "%{http_code}" \
+                "http://${addr}/" 2>/dev/null) || code="000"
+            echo "$code" > "${tmpdir}/${idx}"
+        ) &
+        pids="$pids $!"
+
+        # Batch concurrency cap for large worker counts
+        if [ $((idx % max_parallel)) -eq 0 ]; then
+            for pid in $pids; do
+                wait "$pid" 2>/dev/null || true
+            done
+            pids=""
+        fi
+    done <<< "$addrs"
+
+    # Wait for remaining background jobs
+    for pid in $pids; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    PCHECK_TOTAL=$idx
+
+    # Collect results
+    for f in "${tmpdir}"/*; do
+        [ -f "$f" ] || continue
+        local code
+        code=$(cat "$f")
+        case "$code" in
+            200) PCHECK_200=$((PCHECK_200 + 1)) ;;
+            302) PCHECK_302=$((PCHECK_302 + 1)) ;;
+        esac
+        for ac in $accept_codes; do
+            if [ "$code" = "$ac" ]; then
+                PCHECK_MATCHED=$((PCHECK_MATCHED + 1))
+                break
+            fi
+        done
+    done
+
+    rm -rf "$tmpdir"
+}
+
 # ── Phase: Wait for healthy (local state) ───────────────────────────────────
-# Polls our workers' healthcheck .onion addresses via tor-client.
+# Polls our workers' healthcheck .onion addresses via tor-client (parallel).
 
 wait_for_healthy() {
     local target="$1"
@@ -658,23 +729,9 @@ wait_for_healthy() {
     hc_addrs=$(get_worker_hc_addrs 0 "$TOTAL")
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        local reachable=0
-        local total_checked=0
-
-        while IFS= read -r addr; do
-            addr=$(echo "$addr" | tr -d '\r\n ')
-            [ -z "$addr" ] && continue
-            total_checked=$((total_checked + 1))
-
-            local code
-            code=$(docker_cmd exec onionpress-tor-client \
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 15 \
-                -o /dev/null -w "%{http_code}" \
-                "http://${addr}/" 2>/dev/null) || code="000"
-            if [ "$code" = "200" ]; then
-                reachable=$((reachable + 1))
-            fi
-        done <<< "$hc_addrs"
+        parallel_check_addrs "$hc_addrs" "200"
+        local reachable=$PCHECK_MATCHED
+        local total_checked=$PCHECK_TOTAL
 
         local now
         now=$(date +%s)
@@ -690,7 +747,7 @@ wait_for_healthy() {
             return 0
         fi
 
-        sleep 10
+        sleep 5
     done
 
     log "${phase_name}: Timed out — only ${reachable:-0} reachable (wanted ${target})"
@@ -894,23 +951,9 @@ wait_for_takeover() {
     content_addrs=$(get_worker_content_addrs "$fail_start" "$FAILING")
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        local taken_over=0
-        local total_checked=0
-
-        while IFS= read -r addr; do
-            addr=$(echo "$addr" | tr -d '\r\n ')
-            [ -z "$addr" ] && continue
-            total_checked=$((total_checked + 1))
-
-            local code
-            code=$(docker_cmd exec onionpress-tor-client \
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 15 \
-                -o /dev/null -w "%{http_code}" \
-                "http://${addr}/" 2>/dev/null) || code="000"
-            if [ "$code" = "302" ]; then
-                taken_over=$((taken_over + 1))
-            fi
-        done <<< "$content_addrs"
+        parallel_check_addrs "$content_addrs" "302"
+        local taken_over=$PCHECK_302
+        local total_checked=$PCHECK_TOTAL
 
         local now
         now=$(date +%s)
@@ -926,7 +969,7 @@ wait_for_takeover() {
             return 0
         fi
 
-        sleep 10
+        sleep 5
     done
 
     log "Takeover: Timed out — ${taken_over:-0} returning 302 (wanted ${expected})"
@@ -949,26 +992,10 @@ wait_for_recovery() {
     content_addrs=$(get_worker_content_addrs "$fail_start" "$FAILING")
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        local recovered=0
-        local still_taken=0
-        local total_checked=0
-
-        while IFS= read -r addr; do
-            addr=$(echo "$addr" | tr -d '\r\n ')
-            [ -z "$addr" ] && continue
-            total_checked=$((total_checked + 1))
-
-            local code
-            code=$(docker_cmd exec onionpress-tor-client \
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 15 \
-                -o /dev/null -w "%{http_code}" \
-                "http://${addr}/" 2>/dev/null) || code="000"
-            if [ "$code" = "200" ]; then
-                recovered=$((recovered + 1))
-            elif [ "$code" = "302" ]; then
-                still_taken=$((still_taken + 1))
-            fi
-        done <<< "$content_addrs"
+        parallel_check_addrs "$content_addrs" "200 302"
+        local recovered=$PCHECK_200
+        local still_taken=$PCHECK_302
+        local total_checked=$PCHECK_TOTAL
 
         local now
         now=$(date +%s)
@@ -984,7 +1011,7 @@ wait_for_recovery() {
             return 0
         fi
 
-        sleep 10
+        sleep 5
     done
 
     log "Recovery: Timed out — ${recovered:-0} recovered, ${still_taken:-0} still taken over"
@@ -1132,8 +1159,8 @@ verify_redirects() {
     log "${phase_label}: Verifying 302 redirects on sample of taken-over addresses..."
 
     # Wait for descriptor propagation after takeover
-    log "  Waiting 60s for onion descriptor propagation..."
-    sleep 60
+    log "  Waiting 30s for onion descriptor propagation..."
+    sleep 30
 
     local addrs
     addrs=$(get_taken_over_addresses)
@@ -1175,12 +1202,12 @@ verify_redirects() {
                 curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
                 --http1.0 \
                 --socks5-hostname onionpress-tor:9050 \
-                --max-time 60 \
+                --max-time 30 \
                 "http://${addr}" 2>/dev/null) || http_response="000"
             local code
             code=$(echo "$http_response" | awk '{print $1}')
             [ "$code" != "000" ] && break
-            [ "$attempt" -lt 3 ] && { log "  Retry ${attempt}/3 for ${addr} (descriptor not yet available)..."; sleep 30; }
+            [ "$attempt" -lt 3 ] && { log "  Retry ${attempt}/3 for ${addr} (descriptor not yet available)..."; sleep 15; }
         done
 
         local http_code redirect_url
