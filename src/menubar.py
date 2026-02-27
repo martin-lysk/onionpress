@@ -694,6 +694,7 @@ class OnionPressApp(rumps.App):
         self._bootstrap_stall_count = 0    # Consecutive checks with no bootstrap progress
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
+        self._tor_auto_restarted = False   # Whether we've auto-restarted tor this startup
         self.healthcheck_address = None    # Healthcheck .onion address
         self.cellar_messages = []          # Messages received from OnionCellar
         self._cellar_alert_shown = False   # Whether we've shown the cellar alert icon
@@ -1813,6 +1814,18 @@ class OnionPressApp(rumps.App):
                         if self._yellow_since is None:
                             self._yellow_since = time.time()
 
+                        # Auto-restart tor if stuck during initial startup.
+                        # Arti sometimes fails to establish introduction points
+                        # due to circuit-building failures; a restart usually fixes it
+                        # because the directory is cached on the second attempt.
+                        if (self._yellow_since
+                                and not self._was_ready
+                                and not self._tor_auto_restarted
+                                and (time.time() - self._yellow_since) > 120):
+                            self._tor_auto_restarted = True
+                            self.log("Onion service not reachable after 2min — restarting tor container")
+                            threading.Thread(target=self._auto_restart_tor, daemon=True).start()
+
                 # Start web log capture if not already running
                 if self.web_log_process is None:
                     threading.Thread(target=self.start_web_log_capture, daemon=True).start()
@@ -2283,6 +2296,22 @@ class OnionPressApp(rumps.App):
                 self.log("Tor container restarted")
             except Exception as e:
                 self.log(f"Failed to restart Tor container: {e}")
+
+    def _auto_restart_tor(self):
+        """Auto-restart the tor container when onion service fails to come up.
+        Arti sometimes fails to establish introduction points on first boot;
+        a restart fixes it because the Tor directory is cached."""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            subprocess.run(
+                [docker_bin, "restart", "onionpress-tor"],
+                capture_output=True, text=True, env=env, timeout=30)
+            self.log("Tor container restarted — retrying onion service setup")
+        except Exception as e:
+            self.log(f"Failed to auto-restart Tor container: {e}")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
