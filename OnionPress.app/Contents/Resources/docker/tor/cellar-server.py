@@ -522,22 +522,28 @@ class CellarHandler(BaseHTTPRequestHandler):
         if not content_address:
             self._send_json(400, {"error": "Missing required field: content_address"})
             return
-        if not healthcheck_address:
-            self._send_json(400, {"error": "Missing required field: healthcheck_address"})
-            return
         if not ONION_RE.match(content_address):
             self._send_json(400, {"error": "Invalid content_address format"})
             return
-        if not ONION_RE.match(healthcheck_address):
+        if healthcheck_address and not ONION_RE.match(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
         conn = db_connect()
         db_ensure_schema(conn)
-        entry = conn.execute(
-            "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
-            (content_address, healthcheck_address)
-        ).fetchone()
+
+        # healthcheck_address is optional — if provided, match specific row;
+        # otherwise match all rows for this content_address.
+        if healthcheck_address:
+            entry = conn.execute(
+                "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
+                (content_address, healthcheck_address)
+            ).fetchone()
+        else:
+            entry = conn.execute(
+                "SELECT * FROM registry WHERE content_address = ? LIMIT 1",
+                (content_address,)
+            ).fetchone()
 
         if not entry:
             conn.close()
@@ -560,10 +566,16 @@ class CellarHandler(BaseHTTPRequestHandler):
         takeover_was_active = bool(entry["takeover_active"])
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        conn.execute("""UPDATE registry SET
-            status = 'healthy', fail_count = 0, fast_poll_remaining = 20, last_contact = ?
-            WHERE content_address = ? AND healthcheck_address = ?""",
-            (now, content_address, healthcheck_address))
+        if healthcheck_address:
+            conn.execute("""UPDATE registry SET
+                status = 'healthy', fail_count = 0, fast_poll_remaining = 20, last_contact = ?
+                WHERE content_address = ? AND healthcheck_address = ?""",
+                (now, content_address, healthcheck_address))
+        else:
+            conn.execute("""UPDATE registry SET
+                status = 'healthy', fail_count = 0, fast_poll_remaining = 20, last_contact = ?
+                WHERE content_address = ?""",
+                (now, content_address))
         conn.commit()
 
         # If cellar was redirecting this address, release immediately so the
@@ -592,22 +604,26 @@ class CellarHandler(BaseHTTPRequestHandler):
         if not content_address:
             self._send_json(400, {"error": "Missing required field: content_address"})
             return
-        if not healthcheck_address:
-            self._send_json(400, {"error": "Missing required field: healthcheck_address"})
-            return
         if not ONION_RE.match(content_address):
             self._send_json(400, {"error": "Invalid content_address format"})
             return
-        if not ONION_RE.match(healthcheck_address):
+        if healthcheck_address and not ONION_RE.match(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
         conn = db_connect()
         db_ensure_schema(conn)
-        entry = conn.execute(
-            "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
-            (content_address, healthcheck_address)
-        ).fetchone()
+
+        if healthcheck_address:
+            entry = conn.execute(
+                "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
+                (content_address, healthcheck_address)
+            ).fetchone()
+        else:
+            entry = conn.execute(
+                "SELECT * FROM registry WHERE content_address = ? LIMIT 1",
+                (content_address,)
+            ).fetchone()
 
         if not entry:
             conn.close()
@@ -631,10 +647,16 @@ class CellarHandler(BaseHTTPRequestHandler):
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # fail_count=10 matches FAIL_THRESHOLD in cellar-poller.py
-        conn.execute("""UPDATE registry SET
-            status = 'failing', fail_count = 10, fast_poll_remaining = 20, last_contact = ?
-            WHERE content_address = ? AND healthcheck_address = ?""",
-            (now, content_address, healthcheck_address))
+        if healthcheck_address:
+            conn.execute("""UPDATE registry SET
+                status = 'failing', fail_count = 10, fast_poll_remaining = 20, last_contact = ?
+                WHERE content_address = ? AND healthcheck_address = ?""",
+                (now, content_address, healthcheck_address))
+        else:
+            conn.execute("""UPDATE registry SET
+                status = 'failing', fail_count = 10, fast_poll_remaining = 20, last_contact = ?
+                WHERE content_address = ?""",
+                (now, content_address))
         conn.commit()
         conn.close()
 

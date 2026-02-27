@@ -1035,8 +1035,8 @@ notify_offline() {
         local local_idx=$((i % PER_CTR))
         local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
 
-        # Extract content_address from local worker info
-        local content_addr
+        # Extract content_address and healthcheck_address from local worker info
+        local content_addr hc_addr
         content_addr=$(python3 -c "
 import json, sys
 try:
@@ -1050,19 +1050,32 @@ try:
 except:
     sys.exit(1)
 " 2>/dev/null) || continue
+        hc_addr=$(python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
+    if w and w.get('healthcheck_address'):
+        print(w['healthcheck_address'])
+    else:
+        sys.exit(1)
+except:
+    sys.exit(1)
+" 2>/dev/null) || continue
 
         # POST /offline to cellar — locally or over Tor
         if [ "$IS_CELLAR_HOST" = true ]; then
             docker_cmd exec onioncellar \
                 curl -s -X POST http://localhost:8083/offline \
                 -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+                -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
         else
             docker_cmd exec onionpress-tor-client \
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
                 -X POST "http://${CELLAR_ADDR}:8083/offline" \
                 -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+                -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
         fi
 
         notified=$((notified + 1))
@@ -1086,8 +1099,8 @@ notify_online() {
         local local_idx=$((i % PER_CTR))
         local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
 
-        # Extract content_address from local worker info
-        local content_addr
+        # Extract content_address and healthcheck_address from local worker info
+        local content_addr hc_addr
         content_addr=$(python3 -c "
 import json, sys
 try:
@@ -1101,19 +1114,32 @@ try:
 except:
     sys.exit(1)
 " 2>/dev/null) || continue
+        hc_addr=$(python3 -c "
+import json, sys
+try:
+    with open('${info_file}') as f:
+        workers = json.load(f)
+    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
+    if w and w.get('healthcheck_address'):
+        print(w['healthcheck_address'])
+    else:
+        sys.exit(1)
+except:
+    sys.exit(1)
+" 2>/dev/null) || continue
 
         # POST /online to cellar — locally or over Tor
         if [ "$IS_CELLAR_HOST" = true ]; then
             docker_cmd exec onioncellar \
                 curl -s -X POST http://localhost:8083/online \
                 -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+                -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
         else
             docker_cmd exec onionpress-tor-client \
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
                 -X POST "http://${CELLAR_ADDR}:8083/online" \
                 -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${content_addr}\"}" >/dev/null 2>&1 || true
+                -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
         fi
 
         notified=$((notified + 1))
