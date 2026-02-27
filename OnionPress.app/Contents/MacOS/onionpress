@@ -200,7 +200,7 @@ detect_cellar_mode() {
                     log "OnionCellar: VM restarted with 5GB"
                     # Bring containers back up (start_containers will re-call detect_cellar_mode,
                     # but this time the VM will have enough memory so no loop)
-                    docker compose up -d --pull always wordpress db >> "$LOG_FILE" 2>&1
+                    docker compose up -d wordpress db >> "$LOG_FILE" 2>&1
                     # Wait for WordPress to be ready
                     local mem_wp_wait=0
                     while [ $mem_wp_wait -lt 60 ]; do
@@ -210,7 +210,7 @@ detect_cellar_mode() {
                         sleep 2
                         mem_wp_wait=$((mem_wp_wait + 2))
                     done
-                    docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1
+                    docker compose up -d tor tor-client >> "$LOG_FILE" 2>&1
                 else
                     log "OnionCellar: ERROR — VM restart failed, continuing with $(( vm_mem_kb / 1024 ))MB"
                 fi
@@ -240,7 +240,7 @@ CELLAR_DOCKERFILE
 
         # Start onioncellar container (SOCKS + keystore + cellar-server + cellar-poller)
         # This keeps HSDir lookups off the main Tor instance and runs the cellar services
-        if docker compose --profile cellar up -d --pull always onioncellar >> "$LOG_FILE" 2>&1; then
+        if docker compose --profile cellar up -d onioncellar >> "$LOG_FILE" 2>&1; then
             log "OnionCellar: started onioncellar container"
         else
             log "WARNING: Failed to start onioncellar container"
@@ -1366,7 +1366,7 @@ start_containers() {
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d --pull always wordpress db tor-client >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d wordpress db tor-client >> "$LOG_FILE" 2>&1; then
             break
         fi
         log "WARNING: 'docker compose up -d wordpress db tor-client' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
@@ -1410,7 +1410,7 @@ start_containers() {
 
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
-        docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+        docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
     else
         log "WordPress not yet installed — waiting for setup (Tor NOT started)"
     fi
@@ -1437,7 +1437,7 @@ start_containers() {
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
         log "Cloudflare Tunnel enabled, starting cloudflared..."
-        docker compose $CF_COMPOSE up -d --pull always cloudflared >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start cloudflared container"
+        docker compose $CF_COMPOSE up -d cloudflared >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start cloudflared container"
     else
         # Stop cloudflared if it was previously running but token was removed
         docker stop onionpress-cloudflared 2>/dev/null || true
@@ -1673,7 +1673,7 @@ main() {
             # Detect cellar mode BEFORE starting Tor so ONIONPRESS_CELLAR env var
             # is set when docker-compose creates the tor container (exposes port 8083)
             detect_cellar_mode || true
-            docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+            docker compose up -d tor tor-client >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor containers started"
             ;;
 
