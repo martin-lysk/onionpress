@@ -695,6 +695,7 @@ class OnionPressApp(rumps.App):
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
         self._tor_auto_restarted = False   # Whether we've auto-restarted tor this startup
+        self._wordpress_confirmed = False  # WordPress responded at least once (stays up reliably)
         self.healthcheck_address = None    # Healthcheck .onion address
         self.cellar_messages = []          # Messages received from OnionCellar
         self._cellar_alert_shown = False   # Whether we've shown the cellar alert icon
@@ -1757,8 +1758,15 @@ class OnionPressApp(rumps.App):
                     current_status = (self.is_running, self.onion_address)
                     should_log = (current_status != self.last_status_logged) or not self.is_ready
 
-                    # Check if WordPress is ready and Tor is reachable
-                    wordpress_ready = self.check_wordpress_health(log_result=should_log)
+                    # Check if WordPress is ready and Tor is reachable.
+                    # Once WordPress responds, skip rechecking it — it stays up
+                    # reliably inside Docker. Only Tor needs ongoing monitoring.
+                    if not self._wordpress_confirmed:
+                        wordpress_ready = self.check_wordpress_health(log_result=should_log)
+                        if wordpress_ready:
+                            self._wordpress_confirmed = True
+                    else:
+                        wordpress_ready = True
                     tor_reachable = self.check_tor_reachability(log_result=should_log)
 
                     previous_ready = self.is_ready
@@ -2254,6 +2262,7 @@ class OnionPressApp(rumps.App):
         self.start_caffeinate()
         # Reset cellar check so /online fires when Tor reconnects
         self._cellar_checked = False
+        self._wordpress_confirmed = False  # Re-verify WordPress once after wake
         if self.is_ready:
             self.is_ready = False
             self._last_bootstrap_pct = 0
