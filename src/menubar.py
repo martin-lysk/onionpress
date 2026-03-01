@@ -900,7 +900,12 @@ class OnionPressApp(rumps.App):
                 pass
 
     def start_caffeinate(self):
-        """Start caffeinate to prevent Mac from sleeping while service runs"""
+        """Start caffeinate to prevent Mac from sleeping (cellar mode only)"""
+        # Only cellar machines need sleep prevention — normal OnionPress
+        # should let the Mac sleep normally when the user closes the lid
+        if not self.is_cellar:
+            return
+
         # Check if already running
         if self.caffeinate_process is not None:
             try:
@@ -920,14 +925,9 @@ class OnionPressApp(rumps.App):
             return
 
         try:
-            if self.is_cellar:
-                # Cellar: prevent idle sleep so network stays active (display can sleep)
-                caff_args = ["caffeinate", "-i"]
-                caff_msg = "cellar mode — system will not idle-sleep"
-            else:
-                # Normal: prevent system sleep on AC power only
-                caff_args = ["caffeinate", "-s"]
-                caff_msg = "Mac will stay awake while plugged in"
+            # Cellar: prevent idle sleep so network stays active (display can sleep)
+            caff_args = ["caffeinate", "-i"]
+            caff_msg = "cellar mode — system will not idle-sleep"
             self.caffeinate_process = subprocess.Popen(
                 caff_args,
                 stdout=subprocess.DEVNULL,
@@ -1802,6 +1802,7 @@ class OnionPressApp(rumps.App):
                         self.is_ready = False
                         self._yellow_since = time.time()
                         self._bootstrap_stall_count = 0
+                        self._tor_auto_restarted = False  # Allow auto-restart again
                         self.log("Service became unreachable — reconnecting")
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
@@ -1814,12 +1815,12 @@ class OnionPressApp(rumps.App):
                         if self._yellow_since is None:
                             self._yellow_since = time.time()
 
-                        # Auto-restart tor if stuck during initial startup.
+                        # Auto-restart tor if stuck for 2+ minutes.
                         # Arti sometimes fails to establish introduction points
                         # due to circuit-building failures; a restart usually fixes it
                         # because the directory is cached on the second attempt.
+                        # Works both during initial startup and after degradation.
                         if (self._yellow_since
-                                and not self._was_ready
                                 and not self._tor_auto_restarted
                                 and (time.time() - self._yellow_since) > 120):
                             self._tor_auto_restarted = True
