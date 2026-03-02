@@ -3218,7 +3218,7 @@ class OnionPressApp(rumps.App):
             lines.append(f"{key}={value}\n")
 
         # Write back
-        with open(config_file, 'w') as f:
+        with open(config_file, 'w', encoding='utf-8') as f:
             f.writelines(lines)
 
     # -- Settings help text (from config-template comments) --

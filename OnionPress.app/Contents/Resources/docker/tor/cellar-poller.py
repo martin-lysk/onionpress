@@ -415,6 +415,29 @@ def main():
     migrated = db_migrate_json(conn)
     if migrated > 0:
         log(f"migrated {migrated} entries from JSON to SQLite")
+
+    # Startup reconciliation: container restart wipes arti-cellar.toml
+    # (takeover service entries lost) but the DB still has takeover_active=1.
+    # Reset so the normal failure → takeover flow re-evaluates from scratch.
+    # The service may have come back while we were down.
+    stale = conn.execute(
+        "SELECT DISTINCT content_address FROM registry WHERE takeover_active = 1"
+    ).fetchall()
+    if stale:
+        addrs = [row[0] for row in stale]
+        log(f"startup reconciliation: resetting {len(addrs)} stale takeover(s)")
+        for addr in addrs:
+            # Clean up keystore dirs left from previous run
+            subprocess.run([TOR_MANAGER, "release", addr],
+                           capture_output=True, text=True, timeout=30)
+            log(f"  released stale takeover for {addr}")
+        conn.execute(
+            "UPDATE registry SET takeover_active = 0, fail_count = 0 "
+            "WHERE takeover_active = 1"
+        )
+        conn.commit()
+        log("startup reconciliation complete — all entries will be re-polled fresh")
+
     conn.close()
 
     log("healthcheck poller started")

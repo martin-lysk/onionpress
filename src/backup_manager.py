@@ -276,7 +276,7 @@ def restore_from_backup(zip_path, password, log_func):
             addr_base = onion_address.replace('.onion', '')
             config_path = os.path.join(data_dir, 'config')
             if os.path.exists(config_path):
-                with open(config_path, 'r') as cf:
+                with open(config_path, 'r', encoding='utf-8') as cf:
                     lines = cf.readlines()
                 found = False
                 for i, line in enumerate(lines):
@@ -289,7 +289,7 @@ def restore_from_backup(zip_path, password, log_func):
                         break
                 if not found:
                     lines.append(f'ADDRESS_PREFIX={addr_base[:3]}\n')
-                with open(config_path, 'w') as cf:
+                with open(config_path, 'w', encoding='utf-8') as cf:
                     cf.writelines(lines)
 
         # 2. Restore database via mariadb CLI in the db container
