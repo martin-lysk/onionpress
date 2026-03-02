@@ -1,16 +1,13 @@
-# Stage 1: Compile Arti from source — builds native arch (arm64 on Apple Silicon)
-# The official Tor Project image is amd64-only, which forces qemu emulation on
-# ARM Macs. Building from source gives us a native binary instead.
-FROM rust:latest AS builder
-RUN cargo install arti --locked --features onion-service-service,static-sqlite
+# Official Arti image from Tor Project — rebuilt daily, includes onion-service-service
+# Alpine-based, arti binary at /usr/local/bin/arti, runs as user arti (UID 1000)
+FROM containers.torproject.org/tpo/onion-services/onimages/arti:alpine
 
-# Stage 2: Runtime (must match builder's glibc — rust:latest uses trixie)
-FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    socat openssl ca-certificates sqlite3 python3 curl wget procps \
-    && rm -rf /var/lib/apt/lists/*
-RUN useradd -r -m -s /bin/false arti
-COPY --from=builder /usr/local/cargo/bin/arti /usr/local/bin/arti
+# Switch to root for package install and entrypoint (entrypoint drops to arti user)
+USER root
+
+# Layer runtime dependencies on top of the official image
+RUN apk add --no-cache \
+    socat openssl ca-certificates sqlite python3 curl wget procps
 
 COPY arti.toml /etc/arti/arti.toml
 COPY arti-polling.toml /etc/arti/arti-polling.toml
