@@ -194,7 +194,7 @@ def register_with_cellar(app):
             try:
                 resp = json.loads(output)
                 if resp.get("registered"):
-                    app.log("OnionCellar: registration successful")
+                    app.log(f"OnionCellar: registration successful: {resp}")
                     _save_registration_status(app, {
                         "registered": True,
                         "last_attempt": datetime.now(timezone.utc).isoformat(),

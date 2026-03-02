@@ -694,6 +694,8 @@ class OnionPressApp(rumps.App):
         self._bootstrap_stall_count = 0    # Consecutive checks with no bootstrap progress
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
+        self._tor_auto_restarted = False   # Whether we've auto-restarted tor this startup
+        self._wordpress_confirmed = False  # WordPress responded at least once (stays up reliably)
         self.healthcheck_address = None    # Healthcheck .onion address
         self.cellar_messages = []          # Messages received from OnionCellar
         self._cellar_alert_shown = False   # Whether we've shown the cellar alert icon
@@ -899,7 +901,7 @@ class OnionPressApp(rumps.App):
                 pass
 
     def start_caffeinate(self):
-        """Start caffeinate to prevent Mac from sleeping while service runs"""
+        """Start caffeinate to prevent Mac from sleeping based on config mode"""
         # Check if already running
         if self.caffeinate_process is not None:
             try:
@@ -912,21 +914,25 @@ class OnionPressApp(rumps.App):
         # Clean up any orphaned caffeinate from a previous crash/force-quit
         self._cleanup_stale_caffeinate()
 
-        # Check config setting
-        prevent_sleep = self.read_config_value("PREVENT_SLEEP", "yes").lower()
-        if prevent_sleep != "yes":
-            self.log("Sleep prevention disabled in config")
+        # Read config — 3 modes: normal, on-battery, never
+        mode = self.read_config_value("PREVENT_SLEEP", "normal").lower()
+        # Backward compat: yes→on-battery, no→normal
+        if mode == "yes":
+            mode = "on-battery"
+        elif mode == "no":
+            mode = "normal"
+
+        if mode == "on-battery":
+            caff_args = ["caffeinate", "-s"]
+            caff_msg = "staying awake on AC power"
+        elif mode == "never":
+            caff_args = ["caffeinate", "-i"]
+            caff_msg = "never sleeping while OnionPress runs"
+        else:
+            # "normal" or unknown — no caffeinate
             return
 
         try:
-            if self.is_cellar:
-                # Cellar: prevent idle sleep so network stays active (display can sleep)
-                caff_args = ["caffeinate", "-i"]
-                caff_msg = "cellar mode — system will not idle-sleep"
-            else:
-                # Normal: prevent system sleep on AC power only
-                caff_args = ["caffeinate", "-s"]
-                caff_msg = "Mac will stay awake while plugged in"
             self.caffeinate_process = subprocess.Popen(
                 caff_args,
                 stdout=subprocess.DEVNULL,
@@ -1667,9 +1673,7 @@ class OnionPressApp(rumps.App):
             return "available"
         if not self._has_internet:
             return "offline"
-        # Check for stuck: bootstrap stalled 2min+ (24 checks at 5s) or yellow 5min+
-        if self._bootstrap_stall_count >= 24:
-            return "stuck"
+        # Check for stuck: yellow 5min+ (gives auto-restart time to work)
         if self._yellow_since and (time.time() - self._yellow_since) > 300:
             return "stuck"
         return "starting"
@@ -1756,8 +1760,15 @@ class OnionPressApp(rumps.App):
                     current_status = (self.is_running, self.onion_address)
                     should_log = (current_status != self.last_status_logged) or not self.is_ready
 
-                    # Check if WordPress is ready and Tor is reachable
-                    wordpress_ready = self.check_wordpress_health(log_result=should_log)
+                    # Check if WordPress is ready and Tor is reachable.
+                    # Once WordPress responds, skip rechecking it — it stays up
+                    # reliably inside Docker. Only Tor needs ongoing monitoring.
+                    if not self._wordpress_confirmed:
+                        wordpress_ready = self.check_wordpress_health(log_result=should_log)
+                        if wordpress_ready:
+                            self._wordpress_confirmed = True
+                    else:
+                        wordpress_ready = True
                     tor_reachable = self.check_tor_reachability(log_result=should_log)
 
                     previous_ready = self.is_ready
@@ -1801,6 +1812,7 @@ class OnionPressApp(rumps.App):
                         self.is_ready = False
                         self._yellow_since = time.time()
                         self._bootstrap_stall_count = 0
+                        self._tor_auto_restarted = False  # Allow auto-restart again
                         self.log("Service became unreachable — reconnecting")
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
@@ -1812,6 +1824,18 @@ class OnionPressApp(rumps.App):
                             self._bootstrap_stall_count += 1
                         if self._yellow_since is None:
                             self._yellow_since = time.time()
+
+                        # Auto-restart tor if stuck for 2+ minutes.
+                        # Arti sometimes fails to establish introduction points
+                        # due to circuit-building failures; a restart usually fixes it
+                        # because the directory is cached on the second attempt.
+                        # Works both during initial startup and after degradation.
+                        if (self._yellow_since
+                                and not self._tor_auto_restarted
+                                and (time.time() - self._yellow_since) > 120):
+                            self._tor_auto_restarted = True
+                            self.log("Onion service not reachable after 2min — restarting tor container")
+                            threading.Thread(target=self._auto_restart_tor, daemon=True).start()
 
                 # Start web log capture if not already running
                 if self.web_log_process is None:
@@ -1844,8 +1868,18 @@ class OnionPressApp(rumps.App):
                     if cellar.is_cellar_instance(self.onion_address):
                         self.is_cellar = True
                         self.log("OnionCellar mode activated (poller runs in onioncellar container)")
-                        # Restart caffeinate with -i (idle sleep prevention)
-                        # since it was started with -s before cellar was detected
+                        # One-shot: auto-set PREVENT_SLEEP=never on first cellar detection
+                        # Uses a marker file so we never override the user's later choice
+                        sleep_marker = os.path.join(self.app_support, ".cellar_sleep_set")
+                        if not os.path.exists(sleep_marker):
+                            self.write_config_value("PREVENT_SLEEP", "never")
+                            try:
+                                with open(sleep_marker, 'w') as f:
+                                    f.write("1")
+                            except OSError:
+                                pass
+                            self.log("Auto-set PREVENT_SLEEP=never for cellar machine (first detection)")
+                        # Restart caffeinate with the (now-updated) config
                         self.stop_caffeinate()
                         self.start_caffeinate()
                         self.update_menu()
@@ -1999,8 +2033,8 @@ class OnionPressApp(rumps.App):
                 self.menu["Backup..."].set_callback(self.backup)
                 self.menu["Restore..."].set_callback(self.restore)
             elif state == "stuck":
-                self.icon = self.icon_stopped
-                self.menu["Starting..."].title = "Status: Stuck — try Restart"
+                self.icon = self.icon_starting
+                self.menu["Starting..."].title = "Status: Slow to connect — try Restart"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
@@ -2240,6 +2274,7 @@ class OnionPressApp(rumps.App):
         self.start_caffeinate()
         # Reset cellar check so /online fires when Tor reconnects
         self._cellar_checked = False
+        self._wordpress_confirmed = False  # Re-verify WordPress once after wake
         if self.is_ready:
             self.is_ready = False
             self._last_bootstrap_pct = 0
@@ -2283,6 +2318,22 @@ class OnionPressApp(rumps.App):
                 self.log("Tor container restarted")
             except Exception as e:
                 self.log(f"Failed to restart Tor container: {e}")
+
+    def _auto_restart_tor(self):
+        """Auto-restart the tor container when onion service fails to come up.
+        Arti sometimes fails to establish introduction points on first boot;
+        a restart fixes it because the Tor directory is cached."""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            subprocess.run(
+                [docker_bin, "restart", "onionpress-tor"],
+                capture_output=True, text=True, env=env, timeout=30)
+            self.log("Tor container restarted — retrying onion service setup")
+        except Exception as e:
+            self.log(f"Failed to auto-restart Tor container: {e}")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
@@ -3142,9 +3193,13 @@ class OnionPressApp(rumps.App):
             "Requires restart to take effect."
         ),
         "PREVENT_SLEEP": (
-            "Prevent Mac Sleep While Running (AC Power Only)\n\n"
-            "Keeps your Mac awake while the service is running AND you're plugged "
-            "into AC power. On battery, your Mac sleeps normally.\n\n"
+            "Sleep Prevention Mode\n\n"
+            "Controls whether OnionPress keeps your Mac awake.\n\n"
+            "Normal: Mac sleeps as usual. Your site goes offline when sleeping.\n\n"
+            "On AC Power: Stay awake when plugged in, sleep on battery. "
+            "Good balance of uptime and battery life.\n\n"
+            "Never: Mac never idle-sleeps while OnionPress runs. "
+            "Best for always-on servers (cellar/heaven machines).\n\n"
             "Display sleep is not affected \u2014 the screen can still turn off."
         ),
         "LAUNCH_ON_LOGIN": (
@@ -3195,8 +3250,9 @@ class OnionPressApp(rumps.App):
             "Brief downtime expected while the VM restarts."
         ),
         "PREVENT_SLEEP": {
-            "yes": "Mac will stay awake on AC power.",
-            "no": "Your Mac may sleep while running, taking your site offline.",
+            "normal": "Mac will sleep normally. Site goes offline when sleeping.",
+            "on-battery": "Mac stays awake on AC power. Sleeps normally on battery.",
+            "never": "Mac will never idle-sleep while OnionPress runs. Best for always-on servers.",
         },
         "LAUNCH_ON_LOGIN": {
             "yes": "OnionPress will start automatically on login.",
@@ -3246,7 +3302,7 @@ class OnionPressApp(rumps.App):
         settings_keys = [
             ("ADDRESS_PREFIX", "op2"),
             ("VM_MEMORY", "1"),
-            ("PREVENT_SLEEP", "yes"),
+            ("PREVENT_SLEEP", "normal"),
             ("LAUNCH_ON_LOGIN", "yes"),
             ("UPDATE_ON_LAUNCH", "yes"),
             ("INSTALL_IA_PLUGIN", "yes"),
@@ -3256,6 +3312,14 @@ class OnionPressApp(rumps.App):
         old_values = {}
         for key, default in settings_keys:
             old_values[key] = self._read_config_value(key, default)
+        # Normalize legacy yes/no for PREVENT_SLEEP
+        ps = old_values.get("PREVENT_SLEEP", "normal").lower()
+        if ps == "yes":
+            old_values["PREVENT_SLEEP"] = "on-battery"
+        elif ps == "no":
+            old_values["PREVENT_SLEEP"] = "normal"
+        elif ps not in ("normal", "on-battery", "never"):
+            old_values["PREVENT_SLEEP"] = "normal"
 
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
 
@@ -3352,12 +3416,44 @@ class OnionPressApp(rumps.App):
                 _make_help_btn(y)
                 return cb
 
+            def add_popup_row(y, label_text, key, value, options):
+                label = AppKit.NSTextField.labelWithString_(label_text)
+                label.setFrame_(AppKit.NSMakeRect(0, y + 3, label_w, 18))
+                container.addSubview_(label)
+
+                popup = AppKit.NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    AppKit.NSMakeRect(input_x, y, input_w, 24), False)
+                for title, val in options:
+                    popup.addItemWithTitle_(title)
+                # Select current value
+                for i, (_, val) in enumerate(options):
+                    if val == value:
+                        popup.selectItemAtIndex_(i)
+                        break
+                container.addSubview_(popup)
+                fields[key] = popup
+
+                _make_help_btn(y)
+                return popup
+
             y = container_h - row_h
             prefix_field = add_text_row(y, "Address Prefix:", "ADDRESS_PREFIX", form_values["ADDRESS_PREFIX"])
             y -= row_h
             add_text_row(y, "VM Memory (GB):", "VM_MEMORY", form_values["VM_MEMORY"])
             y -= row_h
-            add_check_row(y, "Prevent Sleep on AC", "PREVENT_SLEEP", form_values["PREVENT_SLEEP"])
+            # Normalize legacy yes/no for the popup display
+            sleep_val = form_values["PREVENT_SLEEP"].lower()
+            if sleep_val == "yes":
+                sleep_val = "on-battery"
+            elif sleep_val == "no":
+                sleep_val = "normal"
+            elif sleep_val not in ("normal", "on-battery", "never"):
+                sleep_val = "normal"
+            add_popup_row(y, "Sleep Prevention:", "PREVENT_SLEEP", sleep_val, [
+                ("Normal", "normal"),
+                ("On AC Power", "on-battery"),
+                ("Never Sleep", "never"),
+            ])
             y -= row_h
             add_check_row(y, "Launch on Login", "LAUNCH_ON_LOGIN", form_values["LAUNCH_ON_LOGIN"])
             y -= row_h
@@ -3386,10 +3482,14 @@ class OnionPressApp(rumps.App):
 
             # -- Collect new values from form --
             new_values = {}
+            sleep_options_map = ["normal", "on-battery", "never"]
             for key in [k for k, _ in settings_keys]:
                 widget = fields[key]
-                if key in ("PREVENT_SLEEP", "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
-                           "INSTALL_IA_PLUGIN", "REGISTER_WITH_CELLAR"):
+                if key == "PREVENT_SLEEP":
+                    idx = widget.indexOfSelectedItem()
+                    new_values[key] = sleep_options_map[idx] if 0 <= idx < len(sleep_options_map) else "normal"
+                elif key in ("LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
+                             "INSTALL_IA_PLUGIN", "REGISTER_WITH_CELLAR"):
                     new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"
                 else:
                     new_values[key] = widget.stringValue().strip()
@@ -3445,7 +3545,7 @@ class OnionPressApp(rumps.App):
             labels = {
                 "ADDRESS_PREFIX": "Address Prefix",
                 "VM_MEMORY": "VM Memory (GB)",
-                "PREVENT_SLEEP": "Prevent Sleep on AC",
+                "PREVENT_SLEEP": "Sleep Prevention",
                 "LAUNCH_ON_LOGIN": "Launch on Login",
                 "UPDATE_ON_LAUNCH": "Update Docker on Launch",
                 "INSTALL_IA_PLUGIN": "Install IA Plugin",
@@ -3503,6 +3603,11 @@ class OnionPressApp(rumps.App):
         # -- Write changed values --
         for key in changes:
             self.write_config_value(key, new_values[key])
+
+        # Apply sleep mode change immediately (no restart needed)
+        if "PREVENT_SLEEP" in changes:
+            self.stop_caffeinate()
+            self.start_caffeinate()
 
         self.log(f"Settings updated: {', '.join(changes)}")
         saved = AppKit.NSAlert.alloc().init()

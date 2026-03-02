@@ -54,22 +54,22 @@ UPDATE_ON_LAUNCH=yes
 #
 LAUNCH_ON_LOGIN=yes
 
-# Prevent Mac Sleep While Running (AC Power Only)
-# Default: "yes" (keeps Mac awake when plugged in)
+# Sleep Prevention Mode
+# Default: "normal" (Mac sleeps as usual)
 #
-# When enabled, OnionPress will prevent your Mac from sleeping while the
-# WordPress + Tor service is running AND you're plugged into AC power.
-# This ensures your .onion site remains accessible 24/7 when connected to power.
+# Controls whether OnionPress keeps your Mac awake while running.
+# Three modes available:
 #
-# IMPORTANT: On battery power, your Mac will sleep normally to preserve battery.
-# Your site will go offline when running on battery and Mac sleeps.
+#   normal     - Mac sleeps as usual. Site goes offline when sleeping.
+#   on-battery - Stay awake on AC power, sleep on battery.
+#                Uses 'caffeinate -s'. Good balance of uptime and battery.
+#   never      - Never idle-sleep while OnionPress runs.
+#                Uses 'caffeinate -i'. Best for always-on servers.
 #
-# Uses the built-in 'caffeinate' command with -s flag (AC power only).
 # Display sleep is not affected - screen can still turn off.
+# OnionCellar/heaven machines auto-set to "never" on first detection.
 #
-# Set to "no" to allow your Mac to sleep even when plugged in.
-#
-PREVENT_SLEEP=yes
+PREVENT_SLEEP=normal
 
 # Virtual Machine Memory (GB)
 # Default: 1 (1 GB RAM for the container VM)
