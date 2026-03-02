@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.15"
+        self.version = "2.4.16"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1825,16 +1825,17 @@ class OnionPressApp(rumps.App):
                         if self._yellow_since is None:
                             self._yellow_since = time.time()
 
-                        # Auto-restart tor if stuck for 2+ minutes.
-                        # Arti sometimes fails to establish introduction points
-                        # due to circuit-building failures; a restart usually fixes it
-                        # because the directory is cached on the second attempt.
-                        # Works both during initial startup and after degradation.
+                        # Auto-restart tor if stuck for 2+ minutes AND
+                        # the container shows signs of actual trouble (broken
+                        # guards, circuit failures). If Arti is healthy but
+                        # just waiting for descriptor propagation, don't restart
+                        # — that would reset progress.
                         if (self._yellow_since
                                 and not self._tor_auto_restarted
-                                and (time.time() - self._yellow_since) > 120):
+                                and (time.time() - self._yellow_since) > 120
+                                and self._tor_container_unhealthy()):
                             self._tor_auto_restarted = True
-                            self.log("Onion service not reachable after 2min — restarting tor container")
+                            self.log("Tor container unhealthy after 2min — restarting")
                             threading.Thread(target=self._auto_restart_tor, daemon=True).start()
 
                 # Start web log capture if not already running
@@ -2303,10 +2304,10 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Failed to SIGHUP Tor: {e}")
 
-        # Wait up to 2 minutes for Tor to bootstrap; if it doesn't, restart container
+        # Wait up to 2 minutes for Tor to bootstrap; only restart if unhealthy
         time.sleep(120)
-        if not self.is_ready:
-            self.log("Tor still not bootstrapped 2min after SIGHUP — restarting container")
+        if not self.is_ready and self._tor_container_unhealthy():
+            self.log("Tor unhealthy 2min after SIGHUP — restarting container")
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
                 env = os.environ.copy()
@@ -2318,6 +2319,54 @@ class OnionPressApp(rumps.App):
                 self.log("Tor container restarted")
             except Exception as e:
                 self.log(f"Failed to restart Tor container: {e}")
+
+    def _tor_container_unhealthy(self):
+        """Check if the tor container shows signs of actual trouble.
+        Returns True if logs indicate broken state (restart will help),
+        False if Arti is healthy but just waiting for propagation."""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            result = subprocess.run(
+                [docker_bin, "logs", "onionpress-tor", "--tail", "50"],
+                capture_output=True, text=True, env=env, timeout=10)
+            logs = result.stderr + result.stdout  # Arti logs to stderr
+            # Signs of trouble that a restart can fix
+            sick_patterns = [
+                "No usable guards",
+                "Too many preemptive onion service circuits failed",
+                "Rejected 60/60 as down",
+            ]
+            # Signs of health — Arti is working, just waiting
+            healthy_patterns = [
+                "Sufficiently bootstrapped",
+                "reuploading descriptor",
+            ]
+            has_sick = any(p in logs for p in sick_patterns)
+            has_healthy = any(p in logs for p in healthy_patterns)
+            if has_sick and not has_healthy:
+                self.log("Tor health check: unhealthy (circuit/guard failures)")
+                return True
+            if has_healthy and not has_sick:
+                self.log("Tor health check: healthy, waiting for propagation")
+                return False
+            if has_sick and has_healthy:
+                # Mixed signals — check which came last (later in log = more recent)
+                last_sick = max(logs.rfind(p) for p in sick_patterns if p in logs)
+                last_healthy = max(logs.rfind(p) for p in healthy_patterns if p in logs)
+                if last_sick > last_healthy:
+                    self.log("Tor health check: degraded after healthy start")
+                    return True
+                self.log("Tor health check: recovered, waiting for propagation")
+                return False
+            # No recognizable patterns — assume unhealthy if we've been waiting
+            self.log("Tor health check: no clear signals, restarting as precaution")
+            return True
+        except Exception as e:
+            self.log(f"Tor health check failed: {e}")
+            return True  # Can't check — restart as fallback
 
     def _auto_restart_tor(self):
         """Auto-restart the tor container when onion service fails to come up.
@@ -4284,7 +4333,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.15 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.16 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
