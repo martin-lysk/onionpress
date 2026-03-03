@@ -58,7 +58,10 @@ def check_healthcheck(healthcheck_address):
              f"http://{healthcheck_address}/"],
             capture_output=True, text=True, timeout=25
         )
-        return result.returncode == 0
+        # Verify we got a real HTTP response, not just a connection.
+        # 302 is excluded — could be OnionHeaven's own redirect service.
+        http_code = result.stdout.strip()
+        return result.returncode == 0 and http_code in ("200", "301")
     except Exception:
         return False
 

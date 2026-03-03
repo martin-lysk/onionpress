@@ -4,6 +4,7 @@ services:
     build: ./tor
     container_name: onionpress-tor
     environment:
+      - TZ=${TZ:-UTC}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
       - ONIONHEAVEN=${ONIONHEAVEN:-0}
     volumes:
@@ -22,6 +23,7 @@ services:
     build: ./wordpress
     container_name: onionpress-wordpress
     environment:
+      - TZ=${TZ:-UTC}
       - WORDPRESS_DB_HOST=db:3306
       - WORDPRESS_DB_USER=wordpress
       - WORDPRESS_DB_PASSWORD=${WORDPRESS_DB_PASSWORD}
@@ -48,6 +50,7 @@ services:
     image: mariadb:latest
     container_name: onionpress-db
     environment:
+      - TZ=${TZ:-UTC}
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
       - MYSQL_DATABASE=wordpress
       - MYSQL_USER=wordpress
@@ -64,6 +67,7 @@ services:
     build: ./tor
     container_name: onionpress-tor-client
     environment:
+      - TZ=${TZ:-UTC}
       - POLLING_ONLY=1
     volumes:
       - arti-state-client:/var/lib/arti/
@@ -76,6 +80,7 @@ services:
     build: ./tor
     container_name: onionheaven
     environment:
+      - TZ=${TZ:-UTC}
       - POLLING_ONLY=1
       - ONIONHEAVEN=${ONIONHEAVEN:-0}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}

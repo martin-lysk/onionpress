@@ -88,6 +88,7 @@ export LIMA_HOME="$COLIMA_HOME/_lima"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 export DOCKER_CONFIG="$DATA_DIR/docker-config"
+export TZ="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo UTC)"
 
 # Detect per-user port offset for multi-user support
 # When multiple macOS users run OnionPress, each needs unique host ports.
