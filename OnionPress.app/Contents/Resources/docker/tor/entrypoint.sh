@@ -5,6 +5,19 @@
 
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
+
+# Clean ephemeral state that causes "Too many preemptive onion service circuits
+# failed" after container restarts. The keystore (identity keys) must survive,
+# but guards, circuit timeouts, and intro point state become stale/poisoned
+# across restarts and should be rebuilt fresh.
+rm -rf /var/lib/arti/cache/*
+rm -f /var/lib/arti/state/state/guards.json
+rm -f /var/lib/arti/state/state/circuit_timeouts.json
+rm -rf /var/lib/arti/state/hss/*/iptreplay/
+rm -rf /var/lib/arti/state/hss/*/ipts.json
+rm -rf /var/lib/arti/state/hss/*/iptpub.json
+rm -rf /var/lib/arti/state/keystore/hss/*/ipts/
+
 chown -R arti:arti /var/lib/arti
 chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
