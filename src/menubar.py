@@ -1571,7 +1571,7 @@ class OnionPressApp(rumps.App):
                 timeout=15,
                 env=docker_env
             )
-            if probe_result.returncode != 0 or probe_result.stdout.strip() not in ["200", "301", "302", "303"]:
+            if probe_result.returncode != 0 or probe_result.stdout.strip() not in ["200", "301"]:
                 if log_result:
                     self.log(f"✗ Onion service not yet reachable through Tor network")
                 return False
@@ -2698,7 +2698,7 @@ class OnionPressApp(rumps.App):
                      onion_url],
                     capture_output=True, text=True, timeout=15, env=docker_env
                 )
-                if result.returncode == 0 and result.stdout.strip() in ["200", "301", "302", "303"]:
+                if result.returncode == 0 and result.stdout.strip() in ["200", "301"]:
                     reachable = True
                     self.log(f"Onion service reachable via tor-client after {(attempt + 1) * 3}s")
                     break
