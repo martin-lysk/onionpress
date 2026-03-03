@@ -41,7 +41,7 @@ FAILING=""        # auto: half of total
 ONIONHEAVEN_ADDR=""    # auto-detect from local tor container
 OUTPUT_DIR="./onionheaven-stress-results"
 CLEANUP=false
-PER_CTR=100       # workers per container
+PER_CTR=50        # workers per container
 BATCH_SIZE=0      # 0 = start all containers at once
 STRESS_VERSION="stress-test"
 BASE_PORT=9100    # port range start inside each container
