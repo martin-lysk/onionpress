@@ -90,7 +90,7 @@ EOF
 
     # Signal Arti to reload configuration
     local arti_pid
-    arti_pid=$(pidof arti)
+    arti_pid=$(pidof arti 2>/dev/null || ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1)
     if [ -n "$arti_pid" ]; then
         kill -HUP "$arti_pid"
         echo "Sent SIGHUP to Arti (pid $arti_pid)"
@@ -132,7 +132,7 @@ do_release() {
 
     # Signal Arti to reload configuration
     local arti_pid
-    arti_pid=$(pidof arti)
+    arti_pid=$(pidof arti 2>/dev/null || ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1)
     if [ -n "$arti_pid" ]; then
         kill -HUP "$arti_pid"
         echo "Sent SIGHUP to Arti (pid $arti_pid)"

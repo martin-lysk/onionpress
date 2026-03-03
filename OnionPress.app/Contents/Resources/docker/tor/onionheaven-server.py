@@ -8,10 +8,11 @@ container on port 8083, exposed through the main tor container's onion service.
 
 Endpoints:
   POST /register     — Register an OnionPress instance with OnionHeaven
-  POST /unregister   — Remove a registration
+  POST /unregister   — Mark a registration as unregistered (soft delete)
   POST /online       — Notify OnionHeaven that instance is back online
   POST /offline      — Notify OnionHeaven that instance is going offline
   GET  /status       — Public status summary (no auth)
+  GET  /status/<addr> — Per-content-address detail
 """
 
 import base64
@@ -19,12 +20,16 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import struct
-import subprocess
 import sys
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+from onionheaven_common import (
+    db_connect, db_ensure_schema, log,
+    takeover_function, release_function,
+    KEYS_DIR,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -33,96 +38,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 8083
 
-ONIONHEAVEN_DATA_DIR = "/var/lib/onionpress/onionheaven"
-ONIONHEAVEN_DB_PATH = os.path.join(ONIONHEAVEN_DATA_DIR, "registry.db")
-ONIONHEAVEN_KEYS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "keys")
-
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
-TOR_MANAGER = "/onionheaven-tor-manager.sh"
-
-
-def immediate_release(content_address, conn):
-    """If a takeover is active for this content_address, release it immediately.
-
-    Called from /register and /online so OnionHeaven stops serving the takeover
-    onion service as soon as the worker is confirmed alive. This lets the
-    worker's fresh descriptor win in the Tor DHT faster.
-
-    Returns True if a release was performed, False otherwise.
-    """
-    rows = conn.execute(
-        "SELECT takeover_active FROM registry WHERE content_address = ?",
-        (content_address,)
-    ).fetchall()
-    if not any(row["takeover_active"] for row in rows):
-        return False
-
-    try:
-        result = subprocess.run(
-            [TOR_MANAGER, "release", content_address],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            conn.execute(
-                "UPDATE registry SET takeover_active = 0 WHERE content_address = ?",
-                (content_address,)
-            )
-            conn.commit()
-            sys.stderr.write(
-                f"[immediate_release] Released takeover for {content_address}\n"
-            )
-            sys.stderr.flush()
-            return True
-        else:
-            sys.stderr.write(
-                f"[immediate_release] Failed for {content_address}: {result.stderr}\n"
-            )
-            sys.stderr.flush()
-            return False
-    except Exception as e:
-        sys.stderr.write(
-            f"[immediate_release] Error for {content_address}: {e}\n"
-        )
-        sys.stderr.flush()
-        return False
-
-# ---------------------------------------------------------------------------
-# SQLite helpers (same schema as onionheaven-poller.py)
-# ---------------------------------------------------------------------------
-
-def db_connect():
-    """Open OnionHeaven SQLite database with WAL mode."""
-    os.makedirs(ONIONHEAVEN_DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(ONIONHEAVEN_DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
-
-
-def db_ensure_schema(conn):
-    """Create registry table if it doesn't exist."""
-    conn.execute("""CREATE TABLE IF NOT EXISTS registry (
-        content_address     TEXT NOT NULL,
-        healthcheck_address TEXT NOT NULL,
-        registered_at       TEXT NOT NULL,
-        version             TEXT NOT NULL DEFAULT 'unknown',
-        status              TEXT NOT NULL DEFAULT 'healthy',
-        last_contact        TEXT,
-        last_redirect       TEXT,
-        fail_count          INTEGER NOT NULL DEFAULT 0,
-        takeover_active     INTEGER NOT NULL DEFAULT 0,
-        fast_poll_remaining INTEGER NOT NULL DEFAULT 0,
-        key_hash            TEXT,
-        PRIMARY KEY (content_address, healthcheck_address)
-    )""")
-    # Add columns that may be missing on older tables
-    cols = [row[1] for row in conn.execute("PRAGMA table_info(registry)").fetchall()]
-    if "key_hash" not in cols:
-        conn.execute("ALTER TABLE registry ADD COLUMN key_hash TEXT")
-    if "last_redirect" not in cols:
-        conn.execute("ALTER TABLE registry ADD COLUMN last_redirect TEXT")
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +140,6 @@ def verify_proof(stored_hash, proof):
     """Constant-time comparison of proof against stored key_hash."""
     if not stored_hash or not proof:
         return False
-    # Use hmac.compare_digest for constant-time comparison
     import hmac
     return hmac.compare_digest(stored_hash, proof)
 
@@ -257,33 +172,85 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError):
             return None
 
-    # -- GET /status --------------------------------------------------------
+    # -- GET dispatch -------------------------------------------------------
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path != "/status":
+        if path == "/status":
+            self._handle_status()
+        elif path.startswith("/status/"):
+            addr = path[len("/status/"):]
+            self._handle_status_detail(addr)
+        else:
             self._send_json(404, {"error": "Not found"})
+
+    # -- GET /status --------------------------------------------------------
+
+    def _handle_status(self):
+        try:
+            conn = db_connect()
+            db_ensure_schema(conn)
+            total = conn.execute("SELECT COUNT(*) FROM registry").fetchone()[0]
+            online = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE status='online'"
+            ).fetchone()[0]
+            taken_over = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE status='taken-over'"
+            ).fetchone()[0]
+            unregistered = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NOT NULL"
+            ).fetchone()[0]
+            conn.close()
+            self._send_json(200, {
+                "total": total,
+                "online": online,
+                "taken_over": taken_over,
+                "unregistered": unregistered,
+            })
+        except Exception as e:
+            self._send_json(500, {"error": str(e)})
+
+    # -- GET /status/<content-address> --------------------------------------
+
+    def _handle_status_detail(self, content_address):
+        if not ONION_RE.match(content_address):
+            self._send_json(400, {"error": "Invalid content_address format"})
             return
 
         try:
             conn = db_connect()
             db_ensure_schema(conn)
-            total = conn.execute("SELECT COUNT(*) FROM registry").fetchone()[0]
-            healthy = conn.execute(
-                "SELECT COUNT(*) FROM registry WHERE status='healthy'"
-            ).fetchone()[0]
-            failing = conn.execute(
-                "SELECT COUNT(*) FROM registry WHERE status='failing'"
-            ).fetchone()[0]
-            taken_over = conn.execute(
-                "SELECT COUNT(*) FROM registry WHERE takeover_active=1"
-            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT * FROM registry WHERE content_address = ? ORDER BY registered_at",
+                (content_address,)
+            ).fetchall()
             conn.close()
+
+            if not rows:
+                self._send_json(404, {"error": "No entries found"})
+                return
+
+            entries = []
+            for row in rows:
+                entries.append({
+                    "content_address": row["content_address"],
+                    "healthcheck_address": row["healthcheck_address"],
+                    "status": row["status"],
+                    "registered_at": row["registered_at"],
+                    "unregistered_at": row["unregistered_at"],
+                    "unregistered_reason": row["unregistered_reason"],
+                    "version": row["version"],
+                    "last_polled": row["last_polled"],
+                    "last_healthy": row["last_healthy"],
+                    "last_released": row["last_released"],
+                    "last_taken_over": row["last_taken_over"],
+                    "last_redirect": row["last_redirect"],
+                })
+
             self._send_json(200, {
-                "total": total,
-                "healthy": healthy,
-                "failing": failing,
-                "taken_over": taken_over,
+                "content_address": content_address,
+                "entries": entries,
+                "count": len(entries),
             })
         except Exception as e:
             self._send_json(500, {"error": str(e)})
@@ -382,7 +349,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             arti_pem = build_openssh_key(secret_key, raw_pubkey)
 
         # Store plaintext PEM key
-        keys_dir = os.path.join(ONIONHEAVEN_KEYS_DIR, content_address)
+        keys_dir = os.path.join(KEYS_DIR, content_address)
         os.makedirs(keys_dir, mode=0o700, exist_ok=True)
 
         pem_path = os.path.join(keys_dir, "ks_hs_id.ed25519_expanded_private")
@@ -420,28 +387,27 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         ).fetchone()
 
         conn.execute("""INSERT INTO registry
-            (content_address, healthcheck_address, registered_at, version, key_hash, last_contact)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (content_address, healthcheck_address, registered_at, version, key_hash,
+             last_healthy, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'online')
             ON CONFLICT(content_address, healthcheck_address) DO UPDATE SET
                 registered_at = excluded.registered_at,
                 version = excluded.version,
                 key_hash = excluded.key_hash,
-                fail_count = 0,
-                status = 'healthy',
-                fast_poll_remaining = 0,
-                last_contact = excluded.last_contact""",
+                last_healthy = excluded.last_healthy,
+                status = 'online',
+                unregistered_at = NULL,
+                unregistered_reason = NULL""",
             (content_address, healthcheck_address, now, version, key_hash, now))
         conn.commit()
 
-        # If OnionHeaven was redirecting this address, release immediately so the
-        # worker's descriptor can take over in the Tor DHT.
-        released = immediate_release(content_address, conn)
+        # Release any active takeover for this content_address
+        release_function(conn, content_address, healthcheck_address, force=True)
         conn.close()
 
         self._send_json(200, {
             "registered": True,
             "content_address": content_address,
-            "released": released,
             "message": "Registration updated" if existing else "Registration created",
         })
 
@@ -461,8 +427,16 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid content_address format"})
             return
 
+        # Optional: target a specific healthcheck row
+        healthcheck_address = data.get("healthcheck_address", "")
+        if healthcheck_address and not ONION_RE.match(healthcheck_address):
+            self._send_json(400, {"error": "Invalid healthcheck_address format"})
+            return
+
         conn = db_connect()
         db_ensure_schema(conn)
+
+        # Find entry for auth check
         entry = conn.execute(
             "SELECT * FROM registry WHERE content_address = ? LIMIT 1",
             (content_address,)
@@ -488,24 +462,46 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "Invalid proof"})
                 return
 
-        takeover_was_active = bool(entry["takeover_active"])
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Remove key files
-        keys_dir = os.path.join(ONIONHEAVEN_KEYS_DIR, content_address)
-        if os.path.isdir(keys_dir):
-            for f in os.listdir(keys_dir):
-                os.unlink(os.path.join(keys_dir, f))
-            os.rmdir(keys_dir)
-
-        # Delete all registry entries for this content_address
-        conn.execute("DELETE FROM registry WHERE content_address = ?", (content_address,))
+        # Mark rows as unregistered (soft delete — do NOT delete rows or keys)
+        if healthcheck_address:
+            conn.execute(
+                "UPDATE registry SET status = 'taken-over', unregistered_at = ?, "
+                "unregistered_reason = 'user_request' "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (now, content_address, healthcheck_address)
+            )
+        else:
+            conn.execute(
+                "UPDATE registry SET status = 'taken-over', unregistered_at = ?, "
+                "unregistered_reason = 'user_request' "
+                "WHERE content_address = ?",
+                (now, content_address)
+            )
         conn.commit()
+
+        # Check if no healthy rows remain for this content-address — trigger takeover
+        healthy_remaining = conn.execute(
+            "SELECT COUNT(*) FROM registry "
+            "WHERE content_address = ? AND status = 'online' AND unregistered_at IS NULL",
+            (content_address,)
+        ).fetchone()[0]
+
+        if healthy_remaining == 0:
+            # Find a row to use as the target for takeover_function
+            target_row = conn.execute(
+                "SELECT healthcheck_address FROM registry WHERE content_address = ? LIMIT 1",
+                (content_address,)
+            ).fetchone()
+            if target_row:
+                takeover_function(conn, content_address, target_row["healthcheck_address"], force=True)
+
         conn.close()
 
         self._send_json(200, {
             "unregistered": True,
             "content_address": content_address,
-            "takeover_was_active": takeover_was_active,
         })
 
     # -- POST /online -------------------------------------------------------
@@ -532,8 +528,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         conn = db_connect()
         db_ensure_schema(conn)
 
-        # healthcheck_address is optional — if provided, match specific row;
-        # otherwise match all rows for this content_address.
+        # Find entry for auth check
         if healthcheck_address:
             entry = conn.execute(
                 "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
@@ -563,31 +558,40 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "Invalid proof"})
                 return
 
-        takeover_was_active = bool(entry["takeover_active"])
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # Update: set last_healthy, clear unregistered fields
         if healthcheck_address:
-            conn.execute("""UPDATE registry SET
-                status = 'healthy', fail_count = 0, fast_poll_remaining = 20, last_contact = ?
-                WHERE content_address = ? AND healthcheck_address = ?""",
-                (now, content_address, healthcheck_address))
+            conn.execute(
+                "UPDATE registry SET last_healthy = ?, status = 'online', "
+                "unregistered_at = NULL, unregistered_reason = NULL "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (now, content_address, healthcheck_address)
+            )
+            conn.commit()
+            release_function(conn, content_address, healthcheck_address, force=True)
         else:
-            conn.execute("""UPDATE registry SET
-                status = 'healthy', fail_count = 0, fast_poll_remaining = 20, last_contact = ?
-                WHERE content_address = ?""",
-                (now, content_address))
-        conn.commit()
+            # Update all rows for this content_address
+            rows = conn.execute(
+                "SELECT healthcheck_address FROM registry WHERE content_address = ?",
+                (content_address,)
+            ).fetchall()
+            conn.execute(
+                "UPDATE registry SET last_healthy = ?, status = 'online', "
+                "unregistered_at = NULL, unregistered_reason = NULL "
+                "WHERE content_address = ?",
+                (now, content_address)
+            )
+            conn.commit()
+            # Release for each row
+            for row in rows:
+                release_function(conn, content_address, row["healthcheck_address"], force=True)
 
-        # If OnionHeaven was redirecting this address, release immediately so the
-        # worker's descriptor can take over in the Tor DHT.
-        released = immediate_release(content_address, conn)
         conn.close()
 
         self._send_json(200, {
             "online": True,
             "content_address": content_address,
-            "takeover_was_active": takeover_was_active,
-            "released": released,
         })
 
     # -- POST /offline ------------------------------------------------------
@@ -614,6 +618,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         conn = db_connect()
         db_ensure_schema(conn)
 
+        # Find entry for auth check
         if healthcheck_address:
             entry = conn.execute(
                 "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
@@ -643,27 +648,22 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "Invalid proof"})
                 return
 
-        takeover_was_active = bool(entry["takeover_active"])
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # fail_count=10 matches FAIL_THRESHOLD in onionheaven-poller.py
+        # Takeover via the shared function (force=True since we know it's offline)
         if healthcheck_address:
-            conn.execute("""UPDATE registry SET
-                status = 'failing', fail_count = 10, fast_poll_remaining = 20, last_contact = ?
-                WHERE content_address = ? AND healthcheck_address = ?""",
-                (now, content_address, healthcheck_address))
+            takeover_function(conn, content_address, healthcheck_address, force=True)
         else:
-            conn.execute("""UPDATE registry SET
-                status = 'failing', fail_count = 10, fast_poll_remaining = 20, last_contact = ?
-                WHERE content_address = ?""",
-                (now, content_address))
-        conn.commit()
+            rows = conn.execute(
+                "SELECT healthcheck_address FROM registry WHERE content_address = ?",
+                (content_address,)
+            ).fetchall()
+            for row in rows:
+                takeover_function(conn, content_address, row["healthcheck_address"], force=True)
+
         conn.close()
 
         self._send_json(200, {
             "offline": True,
             "content_address": content_address,
-            "takeover_active": takeover_was_active,
         })
 
 
@@ -673,8 +673,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
 def main():
     # Ensure data directories exist
-    os.makedirs(ONIONHEAVEN_DATA_DIR, exist_ok=True)
-    os.makedirs(ONIONHEAVEN_KEYS_DIR, exist_ok=True)
+    os.makedirs(KEYS_DIR, exist_ok=True)
 
     # Initialize DB schema
     conn = db_connect()

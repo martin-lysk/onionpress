@@ -264,10 +264,14 @@ def unregister_from_onionheaven(app, content_address=None):
         app.log(f"OnionHeaven: failed to extract key for unregister proof: {e}")
         return
 
-    payload = json.dumps({
+    hc_addr = getattr(app, 'healthcheck_address', None)
+    payload_dict = {
         "content_address": addr,
         "proof": proof,
-    })
+    }
+    if hc_addr and hc_addr.endswith('.onion'):
+        payload_dict["healthcheck_address"] = hc_addr
+    payload = json.dumps(payload_dict)
 
     # Retry with backoff — uninstall/address-change are one-shot, reliability > speed
     backoff = [5, 15, 30]
