@@ -20,6 +20,7 @@ New design (v2):
   - Sequential takeover/release decisions (no races), parallel healthchecks
 """
 
+import itertools
 import os
 import subprocess
 import sys
@@ -30,12 +31,14 @@ from datetime import datetime, timezone
 
 from onionheaven_common import (
     db_connect, db_ensure_schema, log,
-    takeover_function, release_function,
+    takeover_function, release_function, flush_sighup_arti,
+    get_poll_socks_addrs, is_farm_mode, check_farm_scaling,
     PROPAGATION_DELAY, TOR_MANAGER,
 )
 
-# SOCKS proxy (Arti running in same container)
-SOCKS_ADDR = "127.0.0.1:9050"
+# SOCKS proxy — use tor-client's Arti so healthchecks don't compete
+# with taken-over onion services for circuits in onionheaven's Arti
+SOCKS_ADDR = os.environ.get("ONIONHEAVEN_SOCKS_ADDR", "onionpress-tor-client:9050")
 
 # Polling interval (seconds) — override via env for testing
 POLL_INTERVAL = int(os.environ.get("ONIONHEAVEN_POLL_INTERVAL", "15"))
@@ -48,12 +51,13 @@ MAX_POLL_WORKERS = int(os.environ.get("ONIONHEAVEN_MAX_POLL_WORKERS", "20"))
 # Healthcheck via local curl + Arti SOCKS
 # ---------------------------------------------------------------------------
 
-def check_healthcheck(healthcheck_address):
+def check_healthcheck(healthcheck_address, socks_addr=None):
     """Check if a healthcheck .onion address is reachable."""
+    proxy = socks_addr or SOCKS_ADDR
     try:
         result = subprocess.run(
             ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-             "--socks5-hostname", SOCKS_ADDR,
+             "--socks5-hostname", proxy,
              "--max-time", "15",
              f"http://{healthcheck_address}/"],
             capture_output=True, text=True, timeout=25
@@ -66,16 +70,16 @@ def check_healthcheck(healthcheck_address):
         return False
 
 
-def ping(healthcheck_address):
+def ping(healthcheck_address, socks_addr=None):
     """Double-ping: try healthcheck, retry once after 5s on failure.
 
     Returns True if either attempt succeeds.
     """
-    ok = check_healthcheck(healthcheck_address)
+    ok = check_healthcheck(healthcheck_address, socks_addr)
     if ok:
         return True
     time.sleep(5)
-    ok2 = check_healthcheck(healthcheck_address)
+    ok2 = check_healthcheck(healthcheck_address, socks_addr)
     if ok2:
         log(f"{healthcheck_address} succeeded on 2nd try")
     return ok2
@@ -85,7 +89,7 @@ def ping(healthcheck_address):
 # Poll a single entry (healthcheck only — no takeover/release decisions)
 # ---------------------------------------------------------------------------
 
-def poll_entry(entry):
+def poll_entry(entry, socks_addr=None):
     """Poll a single registry entry. Returns (entry_dict, ping_result).
 
     Performs the double-ping healthcheck. Takeover/release decisions
@@ -94,7 +98,7 @@ def poll_entry(entry):
     hc_addr = entry["healthcheck_address"]
     if not hc_addr:
         return dict(entry), False
-    result = ping(hc_addr)
+    result = ping(hc_addr, socks_addr)
     return dict(entry), result
 
 
@@ -193,13 +197,19 @@ def main():
             pass_start = time.monotonic()
             entries = [dict(row) for row in rows]
 
+            # Build SOCKS proxy round-robin from farm poll containers + default
+            socks_addrs = get_poll_socks_addrs(conn)
+            socks_cycle = itertools.cycle(socks_addrs)
+            if len(socks_addrs) > 1:
+                log(f"Using {len(socks_addrs)} SOCKS proxies: {', '.join(socks_addrs)}")
+
             # Parallel healthchecks
             workers = min(MAX_POLL_WORKERS, len(entries))
             poll_results = {}  # (ca, ha) -> (entry_dict, ping_ok)
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {
-                    pool.submit(poll_entry, entry): (entry["content_address"], entry["healthcheck_address"])
+                    pool.submit(poll_entry, entry, next(socks_cycle)): (entry["content_address"], entry["healthcheck_address"])
                     for entry in entries
                 }
                 for future in as_completed(futures):
@@ -293,6 +303,15 @@ def main():
                 # Warn if 2+ rows for same content_address are online
                 if online_count >= 2:
                     log(f"WARNING: {online_count} rows for {ca} are online")
+
+            # Ensure any pending SIGHUP from takeover/release is sent
+            # In farm mode, takeover workers handle their own SIGHUPs;
+            # coordinator's Arti has no takeover services.
+            if not is_farm_mode(conn):
+                flush_sighup_arti()
+
+            # Check if farm needs to scale up
+            check_farm_scaling(conn, len(entries))
 
             elapsed = time.monotonic() - pass_start
             log(f"poll pass complete — {len(entries)} entries in {elapsed:.1f}s")

@@ -222,7 +222,10 @@ detect_onionheaven_mode() {
         local tor_dir
         tor_dir="$(cd "$(dirname "$0")/../Resources/docker/tor" && pwd)"
         log "OnionHeaven: building tor image with onionheaven poller..."
-        docker build -t ghcr.io/brewsterkahle/onionpress-tor:latest \
+        # Use a local-only tag so 'docker compose --pull always' for other services
+        # doesn't overwrite the rebuilt image with the upstream base
+        export ONIONHEAVEN_IMAGE="onionpress-tor:onionheaven"
+        docker build -t "$ONIONHEAVEN_IMAGE" \
             -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'ONIONHEAVEN_DOCKERFILE'
 FROM ghcr.io/brewsterkahle/onionpress-tor:latest
 COPY entrypoint.sh /entrypoint.sh
@@ -231,7 +234,9 @@ COPY onionheaven_common.py /onionheaven_common.py
 COPY onionheaven-poller.py /onionheaven-poller.py
 COPY onionheaven-server.py /onionheaven-server.py
 COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
-RUN chmod +x /entrypoint.sh /onionheaven-poller.py /onionheaven-server.py /onionheaven-tor-manager.sh
+COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
+COPY onionheaven-redirect.sh /onionheaven-redirect.sh
+RUN chmod +x /entrypoint.sh /onionheaven-poller.py /onionheaven-server.py /onionheaven-tor-manager.sh /onionheaven-takeover-worker.py /onionheaven-redirect.sh
 ONIONHEAVEN_DOCKERFILE
         # Remove old tor-polling container if it exists (renamed to onionheaven)
         if docker inspect onionpress-tor-polling >/dev/null 2>&1; then
@@ -240,9 +245,9 @@ ONIONHEAVEN_DOCKERFILE
             docker rm onionpress-tor-polling >> "$LOG_FILE" 2>&1 || true
         fi
 
-        # Start onionheaven container (SOCKS + keystore + onionheaven-server + onionheaven-poller)
-        # This keeps HSDir lookups off the main Tor instance and runs OnionHeaven services
-        if docker compose --profile onionheaven up -d --pull always onionheaven >> "$LOG_FILE" 2>&1; then
+        # Start onionheaven container (ONIONHEAVEN_IMAGE env var tells compose to use our local tag)
+        # No --pull for onionheaven — we just built it locally
+        if docker compose --profile onionheaven up -d onionheaven >> "$LOG_FILE" 2>&1; then
             log "OnionHeaven: started onionheaven container"
         else
             log "WARNING: Failed to start onionheaven container"
@@ -250,6 +255,169 @@ ONIONHEAVEN_DOCKERFILE
         return 0
     fi
     return 1
+}
+
+# OnionHeaven farm — poll and takeover worker containers
+# Each gets its own Arti instance (own guard pool) to prevent circuit exhaustion.
+# Starts with 2+2, scales up by 2 when a type hits its threshold.
+# ONIONHEAVEN_IMAGE is set by detect_onionheaven_mode() to the locally-built tag
+ONIONHEAVEN_FARM_MONITOR_PID=""
+
+# Start a single poll worker container
+_start_poll_worker() {
+    local idx="$1"
+    local name="onionheaven-poll-${idx}"
+    local vol="onionpress-arti-state-poll-${idx}"
+
+    docker rm -f "$name" >> "$LOG_FILE" 2>&1 || true
+
+    if docker run -d \
+        --name "$name" \
+        --network onionpress-network \
+        --ulimit nofile=10000:10000 \
+        -e TZ="${TZ:-UTC}" \
+        -e POLLING_ONLY=1 \
+        -v "${vol}:/var/lib/arti/" \
+        --restart unless-stopped \
+        "$ONIONHEAVEN_IMAGE" >> "$LOG_FILE" 2>&1; then
+        log "OnionHeaven farm: started poll worker $name"
+    else
+        log "WARNING: Failed to start poll worker $name"
+        return 1
+    fi
+
+    # Register in DB (retry a few times — container/schema may need a moment)
+    local socks_addr="${name}:9050"
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local db="/var/lib/onionpress/onionheaven/registry.db"
+    local attempt=0
+    while [ $attempt -lt 5 ]; do
+        if docker exec onionheaven sqlite3 "$db" \
+            "CREATE TABLE IF NOT EXISTS poll_containers (container_name TEXT PRIMARY KEY, socks_addr TEXT NOT NULL, last_heartbeat TEXT, status TEXT DEFAULT 'active'); \
+             INSERT INTO poll_containers (container_name, socks_addr, last_heartbeat, status) \
+             VALUES ('${name}', '${socks_addr}', '${now}', 'active') \
+             ON CONFLICT(container_name) DO UPDATE SET \
+             socks_addr=excluded.socks_addr, last_heartbeat=excluded.last_heartbeat, status='active'" \
+            >> "$LOG_FILE" 2>&1; then
+            return 0
+        fi
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+    log "WARNING: Failed to register poll worker $name in DB"
+}
+
+# Start a single takeover worker container
+_start_takeover_worker() {
+    local idx="$1"
+    local name="onionheaven-takeover-${idx}"
+    local vol="onionpress-arti-state-takeover-${idx}"
+
+    docker rm -f "$name" >> "$LOG_FILE" 2>&1 || true
+
+    if docker run -d \
+        --name "$name" \
+        --network onionpress-network \
+        --ulimit nofile=10000:10000 \
+        -e TZ="${TZ:-UTC}" \
+        -e TAKEOVER_WORKER=1 \
+        -e CONTAINER_NAME="$name" \
+        -v "${vol}:/var/lib/arti/" \
+        -v "onionpress-persistent-data:/var/lib/onionpress" \
+        --restart unless-stopped \
+        "$ONIONHEAVEN_IMAGE" >> "$LOG_FILE" 2>&1; then
+        log "OnionHeaven farm: started takeover worker $name"
+    else
+        log "WARNING: Failed to start takeover worker $name"
+        return 1
+    fi
+}
+
+start_onionheaven_farm() {
+    if [ "$ONIONHEAVEN" != "1" ]; then
+        return
+    fi
+    log "OnionHeaven farm: starting initial 2 poll + 2 takeover workers..."
+
+    _start_poll_worker 0
+    _start_poll_worker 1
+    _start_takeover_worker 0
+    _start_takeover_worker 1
+
+    # Give containers a moment to register before poller's first cycle
+    sleep 3
+
+    log "OnionHeaven farm: initial workers started — launching scaling monitor"
+
+    # Background monitor: checks DB for scale-up requests every 30s
+    _onionheaven_farm_monitor &
+    ONIONHEAVEN_FARM_MONITOR_PID=$!
+}
+
+_onionheaven_farm_monitor() {
+    # Tracks the next index to use for each worker type
+    local next_poll=2
+    local next_takeover=2
+    local db="/var/lib/onionpress/onionheaven/registry.db"
+
+    while true; do
+        sleep 30
+
+        # Check for unfulfilled scale-up requests
+        local requests
+        requests=$(docker exec onionheaven sqlite3 "$db" \
+            "SELECT id, worker_type FROM farm_scale_requests WHERE fulfilled_at IS NULL ORDER BY id" 2>/dev/null) || continue
+
+        if [ -z "$requests" ]; then
+            continue
+        fi
+
+        # Process each request (format: "id|worker_type" per line)
+        # Use here-string (<<<) to avoid subshell — variable updates persist
+        while IFS='|' read -r req_id req_type; do
+            case "$req_type" in
+                poll)
+                    log "OnionHeaven farm: scaling up — adding 2 poll workers (starting at index $next_poll)"
+                    _start_poll_worker "$next_poll"
+                    _start_poll_worker "$((next_poll + 1))"
+                    next_poll=$((next_poll + 2))
+                    ;;
+                takeover)
+                    log "OnionHeaven farm: scaling up — adding 2 takeover workers (starting at index $next_takeover)"
+                    _start_takeover_worker "$next_takeover"
+                    _start_takeover_worker "$((next_takeover + 1))"
+                    next_takeover=$((next_takeover + 2))
+                    ;;
+                *)
+                    log "WARNING: Unknown farm scale request type: $req_type"
+                    ;;
+            esac
+
+            # Mark request as fulfilled
+            local now
+            now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            docker exec onionheaven sqlite3 "$db" \
+                "UPDATE farm_scale_requests SET fulfilled_at = '${now}' WHERE id = ${req_id}" \
+                >> "$LOG_FILE" 2>&1 || true
+        done <<< "$requests"
+    done
+}
+
+stop_onionheaven_farm() {
+    # Stop the scaling monitor
+    if [ -n "$ONIONHEAVEN_FARM_MONITOR_PID" ] && kill -0 "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null; then
+        kill "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null || true
+        wait "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null || true
+        ONIONHEAVEN_FARM_MONITOR_PID=""
+    fi
+
+    # Stop all farm containers (catches any scaled-up containers too)
+    for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^onionheaven-(poll|takeover)-[0-9]+$'); do
+        docker stop "$container" >> "$LOG_FILE" 2>&1 || true
+        docker rm "$container" >> "$LOG_FILE" 2>&1 || true
+        log "OnionHeaven farm: stopped $container"
+    done
 }
 
 # Log file
@@ -1436,6 +1604,10 @@ start_containers() {
     cd "$DOCKER_DIR"
     install_onionheaven_plugin
 
+    # Start OnionHeaven farm workers (poll + takeover containers)
+    cd "$DOCKER_DIR"
+    start_onionheaven_farm
+
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
         log "Cloudflare Tunnel enabled, starting cloudflared..."
@@ -1449,6 +1621,8 @@ start_containers() {
 # Function to stop containers
 stop_containers() {
     log "Stopping OnionPress containers..."
+    # Stop farm containers first (they depend on the onionheaven container's DB)
+    stop_onionheaven_farm
     cd "$DOCKER_DIR"
     # Stop all containers (OnionHeaven via profile, cloudflared via override file if token set)
     docker compose $CF_COMPOSE --profile onionheaven down 2>&1 | tee -a "$LOG_FILE"

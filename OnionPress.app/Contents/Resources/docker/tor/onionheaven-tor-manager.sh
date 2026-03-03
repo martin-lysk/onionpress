@@ -11,8 +11,8 @@
 # On release: removes service config from arti.toml, cleans up keystore directory,
 #              signals Arti to reload.
 
-# Detect config: onionheaven-polling container uses arti-onionheaven.toml, main tor uses arti.toml
-if [ "${POLLING_ONLY}" = "1" ]; then
+# Detect config: onionheaven/takeover-worker containers use arti-onionheaven.toml, main tor uses arti.toml
+if [ "${POLLING_ONLY}" = "1" ] || [ "${TAKEOVER_WORKER}" = "1" ]; then
     ARTI_TOML="/etc/arti/arti-onionheaven.toml"
 else
     ARTI_TOML="/etc/arti/arti.toml"
@@ -21,17 +21,45 @@ ARTI_KEYSTORE="/var/lib/arti/state/keystore/hss"
 ONIONHEAVEN_KEYS_DIR="/var/lib/onionpress/onionheaven/keys"
 REDIRECT_PORT=8082
 
+send_sighup() {
+    local arti_pid
+    arti_pid=$(pidof arti 2>/dev/null || ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1)
+    if [ -n "$arti_pid" ]; then
+        kill -HUP "$arti_pid"
+        echo "Sent SIGHUP to Arti (pid $arti_pid)"
+    else
+        echo "WARNING: Arti process not found, cannot send SIGHUP"
+    fi
+}
+
 usage() {
-    echo "Usage: $0 takeover|release <content_address>"
+    echo "Usage: $0 takeover|release [--no-sighup] <content_address>"
+    echo "       $0 sighup"
     exit 1
 }
 
-if [ $# -lt 2 ]; then
+if [ $# -lt 1 ]; then
     usage
 fi
 
 ACTION="$1"
-CONTENT_ADDRESS="$2"
+shift
+
+# Parse flags
+NO_SIGHUP=0
+CONTENT_ADDRESS=""
+for arg in "$@"; do
+    case "$arg" in
+        --no-sighup) NO_SIGHUP=1 ;;
+        *) CONTENT_ADDRESS="$arg" ;;
+    esac
+done
+
+# Handle sighup action early (no address needed)
+if [ "$ACTION" = "sighup" ]; then
+    send_sighup
+    exit 0
+fi
 
 # Sanitize: strip any trailing whitespace/newlines
 CONTENT_ADDRESS=$(echo "$CONTENT_ADDRESS" | tr -d '\n\r ')
@@ -88,14 +116,11 @@ EOF
         echo "Added onion service config for ${CONTENT_ADDRESS}"
     fi
 
-    # Signal Arti to reload configuration
-    local arti_pid
-    arti_pid=$(pidof arti 2>/dev/null || ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1)
-    if [ -n "$arti_pid" ]; then
-        kill -HUP "$arti_pid"
-        echo "Sent SIGHUP to Arti (pid $arti_pid)"
+    # Signal Arti to reload configuration (unless --no-sighup)
+    if [ "$NO_SIGHUP" -eq 0 ]; then
+        send_sighup
     else
-        echo "WARNING: Arti process not found, cannot send SIGHUP"
+        echo "Skipping SIGHUP (--no-sighup)"
     fi
 
     echo "Takeover complete for ${CONTENT_ADDRESS}"
@@ -130,14 +155,11 @@ do_release() {
         echo "Removed keystore directory for ${CONTENT_ADDRESS}"
     fi
 
-    # Signal Arti to reload configuration
-    local arti_pid
-    arti_pid=$(pidof arti 2>/dev/null || ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1)
-    if [ -n "$arti_pid" ]; then
-        kill -HUP "$arti_pid"
-        echo "Sent SIGHUP to Arti (pid $arti_pid)"
+    # Signal Arti to reload configuration (unless --no-sighup)
+    if [ "$NO_SIGHUP" -eq 0 ]; then
+        send_sighup
     else
-        echo "WARNING: Arti process not found, cannot send SIGHUP"
+        echo "Skipping SIGHUP (--no-sighup)"
     fi
 
     echo "Release complete for ${CONTENT_ADDRESS}"
@@ -145,9 +167,11 @@ do_release() {
 
 case "$ACTION" in
     takeover)
+        if [ -z "$CONTENT_ADDRESS" ]; then usage; fi
         do_takeover
         ;;
     release)
+        if [ -z "$CONTENT_ADDRESS" ]; then usage; fi
         do_release
         ;;
     *)

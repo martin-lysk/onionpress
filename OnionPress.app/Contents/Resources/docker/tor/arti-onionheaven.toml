@@ -1,6 +1,6 @@
 # Arti config for onionheaven-polling container (SOCKS proxy + keystore for takeover)
 [logging]
-console = "info,arti_client=debug"
+console = "info,arti_client=debug,tor_hsservice=debug,tor_guardmgr=debug,tor_circmgr=debug"
 
 [proxy]
 socks_listen = "0.0.0.0:9050"

@@ -307,6 +307,7 @@ EOF
     docker_cmd run -d \
         --name "$ctr_name" \
         --network "$network" \
+        --ulimit nofile=10000:10000 \
         --entrypoint sh \
         "$ARTI_IMAGE" \
         -c "sleep infinity" >/dev/null 2>&1
@@ -514,15 +515,28 @@ get_registry_count() {
 }
 
 get_healthy_count() {
-    _onionheaven_field "healthy"
+    _onionheaven_field "online"
 }
 
 get_stress_fail_count() {
-    _onionheaven_field "failing"
+    # No direct "failing" field — derive from total minus online minus taken_over
+    local total online taken_over
+    total=$(_onionheaven_field "total")
+    online=$(_onionheaven_field "online")
+    taken_over=$(_onionheaven_field "taken_over")
+    echo $(( ${total:-0} - ${online:-0} - ${taken_over:-0} ))
 }
 
 get_takeover_count() {
     _onionheaven_field "taken_over"
+}
+
+get_poll_container_count() {
+    _onionheaven_field "poll_containers"
+}
+
+get_takeover_container_count() {
+    _onionheaven_field "takeover_containers"
 }
 
 # Count workers registered from local containers (works on any machine)
@@ -578,7 +592,7 @@ get_system_mem_pct() {
 }
 
 print_dashboard() {
-    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct poll_dur
+    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct poll_dur poll_ctrs takeover_ctrs
     reg_count=$(get_registry_count)
     tor_mem=$(get_container_mem_mb onionpress-tor)
     wp_mem=$(get_container_mem_mb onionpress-wordpress)
@@ -587,14 +601,17 @@ print_dashboard() {
     healthy_count=$(get_healthy_count)
     mem_pct=$(get_system_mem_pct)
     poll_dur=$(get_last_poll_duration)
+    poll_ctrs=$(get_poll_container_count)
+    takeover_ctrs=$(get_takeover_container_count)
 
     log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
     echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | VM mem: ${mem_pct}%"
+    echo "           Farm: ${poll_ctrs:-0} poll + ${takeover_ctrs:-0} takeover containers"
     if [ "$poll_dur" != "-" ]; then
         echo "           Last poll pass: ${poll_dur}s"
     fi
 
-    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"healthy\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\""
+    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\",\"poll_containers\":${poll_ctrs:-0},\"takeover_containers\":${takeover_ctrs:-0}"
 }
 
 # ── Helper: get worker addresses from local info files ──────────────────────
@@ -1153,7 +1170,7 @@ except:
 get_taken_over_addresses() {
     if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
         docker_cmd exec onionheaven \
-            sqlite3 "$ONIONHEAVEN_DB_PATH" "SELECT content_address FROM registry WHERE takeover_active=1" 2>/dev/null || true
+            sqlite3 "$ONIONHEAVEN_DB_PATH" "SELECT content_address FROM registry WHERE status='taken-over'" 2>/dev/null || true
     else
         # On remote machines, use the disabled workers' addresses from local info files.
         # These are the workers we know we disabled, so they should be taken over.

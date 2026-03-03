@@ -3,6 +3,10 @@ services:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
     container_name: onionpress-tor
+    ulimits:
+      nofile:
+        soft: 10000
+        hard: 10000
     environment:
       - TZ=${TZ:-UTC}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
@@ -66,6 +70,10 @@ services:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
     container_name: onionpress-tor-client
+    ulimits:
+      nofile:
+        soft: 10000
+        hard: 10000
     environment:
       - TZ=${TZ:-UTC}
       - POLLING_ONLY=1
@@ -76,9 +84,13 @@ services:
       - onionpress-network
 
   onionheaven:
-    image: ghcr.io/brewsterkahle/onionpress-tor:latest
+    image: ${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}
     build: ./tor
     container_name: onionheaven
+    ulimits:
+      nofile:
+        soft: 10000
+        hard: 10000
     environment:
       - TZ=${TZ:-UTC}
       - POLLING_ONLY=1

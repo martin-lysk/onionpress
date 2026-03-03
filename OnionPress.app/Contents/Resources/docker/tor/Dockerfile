@@ -19,5 +19,6 @@ COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
 COPY onionheaven_common.py /onionheaven_common.py
 COPY onionheaven-poller.py /onionheaven-poller.py
 COPY onionheaven-server.py /onionheaven-server.py
-RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-poller.py /onionheaven-server.py
+COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
+RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-poller.py /onionheaven-server.py /onionheaven-takeover-worker.py
 ENTRYPOINT ["/entrypoint.sh"]

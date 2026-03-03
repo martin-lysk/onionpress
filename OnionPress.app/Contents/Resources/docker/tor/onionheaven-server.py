@@ -27,7 +27,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from onionheaven_common import (
     db_connect, db_ensure_schema, log,
-    takeover_function, release_function,
+    takeover_function, release_function, flush_sighup_arti,
     KEYS_DIR,
 )
 
@@ -200,12 +200,25 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             unregistered = conn.execute(
                 "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NOT NULL"
             ).fetchone()[0]
+            # Farm container counts
+            try:
+                poll_containers = conn.execute(
+                    "SELECT COUNT(*) FROM poll_containers WHERE status='active'"
+                ).fetchone()[0]
+                takeover_containers = conn.execute(
+                    "SELECT COUNT(*) FROM takeover_containers WHERE status='active'"
+                ).fetchone()[0]
+            except Exception:
+                poll_containers = 0
+                takeover_containers = 0
             conn.close()
             self._send_json(200, {
                 "total": total,
                 "online": online,
                 "taken_over": taken_over,
                 "unregistered": unregistered,
+                "poll_containers": poll_containers,
+                "takeover_containers": takeover_containers,
             })
         except Exception as e:
             self._send_json(500, {"error": str(e)})
@@ -586,6 +599,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             # Release for each row
             for row in rows:
                 release_function(conn, content_address, row["healthcheck_address"], force=True)
+            flush_sighup_arti()
 
         conn.close()
 
@@ -658,6 +672,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             ).fetchall()
             for row in rows:
                 takeover_function(conn, content_address, row["healthcheck_address"], force=True)
+        flush_sighup_arti()
 
         conn.close()
 

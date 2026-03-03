@@ -21,6 +21,41 @@ rm -rf /var/lib/arti/state/keystore/hss/*/ipts/
 chown -R arti:arti /var/lib/arti
 chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
+# Takeover worker mode — runs in onionheaven-takeover-N containers
+if [ "${TAKEOVER_WORKER}" = "1" ]; then
+    echo "Takeover worker mode: starting Arti (SOCKS + keystore), redirect service, and takeover worker..."
+    CONTAINER_NAME="${CONTAINER_NAME:-onionheaven-takeover-unknown}"
+
+    # Start OnionHeaven redirect service in background (port 8082)
+    /onionheaven-redirect.sh &
+    ONIONHEAVEN_REDIRECT_PID=$!
+    sleep 1
+    if ! kill -0 $ONIONHEAVEN_REDIRECT_PID 2>/dev/null; then
+        echo "ERROR: onionheaven-redirect.sh failed to start"
+    fi
+
+    # Start Arti with OnionHeaven config (SOCKS + keystore for takeover services)
+    su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
+    ARTI_PID=$!
+    sleep 2
+    if ! kill -0 $ARTI_PID 2>/dev/null; then
+        echo "ERROR: Arti failed to start — check config at /etc/arti/arti-onionheaven.toml"
+    fi
+
+    # Start takeover worker (log to shared volume)
+    LOG_FILE="/var/lib/onionpress/onionheaven/takeover-worker-${CONTAINER_NAME}.log"
+    CONTAINER_NAME="${CONTAINER_NAME}" python3 /onionheaven-takeover-worker.py 2>"$LOG_FILE" &
+    WORKER_PID=$!
+    sleep 1
+    if ! kill -0 $WORKER_PID 2>/dev/null; then
+        echo "ERROR: onionheaven-takeover-worker.py failed to start"
+    fi
+
+    # Wait on Arti (main process)
+    wait $ARTI_PID
+    exit $?
+fi
+
 # Polling-only mode
 if [ "${POLLING_ONLY}" = "1" ]; then
     if [ "${ONIONHEAVEN}" = "1" ]; then
@@ -51,8 +86,8 @@ if [ "${POLLING_ONLY}" = "1" ]; then
             echo "ERROR: Arti failed to start — check config at /etc/arti/arti-onionheaven.toml"
         fi
 
-        # Start onionheaven poller in background
-        python3 /onionheaven-poller.py &
+        # Start onionheaven poller in background (log to shared volume)
+        python3 /onionheaven-poller.py 2>/var/lib/onionpress/onionheaven/poller.log &
         POLLER_PID=$!
         sleep 1
         if ! kill -0 $POLLER_PID 2>/dev/null; then
