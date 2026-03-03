@@ -23,40 +23,40 @@ chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
 # Polling-only mode
 if [ "${POLLING_ONLY}" = "1" ]; then
-    if [ "${ONIONPRESS_CELLAR}" = "1" ]; then
-        # Cellar polling mode: Arti with keystore (for takeover) + cellar-server + cellar-poller + redirect
-        echo "Cellar polling mode: starting Arti (SOCKS + keystore), registration server, redirect service, and poller..."
+    if [ "${ONIONPRESS_ONIONHEAVEN}" = "1" ]; then
+        # OnionHeaven polling mode: Arti with keystore (for takeover) + onionheaven-server + onionheaven-poller + redirect
+        echo "OnionHeaven polling mode: starting Arti (SOCKS + keystore), registration server, redirect service, and poller..."
 
-        # Start cellar redirect service in background (port 8082)
-        /cellar-redirect.sh &
-        CELLAR_REDIRECT_PID=$!
+        # Start OnionHeaven redirect service in background (port 8082)
+        /onionheaven-redirect.sh &
+        ONIONHEAVEN_REDIRECT_PID=$!
         sleep 1
-        if ! kill -0 $CELLAR_REDIRECT_PID 2>/dev/null; then
-            echo "ERROR: cellar-redirect.sh failed to start"
+        if ! kill -0 $ONIONHEAVEN_REDIRECT_PID 2>/dev/null; then
+            echo "ERROR: onionheaven-redirect.sh failed to start"
         fi
 
-        # Start cellar registration API server (port 8083)
-        python3 /cellar-server.py &
-        CELLAR_SERVER_PID=$!
+        # Start onionheaven registration API server (port 8083)
+        python3 /onionheaven-server.py &
+        ONIONHEAVEN_SERVER_PID=$!
         sleep 1
-        if ! kill -0 $CELLAR_SERVER_PID 2>/dev/null; then
-            echo "ERROR: cellar-server.py failed to start"
+        if ! kill -0 $ONIONHEAVEN_SERVER_PID 2>/dev/null; then
+            echo "ERROR: onionheaven-server.py failed to start"
         fi
 
-        # Start Arti with cellar config (SOCKS + keystore)
-        su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-cellar.toml" &
+        # Start Arti with OnionHeaven config (SOCKS + keystore)
+        su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
         ARTI_PID=$!
         sleep 2
         if ! kill -0 $ARTI_PID 2>/dev/null; then
-            echo "ERROR: Arti failed to start — check config at /etc/arti/arti-cellar.toml"
+            echo "ERROR: Arti failed to start — check config at /etc/arti/arti-onionheaven.toml"
         fi
 
-        # Start cellar poller in background
-        python3 /cellar-poller.py &
+        # Start onionheaven poller in background
+        python3 /onionheaven-poller.py &
         POLLER_PID=$!
         sleep 1
         if ! kill -0 $POLLER_PID 2>/dev/null; then
-            echo "ERROR: cellar-poller.py failed to start"
+            echo "ERROR: onionheaven-poller.py failed to start"
         fi
 
         # Wait on Arti (main process)
@@ -84,14 +84,14 @@ if ! kill -0 $SOCAT_PID 2>/dev/null; then
     echo "ERROR: socat (port 8080 forward) failed to start"
 fi
 
-# Cellar mode: forward port 8083 to onioncellar container's registration API
+# OnionHeaven mode: forward port 8083 to onionheaven container's registration API
 # and add port 8083 to the onion service config in arti.toml
-if [ "${ONIONPRESS_CELLAR}" = "1" ]; then
-    socat TCP-LISTEN:8083,reuseaddr,fork TCP:onioncellar:8083 &
+if [ "${ONIONPRESS_ONIONHEAVEN}" = "1" ]; then
+    socat TCP-LISTEN:8083,reuseaddr,fork TCP:onionheaven:8083 &
     SOCAT_API_PID=$!
     sleep 1
     if ! kill -0 $SOCAT_API_PID 2>/dev/null; then
-        echo "ERROR: socat (port 8083 forward to onioncellar) failed to start"
+        echo "ERROR: socat (port 8083 forward to onionheaven) failed to start"
     fi
     # Add port 8083 to the wordpress onion service proxy_ports
     sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml

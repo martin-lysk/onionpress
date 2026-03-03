@@ -67,7 +67,7 @@ LAUNCH_ON_LOGIN=yes
 #                Uses 'caffeinate -i'. Best for always-on servers.
 #
 # Display sleep is not affected - screen can still turn off.
-# OnionCellar/heaven machines auto-set to "never" on first detection.
+# OnionHeaven/heaven machines auto-set to "never" on first detection.
 #
 PREVENT_SLEEP=normal
 
@@ -75,7 +75,7 @@ PREVENT_SLEEP=normal
 # Default: 1 (1 GB RAM for the container VM)
 #
 # The Linux VM that runs WordPress, Tor, and MariaDB containers.
-# 1 GB is sufficient for normal use. OnionCellar instances auto-increase
+# 1 GB is sufficient for normal use. OnionHeaven instances auto-increase
 # to 5 GB on first detection. Increase manually if you run many plugins
 # or experience out-of-memory issues.
 #
@@ -104,11 +104,11 @@ VM_MEMORY=1
 # Your .onion address continues to work alongside the clearnet domain.
 CLOUDFLARE_TUNNEL_TOKEN=
 
-# Register with OnionCellar
-# Default: "yes" (register this site with the OnionCellar)
+# Register with OnionHeaven
+# Default: "yes" (register this site with the OnionHeaven)
 #
-# When enabled, OnionPress will register your site with the OnionCellar
+# When enabled, OnionPress will register your site with the OnionHeaven
 # so it can help redirect page requests to the Internet Archive's Wayback
 # Machine as a fallback when your Mac is offline. Set to "no" to opt out.
 #
-REGISTER_WITH_CELLAR=yes
+REGISTER_WITH_ONIONHEAVEN=yes

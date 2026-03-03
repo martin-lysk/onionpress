@@ -49,5 +49,5 @@ OnionPress.app/Contents/Resources/share/
 extension-firefox/
 
 # Stress test results (contain secret keys)
-cellar-stress-results/
-tests/cellar-stress-results/
+onionheaven-stress-results/
+tests/onionheaven-stress-results/

@@ -5,7 +5,7 @@ services:
     container_name: onionpress-tor
     environment:
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
-      - ONIONPRESS_CELLAR=${ONIONPRESS_CELLAR:-0}
+      - ONIONPRESS_ONIONHEAVEN=${ONIONPRESS_ONIONHEAVEN:-0}
     volumes:
       - arti-state:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress
@@ -71,13 +71,13 @@ services:
     networks:
       - onionpress-network
 
-  onioncellar:
+  onionheaven:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
-    container_name: onioncellar
+    container_name: onionheaven
     environment:
       - POLLING_ONLY=1
-      - ONIONPRESS_CELLAR=${ONIONPRESS_CELLAR:-0}
+      - ONIONPRESS_ONIONHEAVEN=${ONIONPRESS_ONIONHEAVEN:-0}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
     volumes:
       - arti-state-polling:/var/lib/arti/
@@ -86,7 +86,7 @@ services:
     networks:
       - onionpress-network
     profiles:
-      - cellar
+      - onionheaven
 
 volumes:
   arti-state:

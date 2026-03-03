@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-OnionCellar Registration API Server
+OnionHeaven Registration API Server
 
-Lightweight HTTP server (Python stdlib only) that handles cellar registration,
-unregistration, and lifecycle notifications. Runs inside the onioncellar
+Lightweight HTTP server (Python stdlib only) that handles onionheaven registration,
+unregistration, and lifecycle notifications. Runs inside the onionheaven
 container on port 8083, exposed through the main tor container's onion service.
 
 Endpoints:
-  POST /register     — Register an OnionPress instance with the cellar
+  POST /register     — Register an OnionPress instance with OnionHeaven
   POST /unregister   — Remove a registration
-  POST /online       — Notify cellar that instance is back online
-  POST /offline      — Notify cellar that instance is going offline
+  POST /online       — Notify OnionHeaven that instance is back online
+  POST /offline      — Notify OnionHeaven that instance is going offline
   GET  /status       — Public status summary (no auth)
 """
 
@@ -33,18 +33,18 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 8083
 
-CELLAR_DATA_DIR = "/var/lib/onionpress/cellar"
-CELLAR_DB_PATH = os.path.join(CELLAR_DATA_DIR, "registry.db")
-CELLAR_KEYS_DIR = os.path.join(CELLAR_DATA_DIR, "keys")
+ONIONHEAVEN_DATA_DIR = "/var/lib/onionpress/onionheaven"
+ONIONHEAVEN_DB_PATH = os.path.join(ONIONHEAVEN_DATA_DIR, "registry.db")
+ONIONHEAVEN_KEYS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "keys")
 
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
-TOR_MANAGER = "/cellar-tor-manager.sh"
+TOR_MANAGER = "/onionheaven-tor-manager.sh"
 
 
 def immediate_release(content_address, conn):
     """If a takeover is active for this content_address, release it immediately.
 
-    Called from /register and /online so the cellar stops serving the takeover
+    Called from /register and /online so OnionHeaven stops serving the takeover
     onion service as soon as the worker is confirmed alive. This lets the
     worker's fresh descriptor win in the Tor DHT faster.
 
@@ -87,13 +87,13 @@ def immediate_release(content_address, conn):
         return False
 
 # ---------------------------------------------------------------------------
-# SQLite helpers (same schema as cellar-poller.py)
+# SQLite helpers (same schema as onionheaven-poller.py)
 # ---------------------------------------------------------------------------
 
 def db_connect():
-    """Open the cellar SQLite database with WAL mode."""
-    os.makedirs(CELLAR_DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(CELLAR_DB_PATH, timeout=10)
+    """Open OnionHeaven SQLite database with WAL mode."""
+    os.makedirs(ONIONHEAVEN_DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(ONIONHEAVEN_DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -233,12 +233,12 @@ def verify_proof(stored_hash, proof):
 # Request handler
 # ---------------------------------------------------------------------------
 
-class CellarHandler(BaseHTTPRequestHandler):
+class OnionHeavenHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         """Override to add timestamp prefix."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        sys.stderr.write(f"[{ts}] cellar-server: {format % args}\n")
+        sys.stderr.write(f"[{ts}] onionheaven-server: {format % args}\n")
         sys.stderr.flush()
 
     def _send_json(self, status_code, data):
@@ -382,7 +382,7 @@ class CellarHandler(BaseHTTPRequestHandler):
             arti_pem = build_openssh_key(secret_key, raw_pubkey)
 
         # Store plaintext PEM key
-        keys_dir = os.path.join(CELLAR_KEYS_DIR, content_address)
+        keys_dir = os.path.join(ONIONHEAVEN_KEYS_DIR, content_address)
         os.makedirs(keys_dir, mode=0o700, exist_ok=True)
 
         pem_path = os.path.join(keys_dir, "ks_hs_id.ed25519_expanded_private")
@@ -433,7 +433,7 @@ class CellarHandler(BaseHTTPRequestHandler):
             (content_address, healthcheck_address, now, version, key_hash, now))
         conn.commit()
 
-        # If cellar was redirecting this address, release immediately so the
+        # If OnionHeaven was redirecting this address, release immediately so the
         # worker's descriptor can take over in the Tor DHT.
         released = immediate_release(content_address, conn)
         conn.close()
@@ -491,7 +491,7 @@ class CellarHandler(BaseHTTPRequestHandler):
         takeover_was_active = bool(entry["takeover_active"])
 
         # Remove key files
-        keys_dir = os.path.join(CELLAR_KEYS_DIR, content_address)
+        keys_dir = os.path.join(ONIONHEAVEN_KEYS_DIR, content_address)
         if os.path.isdir(keys_dir):
             for f in os.listdir(keys_dir):
                 os.unlink(os.path.join(keys_dir, f))
@@ -578,7 +578,7 @@ class CellarHandler(BaseHTTPRequestHandler):
                 (now, content_address))
         conn.commit()
 
-        # If cellar was redirecting this address, release immediately so the
+        # If OnionHeaven was redirecting this address, release immediately so the
         # worker's descriptor can take over in the Tor DHT.
         released = immediate_release(content_address, conn)
         conn.close()
@@ -646,7 +646,7 @@ class CellarHandler(BaseHTTPRequestHandler):
         takeover_was_active = bool(entry["takeover_active"])
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # fail_count=10 matches FAIL_THRESHOLD in cellar-poller.py
+        # fail_count=10 matches FAIL_THRESHOLD in onionheaven-poller.py
         if healthcheck_address:
             conn.execute("""UPDATE registry SET
                 status = 'failing', fail_count = 10, fast_poll_remaining = 20, last_contact = ?
@@ -673,17 +673,17 @@ class CellarHandler(BaseHTTPRequestHandler):
 
 def main():
     # Ensure data directories exist
-    os.makedirs(CELLAR_DATA_DIR, exist_ok=True)
-    os.makedirs(CELLAR_KEYS_DIR, exist_ok=True)
+    os.makedirs(ONIONHEAVEN_DATA_DIR, exist_ok=True)
+    os.makedirs(ONIONHEAVEN_KEYS_DIR, exist_ok=True)
 
     # Initialize DB schema
     conn = db_connect()
     db_ensure_schema(conn)
     conn.close()
 
-    server = HTTPServer((LISTEN_HOST, LISTEN_PORT), CellarHandler)
+    server = HTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] cellar-server: listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
+    print(f"[{ts}] onionheaven-server: listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

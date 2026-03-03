@@ -1,9 +1,9 @@
 #!/bin/sh
-# OnionCellar 302 Redirect Service
+# OnionHeaven 302 Redirect Service
 # Listens on port 8082 via socat, reads Host header, and returns 302 redirect
 # to the Internet Archive Wayback Machine .onion mirror.
 #
-# When the cellar takes over a failed .onion address, Tor routes incoming
+# When OnionHeaven takes over a failed .onion address, Tor routes incoming
 # connections here. Visitors get redirected to the archived version of the site.
 
 REDIRECT_PORT=8082
@@ -67,7 +67,7 @@ handle_request() {
         if [ -z "$safe" ]; then
             case "$host" in
                 *.onion)
-                    sqlite3 /var/lib/onionpress/cellar/registry.db \
+                    sqlite3 /var/lib/onionpress/onionheaven/registry.db \
                         "UPDATE registry SET last_redirect=datetime('now') WHERE content_address='${host}'" 2>/dev/null || true
                     ;;
             esac
@@ -82,5 +82,5 @@ if [ "$1" = "--handle-request" ]; then
 fi
 
 # Main: start socat listener
-echo "OnionCellar redirect service starting on port $REDIRECT_PORT..."
-exec socat TCP-LISTEN:${REDIRECT_PORT},reuseaddr,fork SYSTEM:"sh /cellar-redirect.sh --handle-request"
+echo "OnionHeaven redirect service starting on port $REDIRECT_PORT..."
+exec socat TCP-LISTEN:${REDIRECT_PORT},reuseaddr,fork SYSTEM:"sh /onionheaven-redirect.sh --handle-request"

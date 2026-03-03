@@ -123,26 +123,26 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             capture_output=True, timeout=300, check=True
         )
 
-        # 4. Backup cellar data if this is the OnionCellar instance
+        # 4. Backup OnionHeaven data if this is OnionHeaven instance
         #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
-        is_cellar = False
-        cellar_check = subprocess.run(
+        is_onionheaven = False
+        onionheaven_check = subprocess.run(
             ['docker', 'exec', 'onionpress-wordpress',
-             'test', '-f', '/var/lib/onionpress/cellar/master-key.json'],
+             'test', '-f', '/var/lib/onionpress/onionheaven/master-key.json'],
             capture_output=True, timeout=10
         )
-        if cellar_check.returncode == 0:
-            log_func("Backup: copying OnionCellar data (encrypted keys, registry)...")
-            is_cellar = True
-            cellar_dir = os.path.join(staging, 'cellar')
+        if onionheaven_check.returncode == 0:
+            log_func("Backup: copying OnionHeaven data (encrypted keys, registry)...")
+            is_onionheaven = True
+            onionheaven_dir = os.path.join(staging, 'onionheaven')
             subprocess.run(
                 ['docker', 'cp',
-                 'onionpress-wordpress:/var/lib/onionpress/cellar/.',
-                 cellar_dir],
+                 'onionpress-wordpress:/var/lib/onionpress/onionheaven/.',
+                 onionheaven_dir],
                 capture_output=True, timeout=60, check=True
             )
             # Remove the ephemeral unlock file if it was copied
-            unlocked_file = os.path.join(cellar_dir, '.master-key-unlocked')
+            unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
             if os.path.exists(unlocked_file):
                 os.unlink(unlocked_file)
 
@@ -152,7 +152,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             'backup_date': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             'onionpress_version': version,
             'username': username,
-            'is_cellar': is_cellar,
+            'is_onionheaven': is_onionheaven,
         }
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -253,7 +253,7 @@ def restore_from_backup(zip_path, password, log_func):
             capture_output=True, timeout=15
         )
 
-        # Sync vanity-keys directory on host so cellar detection and
+        # Sync vanity-keys directory on host so OnionHeaven detection and
         # prefix mismatch logic can see the restored onion address.
         onion_address = metadata.get('onion_address', '')
         if onion_address:
@@ -338,32 +338,32 @@ def restore_from_backup(zip_path, password, log_func):
                 capture_output=True, timeout=60
             )
 
-        # 4. Restore cellar data if present in backup
-        cellar_dir = _find_dir(staging, 'cellar')
-        if os.path.isdir(cellar_dir) and os.path.exists(os.path.join(cellar_dir, 'master-key.json')):
-            log_func("Restore: restoring OnionCellar data (encrypted keys, registry)...")
+        # 4. Restore OnionHeaven data if present in backup
+        onionheaven_dir = _find_dir(staging, 'onionheaven')
+        if os.path.isdir(onionheaven_dir) and os.path.exists(os.path.join(onionheaven_dir, 'master-key.json')):
+            log_func("Restore: restoring OnionHeaven data (encrypted keys, registry)...")
             # Remove ephemeral unlock file if it somehow exists in the backup
-            unlocked_file = os.path.join(cellar_dir, '.master-key-unlocked')
+            unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
             if os.path.exists(unlocked_file):
                 os.unlink(unlocked_file)
-            # Ensure cellar directory exists in container
+            # Ensure OnionHeaven directory exists in container
             subprocess.run(
                 ['docker', 'exec', 'onionpress-wordpress',
-                 'mkdir', '-p', '/var/lib/onionpress/cellar'],
+                 'mkdir', '-p', '/var/lib/onionpress/onionheaven'],
                 capture_output=True, timeout=10
             )
             subprocess.run(
                 ['docker', 'cp',
-                 cellar_dir + '/.',
-                 'onionpress-wordpress:/var/lib/onionpress/cellar/'],
+                 onionheaven_dir + '/.',
+                 'onionpress-wordpress:/var/lib/onionpress/onionheaven/'],
                 capture_output=True, timeout=60, check=True
             )
             subprocess.run(
                 ['docker', 'exec', 'onionpress-wordpress',
-                 'chown', '-R', 'www-data:www-data', '/var/lib/onionpress/cellar/'],
+                 'chown', '-R', 'www-data:www-data', '/var/lib/onionpress/onionheaven/'],
                 capture_output=True, timeout=30
             )
-            log_func("Restore: OnionCellar data restored (cellar will be locked until admin login)")
+            log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
 
         log_func("Restore: files restored successfully")
         return metadata

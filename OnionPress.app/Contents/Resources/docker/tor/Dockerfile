@@ -11,12 +11,12 @@ RUN apk add --no-cache \
 
 COPY arti.toml /etc/arti/arti.toml
 COPY arti-polling.toml /etc/arti/arti-polling.toml
-COPY arti-cellar.toml /etc/arti/arti-cellar.toml
+COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
 COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck-server.sh /healthcheck-server.sh
-COPY cellar-redirect.sh /cellar-redirect.sh
-COPY cellar-tor-manager.sh /cellar-tor-manager.sh
-COPY cellar-poller.py /cellar-poller.py
-COPY cellar-server.py /cellar-server.py
-RUN chmod +x /entrypoint.sh /healthcheck-server.sh /cellar-redirect.sh /cellar-tor-manager.sh /cellar-poller.py /cellar-server.py
+COPY onionheaven-redirect.sh /onionheaven-redirect.sh
+COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
+COPY onionheaven-poller.py /onionheaven-poller.py
+COPY onionheaven-server.py /onionheaven-server.py
+RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-poller.py /onionheaven-server.py
 ENTRYPOINT ["/entrypoint.sh"]

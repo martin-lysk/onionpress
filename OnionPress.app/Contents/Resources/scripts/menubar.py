@@ -27,7 +27,7 @@ import key_manager
 import backup_manager
 import onion_proxy
 import install_native_messaging
-import cellar
+import onionheaven
 
 
 def parse_version(version_str):
@@ -650,17 +650,17 @@ class OnionPressApp(rumps.App):
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
         self.healthcheck_address = None    # Healthcheck .onion address
-        self.cellar_messages = []          # Messages received from OnionCellar
-        self._cellar_alert_shown = False   # Whether we've shown the cellar alert icon
-        self.is_cellar = False             # True if this instance is the OnionCellar
-        self._cellar_checked = False       # Whether cellar mode has been checked
-        self._cellar_registration_started = False  # Whether registration thread is running
+        self.onionheaven_messages = []          # Messages received from OnionHeaven
+        self._onionheaven_alert_shown = False   # Whether we've shown OnionHeaven alert icon
+        self.is_onionheaven = False             # True if this instance is OnionHeaven
+        self._onionheaven_checked = False       # Whether onionheaven mode has been checked
+        self._onionheaven_registration_started = False  # Whether registration thread is running
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
 
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
-        self.cellar_alert_item = rumps.MenuItem("Cellar Alerts", callback=self.view_cellar_alerts)
+        self.onionheaven_alert_item = rumps.MenuItem("OnionHeaven Alerts", callback=self.view_onionheaven_alerts)
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
@@ -873,10 +873,10 @@ class OnionPressApp(rumps.App):
             return
 
         try:
-            if self.is_cellar:
-                # Cellar: prevent idle sleep so network stays active (display can sleep)
+            if self.is_onionheaven:
+                # OnionHeaven: prevent idle sleep so network stays active (display can sleep)
                 caff_args = ["caffeinate", "-i"]
-                caff_msg = "cellar mode — system will not idle-sleep"
+                caff_msg = "onionheaven mode — system will not idle-sleep"
             else:
                 # Normal: prevent system sleep on AC power only
                 caff_args = ["caffeinate", "-s"]
@@ -1779,24 +1779,24 @@ class OnionPressApp(rumps.App):
                 if self.healthcheck_address is None and self.is_ready:
                     self.read_healthcheck_address()
 
-                # Poll for cellar messages from healthcheck service
+                # Poll for OnionHeaven messages from healthcheck service
                 if self.is_ready:
-                    self.poll_cellar_messages()
+                    self.poll_onionheaven_messages()
 
-                # OnionCellar: detect cellar mode, register, or notify online
-                if self.is_ready and not self._cellar_checked:
-                    self._cellar_checked = True
-                    if cellar.is_cellar_instance(self.onion_address):
-                        self.is_cellar = True
-                        self.log("OnionCellar mode activated (poller runs in onioncellar container)")
+                # OnionHeaven: detect onionheaven mode, register, or notify online
+                if self.is_ready and not self._onionheaven_checked:
+                    self._onionheaven_checked = True
+                    if onionheaven.is_onionheaven_instance(self.onion_address):
+                        self.is_onionheaven = True
+                        self.log("OnionHeaven mode activated (poller runs in onionheaven container)")
                         self.update_menu()
-                    elif not self._cellar_registration_started:
+                    elif not self._onionheaven_registration_started:
                         # First time — full registration with keys
-                        self._cellar_registration_started = True
-                        cellar.start_registration_thread(self)
+                        self._onionheaven_registration_started = True
+                        onionheaven.start_registration_thread(self)
                     else:
                         # Already registered, coming back online (wake/reconnect)
-                        cellar.start_online_notification_thread(self)
+                        onionheaven.start_online_notification_thread(self)
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
@@ -1849,10 +1849,10 @@ class OnionPressApp(rumps.App):
                 self._bootstrap_stall_count = 0
                 self._yellow_since = None
                 self.healthcheck_address = None
-                self.cellar_messages = []
-                self._cellar_alert_shown = False
-                self._cellar_checked = False
-                self._cellar_registration_started = False
+                self.onionheaven_messages = []
+                self._onionheaven_alert_shown = False
+                self._onionheaven_checked = False
+                self._onionheaven_registration_started = False
 
                 # Stop web log capture if running
                 if self.web_log_process is not None:
@@ -1877,20 +1877,20 @@ class OnionPressApp(rumps.App):
         def do_update():
             state = self.display_state
 
-            # Cellar alert indicator: show "!" next to icon when messages exist
-            if self.cellar_messages:
+            # OnionHeaven alert indicator: show "!" next to icon when messages exist
+            if self.onionheaven_messages:
                 self.title = "!"
-                count = len(self.cellar_messages)
-                self.cellar_alert_item.title = f"Cellar Alerts ({count})"
-                self.cellar_alert_item.set_callback(self.view_cellar_alerts)
-                if self.cellar_alert_item.title not in self.menu:
-                    self.menu.insert_after("Copy Onion Address", self.cellar_alert_item)
+                count = len(self.onionheaven_messages)
+                self.onionheaven_alert_item.title = f"OnionHeaven Alerts ({count})"
+                self.onionheaven_alert_item.set_callback(self.view_onionheaven_alerts)
+                if self.onionheaven_alert_item.title not in self.menu:
+                    self.menu.insert_after("Copy Onion Address", self.onionheaven_alert_item)
             else:
                 self.title = ""
-                if "Cellar Alerts" in self.menu:
-                    del self.menu["Cellar Alerts"]
+                if "OnionHeaven Alerts" in self.menu:
+                    del self.menu["OnionHeaven Alerts"]
                 for key in list(self.menu.keys()):
-                    if isinstance(key, str) and key.startswith("Cellar Alerts ("):
+                    if isinstance(key, str) and key.startswith("OnionHeaven Alerts ("):
                         del self.menu[key]
 
             # Show/hide clearnet status based on tunnel config and state
@@ -1906,8 +1906,8 @@ class OnionPressApp(rumps.App):
 
             if state == "available":
                 self.icon = self.icon_running
-                if self.is_cellar:
-                    self.menu["Starting..."].title = f"OnionCellar: {self.onion_address}"
+                if self.is_onionheaven:
+                    self.menu["Starting..."].title = f"OnionHeaven: {self.onion_address}"
                 else:
                     self.menu["Starting..."].title = f"Address: {self.onion_address}"
                 self.menu["Start"].set_callback(None)
@@ -1997,8 +1997,8 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Failed to read healthcheck address: {e}")
 
-    def poll_cellar_messages(self):
-        """Poll for messages from the OnionCellar via the healthcheck service."""
+    def poll_onionheaven_messages(self):
+        """Poll for messages from OnionHeaven via the healthcheck service."""
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             env = os.environ.copy()
@@ -2012,17 +2012,17 @@ class OnionPressApp(rumps.App):
                 capture_output=True, text=True, timeout=10, env=env
             )
             if result.returncode != 0 or not result.stdout.strip():
-                if self.cellar_messages:
-                    self.cellar_messages = []
-                    self._cellar_alert_shown = False
+                if self.onionheaven_messages:
+                    self.onionheaven_messages = []
+                    self._onionheaven_alert_shown = False
                 return
 
             files = result.stdout.strip().split('\n')
             json_files = [f for f in files if f.endswith('.json')]
             if not json_files:
-                if self.cellar_messages:
-                    self.cellar_messages = []
-                    self._cellar_alert_shown = False
+                if self.onionheaven_messages:
+                    self.onionheaven_messages = []
+                    self._onionheaven_alert_shown = False
                 return
 
             # Read all message files
@@ -2040,44 +2040,44 @@ class OnionPressApp(rumps.App):
                 except Exception:
                     continue
 
-            if messages and messages != self.cellar_messages:
-                self.cellar_messages = messages
-                if not self._cellar_alert_shown:
-                    self._cellar_alert_shown = True
-                    self.log(f"Received {len(messages)} message(s) from OnionCellar")
+            if messages and messages != self.onionheaven_messages:
+                self.onionheaven_messages = messages
+                if not self._onionheaven_alert_shown:
+                    self._onionheaven_alert_shown = True
+                    self.log(f"Received {len(messages)} message(s) from OnionHeaven")
                     latest = messages[-1]
                     msg_type = latest.get("type", "unknown")
-                    msg_text = latest.get("message", "New message from OnionCellar")
-                    self.log(f"OnionCellar alert: {msg_type} - {msg_text}")
+                    msg_text = latest.get("message", "New message from OnionHeaven")
+                    self.log(f"OnionHeaven alert: {msg_type} - {msg_text}")
         except Exception:
-            # Don't spam logs — cellar polling failures are expected when container is starting
+            # Don't spam logs — OnionHeaven polling failures are expected when container is starting
             pass
 
-    def view_cellar_alerts(self, _):
-        """Show cellar alert messages and offer to dismiss them."""
-        if not self.cellar_messages:
-            rumps.alert("No cellar alerts.")
+    def view_onionheaven_alerts(self, _):
+        """Show OnionHeaven alert messages and offer to dismiss them."""
+        if not self.onionheaven_messages:
+            rumps.alert("No OnionHeaven alerts.")
             return
 
         # Build summary of all messages
         lines = []
-        for msg in self.cellar_messages:
+        for msg in self.onionheaven_messages:
             msg_type = msg.get("type", "unknown").replace("_", " ").title()
             msg_text = msg.get("message", "")
             lines.append(f"[{msg_type}] {msg_text}")
         summary = "\n".join(lines)
 
         response = rumps.alert(
-            title=f"Cellar Alerts ({len(self.cellar_messages)})",
+            title=f"OnionHeaven Alerts ({len(self.onionheaven_messages)})",
             message=summary,
             ok="Dismiss All",
             cancel="Close"
         )
 
         if response == 1:  # "Dismiss All" clicked
-            self.log("Dismissing cellar alerts")
-            self.cellar_messages = []
-            self._cellar_alert_shown = False
+            self.log("Dismissing OnionHeaven alerts")
+            self.onionheaven_messages = []
+            self._onionheaven_alert_shown = False
             # Delete message files from container
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
@@ -2110,14 +2110,14 @@ class OnionPressApp(rumps.App):
         self.log("Registered for system sleep/wake notifications")
 
     def handle_sleep(self):
-        """Handle system sleep — notify cellar and release caffeinate.
-        Cellar resists sleep to keep network active."""
+        """Handle system sleep — notify OnionHeaven and release caffeinate.
+        OnionHeaven resists sleep to keep network active."""
         self.log("System going to sleep")
-        if not self.is_cellar:
-            # Notify cellar before sleeping so it can take over quickly
-            if self.is_ready and self._cellar_registration_started:
+        if not self.is_onionheaven:
+            # Notify OnionHeaven before sleeping so it can take over quickly
+            if self.is_ready and self._onionheaven_registration_started:
                 try:
-                    cellar.notify_cellar_offline(self)
+                    onionheaven.notify_onionheaven_offline(self)
                 except Exception:
                     pass
             self.stop_caffeinate()
@@ -2127,8 +2127,8 @@ class OnionPressApp(rumps.App):
         self.log("System wake detected — marking Tor as reconnecting")
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.start_caffeinate()
-        # Reset cellar check so /online fires when Tor reconnects
-        self._cellar_checked = False
+        # Reset OnionHeaven check so /online fires when Tor reconnects
+        self._onionheaven_checked = False
         if self.is_ready:
             self.is_ready = False
             self._last_bootstrap_pct = 0
@@ -2733,11 +2733,11 @@ class OnionPressApp(rumps.App):
             # User confirmed — delete old keys so launcher regenerates
             self.log("User confirmed address prefix change — deleting old keys")
 
-            # Unregister old address from OnionCellar (it will never come back)
+            # Unregister old address from OnionHeaven (it will never come back)
             try:
-                cellar.unregister_from_cellar(self, content_address=current_hostname)
+                onionheaven.unregister_from_onionheaven(self, content_address=current_hostname)
             except Exception as e:
-                self.log(f"Cellar unregister failed (continuing): {e}")
+                self.log(f"OnionHeaven unregister failed (continuing): {e}")
 
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
@@ -3615,13 +3615,13 @@ License: AGPL v3"""
                 self.monitoring_tor_install = False
                 self.dismiss_setup_dialog()
 
-                # Unregister from OnionCellar before stopping (needs running containers)
+                # Unregister from OnionHeaven before stopping (needs running containers)
                 if self.is_running:
-                    self.log("Uninstall: Unregistering from OnionCellar...")
+                    self.log("Uninstall: Unregistering from OnionHeaven...")
                     try:
-                        cellar.unregister_from_cellar(self)
+                        onionheaven.unregister_from_onionheaven(self)
                     except Exception as e:
-                        self.log(f"Uninstall: cellar unregister failed (continuing): {e}")
+                        self.log(f"Uninstall: OnionHeaven unregister failed (continuing): {e}")
 
                 # Stop the service (this will cancel any startup in progress)
                 self.log("Uninstall: Stopping services...")
@@ -3702,10 +3702,10 @@ License: AGPL v3"""
             # Small delay to ensure UI updates
             time.sleep(0.5)
 
-            # Notify cellar before stopping services (containers needed for curl)
-            if self._cellar_registration_started:
+            # Notify OnionHeaven before stopping services (containers needed for curl)
+            if self._onionheaven_registration_started:
                 try:
-                    cellar.notify_cellar_offline(self)
+                    onionheaven.notify_onionheaven_offline(self)
                 except Exception:
                     pass
 

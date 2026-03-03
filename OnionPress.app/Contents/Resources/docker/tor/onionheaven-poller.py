@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-OnionCellar Poller — containerized healthcheck monitor
+OnionHeaven Poller — containerized healthcheck monitor
 
-Runs inside the onioncellar container alongside Arti (SOCKS + keystore),
-cellar-server.py (registration API), and cellar-redirect.sh (302 redirects).
+Runs inside the onionheaven container alongside Arti (SOCKS + keystore),
+onionheaven-server.py (registration API), and onionheaven-redirect.sh (302 redirects).
 Monitors registered OnionPress instances, takes over failed addresses,
 and releases them when they recover.
 
 All operations are local:
   - SQLite via Python sqlite3 (shared volume)
   - Healthchecks via curl through local Arti SOCKS (127.0.0.1:9050)
-  - Takeover/release via /cellar-tor-manager.sh (same container)
+  - Takeover/release via /onionheaven-tor-manager.sh (same container)
 
 Schema uses composite primary key (content_address, healthcheck_address) to
 support multiple instances registering the same .onion address. Takeover
@@ -29,30 +29,30 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 # Paths (inside the container, on shared onionpress-data volume)
-CELLAR_DB_PATH = "/var/lib/onionpress/cellar/registry.db"
-CELLAR_DATA_DIR = "/var/lib/onionpress/cellar"
-TOR_MANAGER = "/cellar-tor-manager.sh"
+ONIONHEAVEN_DB_PATH = "/var/lib/onionpress/onionheaven/registry.db"
+ONIONHEAVEN_DATA_DIR = "/var/lib/onionpress/onionheaven"
+TOR_MANAGER = "/onionheaven-tor-manager.sh"
 
 # SOCKS proxy (Arti running in same container)
 SOCKS_ADDR = "127.0.0.1:9050"
 
 # Healthcheck intervals (seconds) — override via env for testing
-HEALTHY_INTERVAL = int(os.environ.get("CELLAR_HEALTHY_INTERVAL", "15"))
-FAST_POLL_INTERVAL = int(os.environ.get("CELLAR_FAST_POLL_INTERVAL", "15"))
-LONG_FAIL_INTERVAL = int(os.environ.get("CELLAR_LONG_FAIL_INTERVAL", "1800"))
+HEALTHY_INTERVAL = int(os.environ.get("ONIONHEAVEN_HEALTHY_INTERVAL", "15"))
+FAST_POLL_INTERVAL = int(os.environ.get("ONIONHEAVEN_FAST_POLL_INTERVAL", "15"))
+LONG_FAIL_INTERVAL = int(os.environ.get("ONIONHEAVEN_LONG_FAIL_INTERVAL", "1800"))
 
 # Thresholds — override via env for testing
-FAIL_THRESHOLD = int(os.environ.get("CELLAR_FAIL_THRESHOLD", "10"))
-FAST_POLL_COUNT = int(os.environ.get("CELLAR_FAST_POLL_COUNT", "20"))
+FAIL_THRESHOLD = int(os.environ.get("ONIONHEAVEN_FAIL_THRESHOLD", "10"))
+FAST_POLL_COUNT = int(os.environ.get("ONIONHEAVEN_FAST_POLL_COUNT", "20"))
 
 # Parallel polling
-MAX_POLL_WORKERS = int(os.environ.get("CELLAR_MAX_POLL_WORKERS", "20"))
+MAX_POLL_WORKERS = int(os.environ.get("ONIONHEAVEN_MAX_POLL_WORKERS", "20"))
 
 
 def log(msg):
     """Log to stdout (captured by docker logs)."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] OnionCellar: {msg}", flush=True)
+    print(f"[{ts}] OnionHeaven: {msg}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -60,8 +60,8 @@ def log(msg):
 # ---------------------------------------------------------------------------
 
 def db_connect():
-    """Open the cellar SQLite database with WAL mode."""
-    conn = sqlite3.connect(CELLAR_DB_PATH, timeout=10)
+    """Open OnionHeaven SQLite database with WAL mode."""
+    conn = sqlite3.connect(ONIONHEAVEN_DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -146,7 +146,7 @@ def db_ensure_schema(conn):
 
 def db_migrate_json(conn):
     """Import entries from registry.json if it exists."""
-    json_path = os.path.join(CELLAR_DATA_DIR, "registry.json")
+    json_path = os.path.join(ONIONHEAVEN_DATA_DIR, "registry.json")
     migrated_path = json_path + ".migrated"
 
     if not os.path.exists(json_path) or os.path.exists(migrated_path):
@@ -271,7 +271,7 @@ def check_content(content_address):
 
 
 # ---------------------------------------------------------------------------
-# Takeover / Release via cellar-tor-manager.sh (local)
+# Takeover / Release via onionheaven-tor-manager.sh (local)
 # ---------------------------------------------------------------------------
 
 def do_takeover(content_addr):
@@ -402,12 +402,12 @@ def main():
 
     # Wait for the DB directory to exist (shared volume may take a moment)
     for _ in range(30):
-        if os.path.isdir(CELLAR_DATA_DIR):
+        if os.path.isdir(ONIONHEAVEN_DATA_DIR):
             break
         time.sleep(2)
     else:
-        log(f"WARNING: {CELLAR_DATA_DIR} not found after 60s, creating it")
-        os.makedirs(CELLAR_DATA_DIR, exist_ok=True)
+        log(f"WARNING: {ONIONHEAVEN_DATA_DIR} not found after 60s, creating it")
+        os.makedirs(ONIONHEAVEN_DATA_DIR, exist_ok=True)
 
     # Initialize DB
     conn = db_connect()
@@ -416,7 +416,7 @@ def main():
     if migrated > 0:
         log(f"migrated {migrated} entries from JSON to SQLite")
 
-    # Startup reconciliation: container restart wipes arti-cellar.toml
+    # Startup reconciliation: container restart wipes arti-onionheaven.toml
     # (takeover service entries lost) but the DB still has takeover_active=1.
     # Reset so the normal failure → takeover flow re-evaluates from scratch.
     # The service may have come back while we were down.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Multi-port HTTP server for cellar stress testing.
+Multi-port HTTP server for onionheaven stress testing.
 
 Replaces hundreds of individual socat processes with a single process.
 Listens on a range of ports (2 per worker: content + healthcheck) and

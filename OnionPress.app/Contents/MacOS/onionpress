@@ -151,12 +151,12 @@ else
     CF_COMPOSE=""
 fi
 
-# OnionCellar mode detection — check if our .onion address matches the cellar address
-# This env var is passed to docker-compose and controls cellar-specific behavior
-export ONIONPRESS_CELLAR="0"
+# OnionHeaven mode detection — check if our .onion address matches the onionheaven address
+# This env var is passed to docker-compose and controls OnionHeaven-specific behavior
+export ONIONPRESS_ONIONHEAVEN="0"
 
-detect_cellar_mode() {
-    local cellar_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+detect_onionheaven_mode() {
+    local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
     local our_address=""
     # Check vanity-keys directory first (works even before containers start)
     if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
@@ -167,17 +167,17 @@ detect_cellar_mode() {
         our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
         our_address=$(echo "$our_address" | tr -d '\n\r ')
     fi
-    if [ "$our_address" = "$cellar_address" ]; then
-        export ONIONPRESS_CELLAR="1"
-        log "OnionCellar mode activated (address: $our_address)"
+    if [ "$our_address" = "$onionheaven_address" ]; then
+        export ONIONPRESS_ONIONHEAVEN="1"
+        log "OnionHeaven mode activated (address: $our_address)"
 
-        # Cellar needs more memory for polling, takeover services, etc.
+        # OnionHeaven needs more memory for polling, takeover services, etc.
         # If VM_MEMORY is below 5GB, bump to 5GB (preserve higher values).
         local current_mem
         current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
         current_mem="${current_mem:-1}"
         if [ "$current_mem" -lt 5 ] 2>/dev/null; then
-            log "OnionCellar: VM_MEMORY is ${current_mem}GB, increasing to 5GB for cellar workload"
+            log "OnionHeaven: VM_MEMORY is ${current_mem}GB, increasing to 5GB for OnionHeaven workload"
             if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
                 sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
             else
@@ -188,17 +188,17 @@ detect_cellar_mode() {
             vm_mem_kb=$(docker compose exec -T tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
             vm_mem_kb="${vm_mem_kb:-0}"
             if [ "$vm_mem_kb" -lt 4500000 ] 2>/dev/null; then
-                log "OnionCellar: VM has $(( vm_mem_kb / 1024 ))MB — restarting with 5GB..."
+                log "OnionHeaven: VM has $(( vm_mem_kb / 1024 ))MB — restarting with 5GB..."
                 cd "$DOCKER_DIR"
-                docker compose $CF_COMPOSE --profile cellar down >> "$LOG_FILE" 2>&1
+                docker compose $CF_COMPOSE --profile onionheaven down >> "$LOG_FILE" 2>&1
                 "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
                 "$BIN_DIR/colima" start \
                     --mount "$DATA_DIR/shared:w" \
                     --memory 5 \
                     >> "$LOG_FILE" 2>&1
                 if [ $? -eq 0 ]; then
-                    log "OnionCellar: VM restarted with 5GB"
-                    # Bring containers back up (start_containers will re-call detect_cellar_mode,
+                    log "OnionHeaven: VM restarted with 5GB"
+                    # Bring containers back up (start_containers will re-call detect_onionheaven_mode,
                     # but this time the VM will have enough memory so no loop)
                     docker compose up -d --pull always wordpress db >> "$LOG_FILE" 2>&1
                     # Wait for WordPress to be ready
@@ -212,38 +212,38 @@ detect_cellar_mode() {
                     done
                     docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1
                 else
-                    log "OnionCellar: ERROR — VM restart failed, continuing with $(( vm_mem_kb / 1024 ))MB"
+                    log "OnionHeaven: ERROR — VM restart failed, continuing with $(( vm_mem_kb / 1024 ))MB"
                 fi
             fi
         fi
-        # Build cellar-aware tor image (layers new files on top of pre-built image)
+        # Build OnionHeaven-aware tor image (layers new files on top of pre-built image)
         # This is fast (<5s) since the base image is already pulled and we only add scripts
         local tor_dir
         tor_dir="$(cd "$(dirname "$0")/../Resources/docker/tor" && pwd)"
-        log "OnionCellar: building tor image with cellar poller..."
+        log "OnionHeaven: building tor image with onionheaven poller..."
         docker build -t ghcr.io/brewsterkahle/onionpress-tor:latest \
-            -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'CELLAR_DOCKERFILE'
+            -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'ONIONHEAVEN_DOCKERFILE'
 FROM ghcr.io/brewsterkahle/onionpress-tor:latest
 COPY entrypoint.sh /entrypoint.sh
-COPY arti-cellar.toml /etc/arti/arti-cellar.toml
-COPY cellar-poller.py /cellar-poller.py
-COPY cellar-server.py /cellar-server.py
-COPY cellar-tor-manager.sh /cellar-tor-manager.sh
-RUN chmod +x /entrypoint.sh /cellar-poller.py /cellar-server.py /cellar-tor-manager.sh
-CELLAR_DOCKERFILE
-        # Remove old tor-polling container if it exists (renamed to onioncellar)
+COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
+COPY onionheaven-poller.py /onionheaven-poller.py
+COPY onionheaven-server.py /onionheaven-server.py
+COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
+RUN chmod +x /entrypoint.sh /onionheaven-poller.py /onionheaven-server.py /onionheaven-tor-manager.sh
+ONIONHEAVEN_DOCKERFILE
+        # Remove old tor-polling container if it exists (renamed to onionheaven)
         if docker inspect onionpress-tor-polling >/dev/null 2>&1; then
-            log "OnionCellar: removing old onionpress-tor-polling container..."
+            log "OnionHeaven: removing old onionpress-tor-polling container..."
             docker stop onionpress-tor-polling >> "$LOG_FILE" 2>&1 || true
             docker rm onionpress-tor-polling >> "$LOG_FILE" 2>&1 || true
         fi
 
-        # Start onioncellar container (SOCKS + keystore + cellar-server + cellar-poller)
-        # This keeps HSDir lookups off the main Tor instance and runs the cellar services
-        if docker compose --profile cellar up -d --pull always onioncellar >> "$LOG_FILE" 2>&1; then
-            log "OnionCellar: started onioncellar container"
+        # Start onionheaven container (SOCKS + keystore + onionheaven-server + onionheaven-poller)
+        # This keeps HSDir lookups off the main Tor instance and runs OnionHeaven services
+        if docker compose --profile onionheaven up -d --pull always onionheaven >> "$LOG_FILE" 2>&1; then
+            log "OnionHeaven: started onionheaven container"
         else
-            log "WARNING: Failed to start onioncellar container"
+            log "WARNING: Failed to start onionheaven container"
         fi
         return 0
     fi
@@ -895,11 +895,11 @@ fix_onionpress_permissions() {
 
     # Ensure the directory exists and is owned by www-data
     # Use 750 (rwxr-x---) to prevent other users from reading the directory
-    # Skip the cellar/ subdirectory — cellar-server.py runs as root and manages its own permissions
+    # Skip OnionHeaven/ subdirectory — onionheaven-server.py runs as root and manages its own permissions
     if docker compose exec -T wordpress sh -c '
         chmod 750 /var/lib/onionpress
         find /var/lib/onionpress -maxdepth 0 -exec chown www-data:www-data {} +
-        find /var/lib/onionpress -mindepth 1 -maxdepth 1 ! -name cellar -exec chown -R www-data:www-data {} +
+        find /var/lib/onionpress -mindepth 1 -maxdepth 1 ! -name onionheaven -exec chown -R www-data:www-data {} +
     ' 2>>"$LOG_FILE"; then
         log "✓ Onionpress data directory permissions fixed"
         return 0
@@ -922,10 +922,10 @@ install_docker() {
         fi
     fi
 
-    # Pre-check: if cellar key is imported, ensure at least 5GB (preserve higher values)
-    local cellar_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-    if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
-        log "Cellar key detected — starting VM with 5GB (was ${VM_MEMORY}GB)"
+    # Pre-check: if onionheaven key is imported, ensure at least 5GB (preserve higher values)
+    local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+    if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
+        log "OnionHeaven key detected — starting VM with 5GB (was ${VM_MEMORY}GB)"
         VM_MEMORY=5
     fi
 
@@ -1167,25 +1167,25 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     return 0
 }
 
-# Function to set up OnionCellar (cellar mode only)
-# Registration API now runs in the onioncellar container (cellar-server.py),
+# Function to set up OnionHeaven (onionheaven mode only)
+# Registration API now runs in the onionheaven container (onionheaven-server.py),
 # which creates its own data directories on the shared volume at startup.
-install_cellar_plugin() {
-    if [ "$ONIONPRESS_CELLAR" != "1" ]; then
+install_onionheaven_plugin() {
+    if [ "$ONIONPRESS_ONIONHEAVEN" != "1" ]; then
         return 0
     fi
 
-    # Clean up old PHP mu-plugins if they exist (migrated to cellar-server.py)
+    # Clean up old PHP mu-plugins if they exist (migrated to onionheaven-server.py)
     docker exec onionpress-wordpress sh -c '
-        rm -f /var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php \
-              /var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php \
-              /var/www/html/wp-content/mu-plugins/onionpress-cellar-db.php
+        rm -f /var/www/html/wp-content/mu-plugins/onionpress-onionheaven-register.php \
+              /var/www/html/wp-content/mu-plugins/onionpress-onionheaven-crypto.php \
+              /var/www/html/wp-content/mu-plugins/onionpress-onionheaven-db.php
     ' >> "$LOG_FILE" 2>&1 || true
 
     # Clean up old crypto artifacts from shared volume (encryption dropped)
     docker exec onionpress-wordpress sh -c '
-        rm -f /var/lib/onionpress/cellar/.master-key-unlocked \
-              /var/lib/onionpress/cellar/master-key.json
+        rm -f /var/lib/onionpress/onionheaven/.master-key-unlocked \
+              /var/lib/onionpress/onionheaven/master-key.json
     ' >> "$LOG_FILE" 2>&1 || true
 
     return 0
@@ -1360,7 +1360,7 @@ start_containers() {
 
     # Pull pre-built images from GHCR (avoids local build when both image: and build: are set)
     log "Pulling pre-built images..."
-    docker compose --profile cellar pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
+    docker compose --profile onionheaven pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
 
     # Always start WordPress and DB first
     local max_attempts=3
@@ -1403,10 +1403,10 @@ start_containers() {
         wp_check=$((wp_check + 1))
     done
 
-    # Detect cellar mode BEFORE starting Tor so ONIONPRESS_CELLAR env var
+    # Detect onionheaven mode BEFORE starting Tor so ONIONPRESS_ONIONHEAVEN env var
     # is set when docker-compose creates the tor container (exposes port 8083)
     cd "$DOCKER_DIR"
-    detect_cellar_mode || true
+    detect_onionheaven_mode || true
 
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
@@ -1430,9 +1430,9 @@ start_containers() {
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
 
-    # Install cellar plugin if applicable
+    # Install OnionHeaven plugin if applicable
     cd "$DOCKER_DIR"
-    install_cellar_plugin
+    install_onionheaven_plugin
 
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
@@ -1448,8 +1448,8 @@ start_containers() {
 stop_containers() {
     log "Stopping OnionPress containers..."
     cd "$DOCKER_DIR"
-    # Stop all containers (cellar via profile, cloudflared via override file if token set)
-    docker compose $CF_COMPOSE --profile cellar down 2>&1 | tee -a "$LOG_FILE"
+    # Stop all containers (OnionHeaven via profile, cloudflared via override file if token set)
+    docker compose $CF_COMPOSE --profile onionheaven down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
 }
 
@@ -1580,12 +1580,12 @@ main() {
             echo $$ > "$PIDFILE"
             trap 'rm -f "$PIDFILE"' EXIT INT TERM HUP
 
-            # Pre-check: if cellar key is imported, ensure VM has at least 5GB (preserve higher values)
-            local cellar_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-            if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ]; then
+            # Pre-check: if onionheaven key is imported, ensure VM has at least 5GB (preserve higher values)
+            local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+            if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ]; then
                 local current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
                 if [ -z "$current_mem" ] || [ "$current_mem" -lt 5 ] 2>/dev/null; then
-                    log "Cellar key detected — setting VM_MEMORY to 5GB (was ${current_mem:-unset})"
+                    log "OnionHeaven key detected — setting VM_MEMORY to 5GB (was ${current_mem:-unset})"
                     mkdir -p "$DATA_DIR"
                     if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
                         sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
@@ -1594,15 +1594,15 @@ main() {
                     fi
                     # If Colima is already running, restart it with 5GB
                     if "$BIN_DIR/colima" status >/dev/null 2>&1; then
-                        log "Cellar key detected — restarting VM with 5GB"
+                        log "OnionHeaven key detected — restarting VM with 5GB"
                         cd "$DOCKER_DIR"
-                        docker compose $CF_COMPOSE --profile cellar down >> "$LOG_FILE" 2>&1 || true
+                        docker compose $CF_COMPOSE --profile onionheaven down >> "$LOG_FILE" 2>&1 || true
                         "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1 || true
                         "$BIN_DIR/colima" start \
                             --mount "$DATA_DIR/shared:w" \
                             --memory 5 \
                             >> "$LOG_FILE" 2>&1
-                        log "Cellar: VM restarted with 5GB"
+                        log "OnionHeaven: VM restarted with 5GB"
                     fi
                 fi
             fi
@@ -1670,9 +1670,9 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
-            # Detect cellar mode BEFORE starting Tor so ONIONPRESS_CELLAR env var
+            # Detect onionheaven mode BEFORE starting Tor so ONIONPRESS_ONIONHEAVEN env var
             # is set when docker-compose creates the tor container (exposes port 8083)
-            detect_cellar_mode || true
+            detect_onionheaven_mode || true
             docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor containers started"
             ;;

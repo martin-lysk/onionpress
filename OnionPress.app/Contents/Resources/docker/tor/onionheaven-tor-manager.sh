@@ -1,24 +1,24 @@
 #!/bin/sh
-# OnionCellar Arti Address Manager
+# OnionHeaven Arti Address Manager
 # Manages dynamic onion service entries in arti.toml for address takeover/release.
 #
 # Usage:
-#   cellar-tor-manager.sh takeover <content_address>
-#   cellar-tor-manager.sh release <content_address>
+#   onionheaven-tor-manager.sh takeover <content_address>
+#   onionheaven-tor-manager.sh release <content_address>
 #
-# On takeover: copies plaintext Arti PEM key from cellar storage into Arti keystore,
+# On takeover: copies plaintext Arti PEM key from OnionHeaven storage into Arti keystore,
 #              appends service config to arti.toml, signals Arti to reload.
 # On release: removes service config from arti.toml, cleans up keystore directory,
 #              signals Arti to reload.
 
-# Detect config: cellar-polling container uses arti-cellar.toml, main tor uses arti.toml
+# Detect config: onionheaven-polling container uses arti-onionheaven.toml, main tor uses arti.toml
 if [ "${POLLING_ONLY}" = "1" ]; then
-    ARTI_TOML="/etc/arti/arti-cellar.toml"
+    ARTI_TOML="/etc/arti/arti-onionheaven.toml"
 else
     ARTI_TOML="/etc/arti/arti.toml"
 fi
 ARTI_KEYSTORE="/var/lib/arti/state/keystore/hss"
-CELLAR_KEYS_DIR="/var/lib/onionpress/cellar/keys"
+ONIONHEAVEN_KEYS_DIR="/var/lib/onionpress/onionheaven/keys"
 REDIRECT_PORT=8082
 
 usage() {
@@ -42,15 +42,15 @@ if ! echo "$CONTENT_ADDRESS" | grep -qE '^[a-z2-7]{56}\.onion$'; then
     exit 1
 fi
 
-# Nickname convention: cellar_ + first 16 chars of address (without .onion)
+# Nickname convention: onionheaven_ + first 16 chars of address (without .onion)
 ADDR_PREFIX=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//' | cut -c1-16)
-NICKNAME="cellar_${ADDR_PREFIX}"
+NICKNAME="onionheaven_${ADDR_PREFIX}"
 
 # Keystore directory for this service
 KEYSTORE_DIR="${ARTI_KEYSTORE}/${NICKNAME}"
 
 do_takeover() {
-    local keys_src="${CELLAR_KEYS_DIR}/${CONTENT_ADDRESS}"
+    local keys_src="${ONIONHEAVEN_KEYS_DIR}/${CONTENT_ADDRESS}"
 
     # Check for plaintext Arti PEM key
     if [ ! -f "${keys_src}/ks_hs_id.ed25519_expanded_private" ]; then
@@ -74,7 +74,7 @@ do_takeover() {
     chmod 600 "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private" || echo "ERROR: Failed to chmod keystore key file"
 
     # Add onion service config to arti.toml if not already present
-    local marker="# cellar:${CONTENT_ADDRESS}"
+    local marker="# onionheaven:${CONTENT_ADDRESS}"
     if grep -q "$marker" "$ARTI_TOML"; then
         echo "Service config already exists for ${CONTENT_ADDRESS}"
     else
@@ -103,7 +103,7 @@ EOF
 
 do_release() {
     # Remove onion service config from arti.toml
-    local marker="# cellar:${CONTENT_ADDRESS}"
+    local marker="# onionheaven:${CONTENT_ADDRESS}"
     if grep -q "$marker" "$ARTI_TOML"; then
         # Remove the marker line and the 3 config lines that follow it
         # (section header, enabled, proxy_ports)

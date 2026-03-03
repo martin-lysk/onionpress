@@ -1,12 +1,12 @@
 #!/bin/bash
-# OnionCellar Stress Test — Real Arti Onion Services
+# OnionHeaven Stress Test — Real Arti Onion Services
 #
 # Architecture:
 #   - Worker containers: each runs Arti with N real onion services + a single
 #     Python HTTP server handling all ports (replaces per-worker socat processes).
-#   - Each worker self-registers with the cellar over Tor, just like a real
+#   - Each worker self-registers with OnionHeaven over Tor, just like a real
 #     OnionPress instance.
-#   - Cellar Tor container: never modified by this script.
+#   - OnionHeaven Tor container: never modified by this script.
 #   - This script: orchestrates containers, monitors dashboard, controls failures.
 #
 # Scaling:
@@ -17,19 +17,19 @@
 #
 # Usage:
 #   # Quick test — 5 workers in 1 container
-#   ./cellar-stress-test.sh --total 5
+#   ./onionheaven-stress-test.sh --total 5
 #
 #   # Scale test — 100 workers across 2 containers
-#   ./cellar-stress-test.sh --total 100 --per-ctr 50
+#   ./onionheaven-stress-test.sh --total 100 --per-ctr 50
 #
 #   # Big test — 1000 workers across 20 containers, start 5 at a time
-#   ./cellar-stress-test.sh --total 1000 --per-ctr 50 --batch-size 5
+#   ./onionheaven-stress-test.sh --total 1000 --per-ctr 50 --batch-size 5
 #
 #   # Monitor dashboard
-#   ./cellar-stress-test.sh --mode coordinator
+#   ./onionheaven-stress-test.sh --mode coordinator
 #
 #   # Clean up
-#   ./cellar-stress-test.sh --cleanup
+#   ./onionheaven-stress-test.sh --cleanup
 
 set -euo pipefail
 
@@ -38,14 +38,14 @@ MODE="worker"
 TOTAL=5           # default 5 workers
 HEALTHY=""        # auto: half of total
 FAILING=""        # auto: half of total
-CELLAR_ADDR=""    # auto-detect from local tor container
-OUTPUT_DIR="./cellar-stress-results"
+ONIONHEAVEN_ADDR=""    # auto-detect from local tor container
+OUTPUT_DIR="./onionheaven-stress-results"
 CLEANUP=false
 PER_CTR=100       # workers per container
 BATCH_SIZE=0      # 0 = start all containers at once
 STRESS_VERSION="stress-test"
 BASE_PORT=9100    # port range start inside each container
-IS_CELLAR_HOST=false  # auto-detected in preflight
+IS_ONIONHEAVEN_HOST=false  # auto-detected in preflight
 
 DATA_DIR="$HOME/.onionpress"
 DOCKER_HOST_SOCK=""
@@ -62,7 +62,7 @@ while [ $# -gt 0 ]; do
         --healthy)     HEALTHY="$2"; shift 2 ;;
         --failing)     FAILING="$2"; shift 2 ;;
         --per-ctr)     PER_CTR="$2"; shift 2 ;;
-        --cellar-addr) CELLAR_ADDR="$2"; shift 2 ;;
+        --onionheaven-addr) ONIONHEAVEN_ADDR="$2"; shift 2 ;;
         --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
         --batch-size)  BATCH_SIZE="$2"; shift 2 ;;
         --cleanup)     CLEANUP=true; shift ;;
@@ -140,16 +140,16 @@ preflight() {
         fi
     done
 
-    # Detect cellar host by checking content onion address
+    # Detect OnionHeaven host by checking content onion address
     local content_addr
     content_addr=$(docker_cmd exec onionpress-tor \
         su -s /bin/sh arti -c "arti hss --nickname wordpress onion-address -c /etc/arti/arti.toml" 2>/dev/null) || true
-    if [ "$content_addr" = "$KNOWN_CELLAR_ADDR" ]; then
-        IS_CELLAR_HOST=true
-        log "  Detected cellar host (content address matches)"
+    if [ "$content_addr" = "$KNOWN_ONIONHEAVEN_ADDR" ]; then
+        IS_ONIONHEAVEN_HOST=true
+        log "  Detected OnionHeaven host (content address matches)"
     else
-        IS_CELLAR_HOST=false
-        log "  Not the cellar host — workers will register over Tor"
+        IS_ONIONHEAVEN_HOST=false
+        log "  Not OnionHeaven host — workers will register over Tor"
     fi
 
     # Get the Arti image from the running tor container
@@ -160,38 +160,38 @@ preflight() {
     fi
     log "  Arti image: $ARTI_IMAGE"
 
-    # Cellar-host-only checks: onioncellar container, registration API, sqlite3
-    if [ "$IS_CELLAR_HOST" = true ]; then
-        if docker_cmd inspect --format='{{.State.Running}}' onioncellar 2>/dev/null | grep -q true; then
-            log "  onioncellar is running (dedicated polling Tor)"
+    # OnionHeaven-host-only checks: onionheaven container, registration API, sqlite3
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        if docker_cmd inspect --format='{{.State.Running}}' onionheaven 2>/dev/null | grep -q true; then
+            log "  onionheaven is running (dedicated polling Tor)"
         else
-            log "  WARNING: onioncellar is not running"
+            log "  WARNING: onionheaven is not running"
         fi
 
         local status_check
-        status_check=$(docker_cmd exec onioncellar curl -s --max-time 5 http://localhost:8083/status 2>/dev/null || echo "")
+        status_check=$(docker_cmd exec onionheaven curl -s --max-time 5 http://localhost:8083/status 2>/dev/null || echo "")
         if [ -z "$status_check" ]; then
-            echo "ERROR: Cellar registration API is not responding"
-            echo "  Check onioncellar container logs"
+            echo "ERROR: OnionHeaven registration API is not responding"
+            echo "  Check onionheaven container logs"
             exit 1
         fi
-        log "  Cellar registration API is ready"
+        log "  OnionHeaven registration API is ready"
 
-        if ! docker_cmd exec onioncellar sqlite3 --version >/dev/null 2>&1; then
-            log "  Installing sqlite3 in onioncellar..."
-            docker_cmd exec onioncellar sh -c "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1"
+        if ! docker_cmd exec onionheaven sqlite3 --version >/dev/null 2>&1; then
+            log "  Installing sqlite3 in onionheaven..."
+            docker_cmd exec onionheaven sh -c "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1"
         fi
-        log "  sqlite3 available in onioncellar"
+        log "  sqlite3 available in onionheaven"
     fi
 
-    # File injections — only on the cellar host (requires local repo files)
-    if [ "$IS_CELLAR_HOST" = true ]; then
-        # Inject debug cellar-redirect.sh (with logging to /tmp/cellar-redirect-debug.log)
-        log "  Injecting debug cellar-redirect.sh..."
-        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-redirect.sh" \
-            onioncellar:/cellar-redirect.sh
+    # File injections — only on OnionHeaven host (requires local repo files)
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        # Inject debug onionheaven-redirect.sh (with logging to /tmp/onionheaven-redirect-debug.log)
+        log "  Injecting debug onionheaven-redirect.sh..."
+        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-redirect.sh" \
+            onionheaven:/onionheaven-redirect.sh
         # Kill existing socat redirect processes (use pidof since pkill is unavailable)
-        docker_cmd exec onioncellar sh -c '
+        docker_cmd exec onionheaven sh -c '
             for pid in $(pidof socat 2>/dev/null); do
                 if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "TCP-LISTEN:8082"; then
                     kill "$pid" 2>/dev/null
@@ -199,59 +199,59 @@ preflight() {
             done
         '
         sleep 1
-        docker_cmd exec onioncellar sh -c 'rm -f /tmp/cellar-redirect-debug.log'
-        docker_cmd exec -d onioncellar sh /cellar-redirect.sh
+        docker_cmd exec onionheaven sh -c 'rm -f /tmp/onionheaven-redirect-debug.log'
+        docker_cmd exec -d onionheaven sh /onionheaven-redirect.sh
         log "  Debug redirect service started"
 
-        # Inject cellar-tor-manager.sh (with pidof fix)
-        # Must go into onioncellar — that's where cellar-poller.py calls it
-        log "  Injecting cellar-tor-manager.sh..."
-        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-tor-manager.sh" \
-            onioncellar:/cellar-tor-manager.sh
-        docker_cmd exec onioncellar chmod +x /cellar-tor-manager.sh
+        # Inject onionheaven-tor-manager.sh (with pidof fix)
+        # Must go into onionheaven — that's where onionheaven-poller.py calls it
+        log "  Injecting onionheaven-tor-manager.sh..."
+        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-tor-manager.sh" \
+            onionheaven:/onionheaven-tor-manager.sh
+        docker_cmd exec onionheaven chmod +x /onionheaven-tor-manager.sh
 
-        # Inject fast-polling cellar-poller.py for faster stress test cycles.
+        # Inject fast-polling onionheaven-poller.py for faster stress test cycles.
         # Reduces FAIL_THRESHOLD (10→3) and HEALTHY_INTERVAL (15→5) so takeovers
         # happen in ~15s instead of ~150s. The modified poller reads these from env.
-        log "  Injecting fast-poll cellar-poller.py..."
-        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/cellar-poller.py" \
-            onioncellar:/cellar-poller.py
+        log "  Injecting fast-poll onionheaven-poller.py..."
+        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-poller.py" \
+            onionheaven:/onionheaven-poller.py
         # Kill ALL running pollers — there may be stale ones from previous runs.
         # entrypoint.sh will NOT restart them, so we restart ourselves with env overrides.
         # Use pidof+kill since pkill may not be available in the container.
-        docker_cmd exec onioncellar sh -c '
+        docker_cmd exec onionheaven sh -c '
             for pid in $(pidof python3 2>/dev/null); do
-                if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "cellar-poller"; then
+                if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "onionheaven-poller"; then
                     kill "$pid" 2>/dev/null
                 fi
             done
         '
         sleep 1
-        docker_cmd exec -d onioncellar env \
-            CELLAR_HEALTHY_INTERVAL=5 \
-            CELLAR_FAST_POLL_INTERVAL=5 \
-            CELLAR_LONG_FAIL_INTERVAL=30 \
-            CELLAR_FAIL_THRESHOLD=2 \
-            CELLAR_FAST_POLL_COUNT=5 \
-            python3 /cellar-poller.py
+        docker_cmd exec -d onionheaven env \
+            ONIONHEAVEN_HEALTHY_INTERVAL=5 \
+            ONIONHEAVEN_FAST_POLL_INTERVAL=5 \
+            ONIONHEAVEN_LONG_FAIL_INTERVAL=30 \
+            ONIONHEAVEN_FAIL_THRESHOLD=2 \
+            ONIONHEAVEN_FAST_POLL_COUNT=5 \
+            python3 /onionheaven-poller.py
         log "  Fast-poll poller started (threshold=2, interval=5s, fast_polls=5)"
     else
-        log "  Skipping file injections (not cellar host)"
+        log "  Skipping file injections (not OnionHeaven host)"
         log "  Using production poller timing and existing container scripts"
     fi
 
     log "Preflight OK"
 }
 
-# ── Auto-detect cellar address ────────────────────────────────────────────────
-KNOWN_CELLAR_ADDR="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+# ── Auto-detect onionheaven address ────────────────────────────────────────────────
+KNOWN_ONIONHEAVEN_ADDR="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
 
-detect_cellar_addr() {
-    if [ -n "$CELLAR_ADDR" ]; then
+detect_onionheaven_addr() {
+    if [ -n "$ONIONHEAVEN_ADDR" ]; then
         return
     fi
-    CELLAR_ADDR="$KNOWN_CELLAR_ADDR"
-    log "Cellar address: $CELLAR_ADDR"
+    ONIONHEAVEN_ADDR="$KNOWN_ONIONHEAVEN_ADDR"
+    log "OnionHeaven address: $ONIONHEAVEN_ADDR"
 }
 
 # ── Docker network ────────────────────────────────────────────────────────────
@@ -341,8 +341,8 @@ python3 /worker-server.py ${BASE_PORT} ${workers_in_ctr} &
 su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
 ARTI_PID=\$!
 
-# Wait for Arti keys, then self-register with cellar over Tor
-python3 /worker-bootstrap.py "${CELLAR_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} &
+# Wait for Arti keys, then self-register with OnionHeaven over Tor
+python3 /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} &
 
 wait \$ARTI_PID
 STARTEOF
@@ -387,7 +387,7 @@ start_all_workers() {
     log "Started ${NUM_CONTAINERS} worker containers"
 }
 
-# Wait for all workers to bootstrap (register with cellar over Tor).
+# Wait for all workers to bootstrap (register with OnionHeaven over Tor).
 wait_for_bootstrap() {
     local timeout_secs="${1:-900}"
     log "Waiting for all workers to bootstrap and register (timeout: ${timeout_secs}s)..."
@@ -418,7 +418,7 @@ print(sum(1 for x in w if x.get('registered')))
             fi
         done
 
-        # Also check cellar registry for real-time registration count
+        # Also check OnionHeaven registry for real-time registration count
         local api_count
         api_count=$(get_registry_count)
         [ -n "$api_count" ] && [ "$api_count" -gt 0 ] 2>/dev/null && registered_count=$api_count
@@ -469,60 +469,60 @@ except: print(0)
 
 # ── Metrics collection ────────────────────────────────────────────────────────
 
-CELLAR_DB_PATH="/var/lib/onionpress/cellar/registry.db"
+ONIONHEAVEN_DB_PATH="/var/lib/onionpress/onionheaven/registry.db"
 
-# Query cellar /status API — locally via docker exec, or remotely via Tor
+# Query OnionHeaven /status API — locally via docker exec, or remotely via Tor
 # Returns JSON: {"total":N,"healthy":N,"failing":N,"taken_over":N}
 # Caches result for 5s to avoid hammering Tor on every metric call.
-_CELLAR_STATUS_CACHE=""
-_CELLAR_STATUS_TS=0
+_ONIONHEAVEN_STATUS_CACHE=""
+_ONIONHEAVEN_STATUS_TS=0
 
-query_cellar_status() {
+query_onionheaven_status() {
     local now
     now=$(date +%s)
-    if [ $((now - _CELLAR_STATUS_TS)) -lt 5 ] && [ -n "$_CELLAR_STATUS_CACHE" ]; then
-        echo "$_CELLAR_STATUS_CACHE"
+    if [ $((now - _ONIONHEAVEN_STATUS_TS)) -lt 5 ] && [ -n "$_ONIONHEAVEN_STATUS_CACHE" ]; then
+        echo "$_ONIONHEAVEN_STATUS_CACHE"
         return
     fi
 
     local result=""
-    if [ "$IS_CELLAR_HOST" = true ]; then
-        result=$(docker_cmd exec onioncellar curl -s --max-time 5 http://localhost:8083/status 2>/dev/null) || result=""
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        result=$(docker_cmd exec onionheaven curl -s --max-time 5 http://localhost:8083/status 2>/dev/null) || result=""
     else
         result=$(docker_cmd exec onionpress-tor-client \
             curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-            "http://${CELLAR_ADDR}:8083/status" 2>/dev/null) || result=""
+            "http://${ONIONHEAVEN_ADDR}:8083/status" 2>/dev/null) || result=""
     fi
 
     if echo "$result" | grep -q '"total"'; then
-        _CELLAR_STATUS_CACHE="$result"
-        _CELLAR_STATUS_TS=$now
+        _ONIONHEAVEN_STATUS_CACHE="$result"
+        _ONIONHEAVEN_STATUS_TS=$now
         echo "$result"
     else
         echo '{"total":0,"healthy":0,"failing":0,"taken_over":0}'
     fi
 }
 
-# Extract a field from cellar status JSON (lightweight — no python needed)
-_cellar_field() {
+# Extract a field from OnionHeaven status JSON (lightweight — no python needed)
+_onionheaven_field() {
     local field="$1"
-    query_cellar_status | sed 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*//' | sed 's/[^0-9].*//' | tr -d ' \n\r'
+    query_onionheaven_status | sed 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*//' | sed 's/[^0-9].*//' | tr -d ' \n\r'
 }
 
 get_registry_count() {
-    _cellar_field "total"
+    _onionheaven_field "total"
 }
 
 get_healthy_count() {
-    _cellar_field "healthy"
+    _onionheaven_field "healthy"
 }
 
 get_stress_fail_count() {
-    _cellar_field "failing"
+    _onionheaven_field "failing"
 }
 
 get_takeover_count() {
-    _cellar_field "taken_over"
+    _onionheaven_field "taken_over"
 }
 
 # Count workers registered from local containers (works on any machine)
@@ -558,8 +558,8 @@ get_container_mem_mb() {
 }
 
 get_last_poll_duration() {
-    if [ "$IS_CELLAR_HOST" = true ]; then
-        docker_cmd logs --tail 100 onioncellar 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r' || echo "-"
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        docker_cmd logs --tail 100 onionheaven 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r' || echo "-"
     else
         echo "-"
     fi
@@ -780,10 +780,10 @@ disable_workers() {
             -H "Content-Type: application/json" \
             -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
 
-        # Also shut down Arti onion services for this worker so the cellar's
+        # Also shut down Arti onion services for this worker so OnionHeaven's
         # Arti becomes the sole publisher for these .onion addresses.
         # Without this, the worker's Arti keeps publishing descriptors and
-        # intercepting connections, preventing the cellar's 302 redirect.
+        # intercepting connections, preventing OnionHeaven's 302 redirect.
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         docker_cmd exec "$ctr_name" \
@@ -855,7 +855,7 @@ enable_workers() {
             -H "Content-Type: application/json" \
             -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
 
-        # Re-register with cellar over Tor (like a real OnionPress restart).
+        # Re-register with OnionHeaven over Tor (like a real OnionPress restart).
         # This triggers immediate release of the taken-over address.
         docker_cmd exec -d "$ctr_name" \
             python3 -c "
@@ -913,7 +913,7 @@ subprocess.run([
     '-H', 'Content-Type: application/json',
     '-d', payload,
     '--max-time', '60',
-    'http://${CELLAR_ADDR}:8083/register',
+    'http://${ONIONHEAVEN_ADDR}:8083/register',
 ], capture_output=True, timeout=75)
 print(f'Re-registered {w[\"content_address\"]}')
 " 2>/dev/null &
@@ -1021,7 +1021,7 @@ wait_for_recovery() {
 
 # ── Graceful offline/online notification ─────────────────────────────────────
 
-# POST /offline to cellar for a range of workers (instant fail_count=10).
+# POST /offline to OnionHeaven for a range of workers (instant fail_count=10).
 # This simulates a real OnionPress instance calling /offline before sleeping/quitting.
 notify_offline() {
     local start="$1"
@@ -1064,16 +1064,16 @@ except:
     sys.exit(1)
 " 2>/dev/null) || continue
 
-        # POST /offline to cellar — locally or over Tor
-        if [ "$IS_CELLAR_HOST" = true ]; then
-            docker_cmd exec onioncellar \
+        # POST /offline to OnionHeaven — locally or over Tor
+        if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+            docker_cmd exec onionheaven \
                 curl -s -X POST http://localhost:8083/offline \
                 -H "Content-Type: application/json" \
                 -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
         else
             docker_cmd exec onionpress-tor-client \
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                -X POST "http://${CELLAR_ADDR}:8083/offline" \
+                -X POST "http://${ONIONHEAVEN_ADDR}:8083/offline" \
                 -H "Content-Type: application/json" \
                 -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
         fi
@@ -1085,7 +1085,7 @@ except:
     log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified}"
 }
 
-# POST /online to cellar for a range of workers (instant reset to healthy).
+# POST /online to OnionHeaven for a range of workers (instant reset to healthy).
 # This simulates a real OnionPress instance calling /online after waking up.
 notify_online() {
     local start="$1"
@@ -1128,16 +1128,16 @@ except:
     sys.exit(1)
 " 2>/dev/null) || continue
 
-        # POST /online to cellar — locally or over Tor
-        if [ "$IS_CELLAR_HOST" = true ]; then
-            docker_cmd exec onioncellar \
+        # POST /online to OnionHeaven — locally or over Tor
+        if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+            docker_cmd exec onionheaven \
                 curl -s -X POST http://localhost:8083/online \
                 -H "Content-Type: application/json" \
                 -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
         else
             docker_cmd exec onionpress-tor-client \
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                -X POST "http://${CELLAR_ADDR}:8083/online" \
+                -X POST "http://${ONIONHEAVEN_ADDR}:8083/online" \
                 -H "Content-Type: application/json" \
                 -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
         fi
@@ -1151,9 +1151,9 @@ except:
 
 # Get content addresses that have active takeovers (one per line).
 get_taken_over_addresses() {
-    if [ "$IS_CELLAR_HOST" = true ]; then
-        docker_cmd exec onioncellar \
-            sqlite3 "$CELLAR_DB_PATH" "SELECT content_address FROM registry WHERE takeover_active=1" 2>/dev/null || true
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        docker_cmd exec onionheaven \
+            sqlite3 "$ONIONHEAVEN_DB_PATH" "SELECT content_address FROM registry WHERE takeover_active=1" 2>/dev/null || true
     else
         # On remote machines, use the disabled workers' addresses from local info files.
         # These are the workers we know we disabled, so they should be taken over.
@@ -1218,7 +1218,7 @@ verify_redirects() {
         sampled=$((sampled + 1))
 
         # Verify redirect via onionpress-wordpress → onionpress-tor SOCKS.
-        # We CANNOT use onioncellar's own SOCKS proxy — Arti has a bug where
+        # We CANNOT use onionheaven's own SOCKS proxy — Arti has a bug where
         # self-connections (SOCKS → own onion service) return empty replies.
         # Using a different Arti instance (onionpress-tor) works correctly.
         local http_response="000"
@@ -1258,10 +1258,10 @@ verify_redirects() {
     log "${phase_label}: Redirect verification — ${passed}/${sampled} passed, ${failed} failed (${total_taken} total taken over)"
     log_json "\"event\":\"redirect_verify\",\"phase\":\"${phase_label}\",\"total_taken\":${total_taken},\"sampled\":${sampled},\"passed\":${passed},\"failed\":${failed}"
 
-    # Dump debug log from redirect service (cellar host only)
-    if [ "$IS_CELLAR_HOST" = true ]; then
+    # Dump debug log from redirect service (OnionHeaven host only)
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
         log "${phase_label}: Redirect debug log:"
-        docker_cmd exec onioncellar cat /tmp/cellar-redirect-debug.log 2>/dev/null | tail -30 | while IFS= read -r dbgline; do
+        docker_cmd exec onionheaven cat /tmp/onionheaven-redirect-debug.log 2>/dev/null | tail -30 | while IFS= read -r dbgline; do
             echo "           [redirect-dbg] $dbgline"
         done || echo "           [redirect-dbg] (no debug log found)"
     fi
@@ -1282,7 +1282,7 @@ cleanup_stress_test() {
     done || true
     log "  Removed worker containers"
 
-    # Unregister stress-test workers from cellar
+    # Unregister stress-test workers from OnionHeaven
     # Get addresses from local worker-info files (works on any machine)
     local stress_addrs=""
     for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
@@ -1311,23 +1311,23 @@ except: pass
 
             # POST /unregister — locally or over Tor
             local resp
-            if [ "$IS_CELLAR_HOST" = true ]; then
-                resp=$(docker_cmd exec onioncellar \
+            if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+                resp=$(docker_cmd exec onionheaven \
                     curl -s -X POST http://localhost:8083/unregister \
                     -H "Content-Type: application/json" \
                     -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
             else
                 resp=$(docker_cmd exec onionpress-tor-client \
                     curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                    -X POST "http://${CELLAR_ADDR}:8083/unregister" \
+                    -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
                     -H "Content-Type: application/json" \
                     -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
             fi
 
-            # If takeover was active and we're on cellar host, release Arti config
-            if [ "$IS_CELLAR_HOST" = true ] && echo "$resp" | grep -q '"takeover_was_active":true'; then
+            # If takeover was active and we're on OnionHeaven host, release Arti config
+            if [ "$IS_ONIONHEAVEN_HOST" = true ] && echo "$resp" | grep -q '"takeover_was_active":true'; then
                 docker_cmd exec onionpress-tor \
-                    /cellar-tor-manager.sh release "$addr" 2>/dev/null || true
+                    /onionheaven-tor-manager.sh release "$addr" 2>/dev/null || true
                 released_arti=$((released_arti + 1))
             fi
 
@@ -1348,11 +1348,11 @@ except: pass
 
 run_worker() {
     preflight
-    detect_cellar_addr
+    detect_onionheaven_addr
     mkdir -p "$OUTPUT_DIR"
 
-    log "=== OnionCellar Stress Test (Arti) ==="
-    log "Cellar: ${CELLAR_ADDR}"
+    log "=== OnionHeaven Stress Test (Arti) ==="
+    log "OnionHeaven: ${ONIONHEAVEN_ADDR}"
     log "Workers: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
     log "Containers: ${NUM_CONTAINERS} × ${PER_CTR} workers/container"
     if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
@@ -1386,7 +1386,7 @@ run_worker() {
     log "Sent SIGHUP to Arti in all worker containers (descriptor re-publish)"
     echo ""
 
-    # Phase 3: Wait for cellar poller to confirm workers are healthy
+    # Phase 3: Wait for onionheaven poller to confirm workers are healthy
     if ! wait_for_healthy "$TOTAL" "Phase 3" 600; then
         log "WARNING: Not all workers became healthy, continuing anyway..."
     fi
@@ -1404,7 +1404,7 @@ run_worker() {
         disable_workers "$fail_start" "$FAILING"
         echo ""
 
-        # Phase 5: Wait for cellar to takeover (from graceful offline)
+        # Phase 5: Wait for OnionHeaven to takeover (from graceful offline)
         log "Phase 5: Waiting for takeovers from graceful offline..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
@@ -1436,7 +1436,7 @@ run_worker() {
         disable_workers "$fail_start" "$FAILING"
         echo ""
 
-        # Phase 8: Wait for cellar to detect failures and takeover
+        # Phase 8: Wait for OnionHeaven to detect failures and takeover
         log "Phase 8: Waiting for takeovers from crash simulation..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
@@ -1481,7 +1481,7 @@ run_coordinator() {
     preflight
     mkdir -p "$OUTPUT_DIR"
 
-    log "=== OnionCellar Stress Test (coordinator — read-only monitor) ==="
+    log "=== OnionHeaven Stress Test (coordinator — read-only monitor) ==="
     log "Output: ${OUTPUT_DIR}"
     log "Press Ctrl-C to stop"
     echo ""
@@ -1494,23 +1494,23 @@ run_coordinator() {
 
 # ── Cleanup mode ──────────────────────────────────────────────────────────────
 run_cleanup() {
-    log "=== OnionCellar Stress Test Cleanup ==="
+    log "=== OnionHeaven Stress Test Cleanup ==="
 
     if ! docker_cmd info >/dev/null 2>&1; then
         echo "ERROR: Cannot reach Docker"
         exit 1
     fi
 
-    # Detect cellar host (needed for cleanup routing)
+    # Detect OnionHeaven host (needed for cleanup routing)
     local content_addr
     content_addr=$(docker_cmd exec onionpress-tor \
         su -s /bin/sh arti -c "arti hss --nickname wordpress onion-address -c /etc/arti/arti.toml" 2>/dev/null) || true
-    if [ "$content_addr" = "$KNOWN_CELLAR_ADDR" ]; then
-        IS_CELLAR_HOST=true
+    if [ "$content_addr" = "$KNOWN_ONIONHEAVEN_ADDR" ]; then
+        IS_ONIONHEAVEN_HOST=true
     else
-        IS_CELLAR_HOST=false
+        IS_ONIONHEAVEN_HOST=false
     fi
-    detect_cellar_addr
+    detect_onionheaven_addr
 
     # Remove all stress-worker containers
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
@@ -1558,23 +1558,23 @@ except: pass
         [ -z "$addr" ] && continue
 
         local resp
-        if [ "$IS_CELLAR_HOST" = true ]; then
-            resp=$(docker_cmd exec onioncellar \
+        if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+            resp=$(docker_cmd exec onionheaven \
                 curl -s -X POST http://localhost:8083/unregister \
                 -H "Content-Type: application/json" \
                 -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
         else
             resp=$(docker_cmd exec onionpress-tor-client \
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                -X POST "http://${CELLAR_ADDR}:8083/unregister" \
+                -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
                 -H "Content-Type: application/json" \
                 -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
         fi
 
-        # If takeover was active and we're on cellar host, release Arti config
-        if [ "$IS_CELLAR_HOST" = true ] && echo "$resp" | grep -q '"takeover_was_active":true'; then
+        # If takeover was active and we're on OnionHeaven host, release Arti config
+        if [ "$IS_ONIONHEAVEN_HOST" = true ] && echo "$resp" | grep -q '"takeover_was_active":true'; then
             docker_cmd exec onionpress-tor \
-                /cellar-tor-manager.sh release "$addr" 2>/dev/null || true
+                /onionheaven-tor-manager.sh release "$addr" 2>/dev/null || true
             released_arti=$((released_arti + 1))
         fi
 

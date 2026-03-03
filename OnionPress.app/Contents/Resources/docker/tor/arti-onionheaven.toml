@@ -1,4 +1,4 @@
-# Arti config for cellar-polling container (SOCKS proxy + keystore for takeover)
+# Arti config for onionheaven-polling container (SOCKS proxy + keystore for takeover)
 [proxy]
 socks_listen = "0.0.0.0:9050"
 

@@ -32,7 +32,7 @@
   - `src/key_manager.py` — vanity key management
   - `src/backup_manager.py` — backup/restore
   - `src/setup_window.py` — native setup window
-  - `src/cellar.py` — OnionCellar integration
+  - `src/onionheaven.py` — OnionHeaven integration
   - `src/install_native_messaging.py` — browser extension support
   - `setup.py` — py2app config (if you add a new local module, add it to `includes` AND the build script's `cp` lines)
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
@@ -77,7 +77,7 @@
 - Started early alongside WordPress and DB (no dependencies), giving it 60+ seconds to bootstrap while WordPress warms up
 - `docker compose down` stops it automatically (no profile needed)
 - **Used by**: `torcurl`, `_auto_open_browser_inner()`, `check_tor_reachability()` Check 5, `onion-forward.php` (browser extension PHP proxy)
-- **NOT used by**: `src/cellar.py` (outbound Tor to external `.onion`), `onionpress-wayback-archive.php` (Wayback Machine), `cellar-poller.py` (runs inside container)
+- **NOT used by**: `src/onionheaven.py` (outbound Tor to external `.onion`), `onionpress-wayback-archive.php` (Wayback Machine), `onionheaven-poller.py` (runs inside container)
 
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Worker bootstrap: waits for Arti keys, extracts addresses, registers with cellar over Tor.
+Worker bootstrap: waits for Arti keys, extracts addresses, registers with OnionHeaven over Tor.
 
 Runs inside each worker container after Arti starts. Each worker self-registers
-with the cellar just like a real OnionPress instance would — over Tor, using the
+with OnionHeaven just like a real OnionPress instance would — over Tor, using the
 container's own Arti SOCKS proxy.
 
 Usage:
-    python3 worker-bootstrap.py <cellar_addr> <container_idx> <num_workers> [base_port]
+    python3 worker-bootstrap.py <onionheaven_addr> <container_idx> <num_workers> [base_port]
 """
 
 import base64
@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-CELLAR_ADDR = sys.argv[1]
+ONIONHEAVEN_ADDR = sys.argv[1]
 CONTAINER_IDX = int(sys.argv[2])
 NUM_WORKERS = int(sys.argv[3])
 BASE_PORT = int(sys.argv[4]) if len(sys.argv) > 4 else 9100
@@ -82,8 +82,8 @@ def parse_openssh_pem(path):
     return pubkey, privkey
 
 
-def register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64):
-    """Register with cellar over Tor (via this container's SOCKS proxy).
+def register_with_onionheaven(content_addr, hc_addr, secret_b64, public_b64, pem_b64):
+    """Register with OnionHeaven over Tor (via this container's SOCKS proxy).
 
     Uses exponential backoff: retries up to 6 times with delays of
     5s, 15s, 30s, 60s, 60s between attempts. Total worst-case ~8 minutes
@@ -111,7 +111,7 @@ def register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
                     "-H", "Content-Type: application/json",
                     "-d", payload,
                     "--max-time", "90",
-                    f"http://{CELLAR_ADDR}:8083/register",
+                    f"http://{ONIONHEAVEN_ADDR}:8083/register",
                 ],
                 capture_output=True, text=True, timeout=105,
             )
@@ -145,7 +145,7 @@ def wait_for_socks():
                 ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                  "--socks5-hostname", "127.0.0.1:9050",
                  "--max-time", "10",
-                 f"http://{CELLAR_ADDR}/"],
+                 f"http://{ONIONHEAVEN_ADDR}/"],
                 capture_output=True, text=True, timeout=15,
             )
             # Any response (even error) means SOCKS is working and Tor is connected
@@ -230,9 +230,9 @@ def main():
         public_b64 = base64.b64encode(pubkey).decode()
         pem_b64 = base64.b64encode(pem_data).decode()
 
-        # Self-register with cellar over Tor (retries with backoff inside)
-        print(f"[worker {i}] Registering with cellar over Tor...", flush=True)
-        result = register_with_cellar(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
+        # Self-register with OnionHeaven over Tor (retries with backoff inside)
+        print(f"[worker {i}] Registering with OnionHeaven over Tor...", flush=True)
+        result = register_with_onionheaven(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
         ok = False
         try:
             resp = json.loads(result)

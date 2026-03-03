@@ -98,10 +98,10 @@ initialize_colima() {
                 VM_MEMORY="$config_mem"
             fi
         fi
-        # Pre-check: if cellar key is imported, start with 5GB to avoid a restart
-        local cellar_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-        if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
-            log "Cellar key detected in launcher — starting VM with 5GB"
+        # Pre-check: if onionheaven key is imported, start with 5GB to avoid a restart
+        local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+        if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
+            log "OnionHeaven key detected in launcher — starting VM with 5GB"
             VM_MEMORY=5
             # Persist to config so subsequent starts also use 5GB
             if [ -f "$DATA_DIR/config" ] && grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
@@ -156,10 +156,10 @@ initialize_colima() {
                 vm_mem="$cfg_mem"
             fi
         fi
-        # Pre-check: if cellar key exists, ensure 5GB
-        local cellar_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-        if [ -d "$DATA_DIR/shared/vanity-keys/$cellar_address" ] && [ "$vm_mem" -lt 5 ]; then
-            log "Cellar key detected in launcher — starting VM with 5GB"
+        # Pre-check: if onionheaven key exists, ensure 5GB
+        local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+        if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$vm_mem" -lt 5 ]; then
+            log "OnionHeaven key detected in launcher — starting VM with 5GB"
             vm_mem=5
         fi
         log "Starting Colima VM..."
