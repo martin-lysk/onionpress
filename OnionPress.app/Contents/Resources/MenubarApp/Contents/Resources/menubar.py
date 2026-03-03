@@ -704,6 +704,7 @@ class OnionPressApp(rumps.App):
         self._onionheaven_registration_started = False  # Whether registration thread is running
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
         self._quitting = False                 # True once quit cleanup has started
+        self._stopping = False                 # True while Stop button is in progress
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -1570,7 +1571,7 @@ class OnionPressApp(rumps.App):
                 timeout=15,
                 env=docker_env
             )
-            if probe_result.returncode != 0 or probe_result.stdout.strip() not in ["200", "301", "302", "303"]:
+            if probe_result.returncode != 0 or probe_result.stdout.strip() not in ["200", "301"]:
                 if log_result:
                     self.log(f"✗ Onion service not yet reachable through Tor network")
                 return False
@@ -1809,11 +1810,15 @@ class OnionPressApp(rumps.App):
                         self.last_status_logged = current_status
                     elif previous_ready and not ready_now:
                         # Was ready, now failing — go to reconnecting state
-                        self.is_ready = False
-                        self._yellow_since = time.time()
-                        self._bootstrap_stall_count = 0
-                        self._tor_auto_restarted = False  # Allow auto-restart again
-                        self.log("Service became unreachable — reconnecting")
+                        # (but skip if user intentionally stopped or is quitting)
+                        if self._stopping or self._quitting:
+                            self.is_ready = False
+                        else:
+                            self.is_ready = False
+                            self._yellow_since = time.time()
+                            self._bootstrap_stall_count = 0
+                            self._tor_auto_restarted = False  # Allow auto-restart again
+                            self.log("Service became unreachable — reconnecting")
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
                         pct = self._parse_bootstrap_percentage()
@@ -1832,6 +1837,8 @@ class OnionPressApp(rumps.App):
                         # — that would reset progress.
                         if (self._yellow_since
                                 and not self._tor_auto_restarted
+                                and not self._stopping
+                                and not self._quitting
                                 and (time.time() - self._yellow_since) > 120
                                 and self._tor_container_unhealthy()):
                             self._tor_auto_restarted = True
@@ -2306,7 +2313,7 @@ class OnionPressApp(rumps.App):
 
         # Wait up to 2 minutes for Tor to bootstrap; only restart if unhealthy
         time.sleep(120)
-        if not self.is_ready and self._tor_container_unhealthy():
+        if not self.is_ready and not self._stopping and not self._quitting and self._tor_container_unhealthy():
             self.log("Tor unhealthy 2min after SIGHUP — restarting container")
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
@@ -2691,7 +2698,7 @@ class OnionPressApp(rumps.App):
                      onion_url],
                     capture_output=True, text=True, timeout=15, env=docker_env
                 )
-                if result.returncode == 0 and result.stdout.strip() in ["200", "301", "302", "303"]:
+                if result.returncode == 0 and result.stdout.strip() in ["200", "301"]:
                     reachable = True
                     self.log(f"Onion service reachable via tor-client after {(attempt + 1) * 3}s")
                     break
@@ -3004,6 +3011,7 @@ class OnionPressApp(rumps.App):
     @rumps.clicked("Start")
     def start_service(self, _):
         """Start the WordPress + Tor service"""
+        self._stopping = False  # Clear in case Stop was hit previously
         self.menu["Starting..."].title = "Status: Starting..."
 
         def start():
@@ -3084,9 +3092,17 @@ class OnionPressApp(rumps.App):
     @rumps.clicked("Stop")
     def stop_service(self, _):
         """Stop the WordPress + Tor service"""
+        self._stopping = True  # Prevent health monitor from auto-restarting
         self.menu["Starting..."].title = "Status: Stopping..."
 
         def stop():
+            # Notify OnionHeaven before stopping services
+            if self._onionheaven_registration_started:
+                try:
+                    onionheaven.notify_onionheaven_offline(self)
+                except Exception:
+                    pass
+
             subprocess.run([self.launcher_script, "stop"])
             time.sleep(1)
             self.check_status()
@@ -3095,12 +3111,14 @@ class OnionPressApp(rumps.App):
             self.stop_web_log_capture()
             self.stop_caffeinate()
             self.stop_onion_proxy()
+            self._stopping = False
 
         threading.Thread(target=stop, daemon=True).start()
 
     @rumps.clicked("Restart")
     def restart_service(self, _):
         """Restart the WordPress + Tor service"""
+        self._stopping = False  # Clear in case Stop was hit previously
         self.menu["Starting..."].title = "Status: Restarting..."
         self.icon = self.icon_starting  # Change icon to indicate restarting
 
