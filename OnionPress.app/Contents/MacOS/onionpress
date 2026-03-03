@@ -242,7 +242,7 @@ ONIONHEAVEN_DOCKERFILE
 
         # Start onionheaven container (SOCKS + keystore + onionheaven-server + onionheaven-poller)
         # This keeps HSDir lookups off the main Tor instance and runs OnionHeaven services
-        if docker compose --profile onionheaven up -d onionheaven >> "$LOG_FILE" 2>&1; then
+        if docker compose --profile onionheaven up -d --pull always onionheaven >> "$LOG_FILE" 2>&1; then
             log "OnionHeaven: started onionheaven container"
         else
             log "WARNING: Failed to start onionheaven container"
