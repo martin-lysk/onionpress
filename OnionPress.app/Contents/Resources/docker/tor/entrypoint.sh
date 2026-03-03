@@ -23,7 +23,7 @@ chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
 # Polling-only mode
 if [ "${POLLING_ONLY}" = "1" ]; then
-    if [ "${ONIONPRESS_ONIONHEAVEN}" = "1" ]; then
+    if [ "${ONIONHEAVEN}" = "1" ]; then
         # OnionHeaven polling mode: Arti with keystore (for takeover) + onionheaven-server + onionheaven-poller + redirect
         echo "OnionHeaven polling mode: starting Arti (SOCKS + keystore), registration server, redirect service, and poller..."
 
@@ -86,7 +86,7 @@ fi
 
 # OnionHeaven mode: forward port 8083 to onionheaven container's registration API
 # and add port 8083 to the onion service config in arti.toml
-if [ "${ONIONPRESS_ONIONHEAVEN}" = "1" ]; then
+if [ "${ONIONHEAVEN}" = "1" ]; then
     socat TCP-LISTEN:8083,reuseaddr,fork TCP:onionheaven:8083 &
     SOCAT_API_PID=$!
     sleep 1

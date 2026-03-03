@@ -153,7 +153,7 @@ fi
 
 # OnionHeaven mode detection — check if our .onion address matches the onionheaven address
 # This env var is passed to docker-compose and controls OnionHeaven-specific behavior
-export ONIONPRESS_ONIONHEAVEN="0"
+export ONIONHEAVEN="0"
 
 detect_onionheaven_mode() {
     local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
@@ -168,7 +168,7 @@ detect_onionheaven_mode() {
         our_address=$(echo "$our_address" | tr -d '\n\r ')
     fi
     if [ "$our_address" = "$onionheaven_address" ]; then
-        export ONIONPRESS_ONIONHEAVEN="1"
+        export ONIONHEAVEN="1"
         log "OnionHeaven mode activated (address: $our_address)"
 
         # OnionHeaven needs more memory for polling, takeover services, etc.
@@ -1171,15 +1171,15 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 # Registration API now runs in the onionheaven container (onionheaven-server.py),
 # which creates its own data directories on the shared volume at startup.
 install_onionheaven_plugin() {
-    if [ "$ONIONPRESS_ONIONHEAVEN" != "1" ]; then
+    if [ "$ONIONHEAVEN" != "1" ]; then
         return 0
     fi
 
     # Clean up old PHP mu-plugins if they exist (migrated to onionheaven-server.py)
     docker exec onionpress-wordpress sh -c '
-        rm -f /var/www/html/wp-content/mu-plugins/onionpress-onionheaven-register.php \
-              /var/www/html/wp-content/mu-plugins/onionpress-onionheaven-crypto.php \
-              /var/www/html/wp-content/mu-plugins/onionpress-onionheaven-db.php
+        rm -f /var/www/html/wp-content/mu-plugins/onionheaven-register.php \
+              /var/www/html/wp-content/mu-plugins/onionheaven-crypto.php \
+              /var/www/html/wp-content/mu-plugins/onionheaven-db.php
     ' >> "$LOG_FILE" 2>&1 || true
 
     # Clean up old crypto artifacts from shared volume (encryption dropped)
@@ -1403,7 +1403,7 @@ start_containers() {
         wp_check=$((wp_check + 1))
     done
 
-    # Detect onionheaven mode BEFORE starting Tor so ONIONPRESS_ONIONHEAVEN env var
+    # Detect onionheaven mode BEFORE starting Tor so ONIONHEAVEN env var
     # is set when docker-compose creates the tor container (exposes port 8083)
     cd "$DOCKER_DIR"
     detect_onionheaven_mode || true
@@ -1670,7 +1670,7 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
-            # Detect onionheaven mode BEFORE starting Tor so ONIONPRESS_ONIONHEAVEN env var
+            # Detect onionheaven mode BEFORE starting Tor so ONIONHEAVEN env var
             # is set when docker-compose creates the tor container (exposes port 8083)
             detect_onionheaven_mode || true
             docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"

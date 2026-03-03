@@ -5,7 +5,7 @@ services:
     container_name: onionpress-tor
     environment:
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
-      - ONIONPRESS_ONIONHEAVEN=${ONIONPRESS_ONIONHEAVEN:-0}
+      - ONIONHEAVEN=${ONIONHEAVEN:-0}
     volumes:
       - arti-state:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress
@@ -77,7 +77,7 @@ services:
     container_name: onionheaven
     environment:
       - POLLING_ONLY=1
-      - ONIONPRESS_ONIONHEAVEN=${ONIONPRESS_ONIONHEAVEN:-0}
+      - ONIONHEAVEN=${ONIONHEAVEN:-0}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
     volumes:
       - arti-state-polling:/var/lib/arti/
