@@ -332,7 +332,7 @@ def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
         result = subprocess.run(
             [docker_bin, "cp", php_script_path,
              "onionpress-wordpress:/var/www/html/__op_proxy.php"],
-            capture_output=True, text=True, timeout=10, env=docker_env
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, env=docker_env
         )
         if result.returncode == 0:
             if log_func:
@@ -829,7 +829,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             ]
             result = subprocess.run(
                 cmd, env=denv,
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
             )
 
             if result.returncode == 0:
@@ -852,7 +852,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                             "wp", "config", "set", const_name, const_value,
                             "--raw", "--type=constant", "--allow-root"
                         ],
-                        env=denv, capture_output=True, text=True, timeout=10
+                        env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
                     )
 
                 # Write .htaccess with multisite rewrite rules
@@ -886,7 +886,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                         "chown www-data:www-data /var/www/html/.htaccess"
                     ],
                     input=htaccess_content,
-                    env=denv, capture_output=True, text=True, timeout=10
+                    env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
                 )
 
                 if self.server.log_func:
@@ -899,7 +899,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                         subprocess.run(
                             wp_exec + ["wp", "option", "update", key, val,
                                        "--allow-root"],
-                            env=denv, capture_output=True, text=True, timeout=10
+                            env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
                         )
                     if self.server.log_func:
                         self.server.log_func("Archive.org S3 keys saved for Wayback archiving")

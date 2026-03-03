@@ -1,4 +1,7 @@
 # Arti config for polling-only container (SOCKS proxy, no onion services)
+[logging]
+console = "info,arti_client=debug"
+
 [proxy]
 socks_listen = "0.0.0.0:9050"
 

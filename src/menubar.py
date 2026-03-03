@@ -705,6 +705,7 @@ class OnionPressApp(rumps.App):
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
         self._quitting = False                 # True once quit cleanup has started
         self._stopping = False                 # True while Stop button is in progress
+        self._run_generation = 0               # Incremented on stop/start; stale threads check this
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -889,7 +890,7 @@ class OnionPressApp(rumps.App):
             # Verify it's actually a caffeinate process before killing
             result = subprocess.run(
                 ["ps", "-p", str(old_pid), "-o", "comm="],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
             )
             if result.returncode == 0 and "caffeinate" in result.stdout:
                 os.kill(old_pid, 15)  # SIGTERM
@@ -1200,7 +1201,7 @@ class OnionPressApp(rumps.App):
                 [docker_bin, "logs", "-f", "--tail", "100", "onionpress-wordpress"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 encoding='utf-8',
                 errors='replace',
                 env={
@@ -1332,7 +1333,7 @@ class OnionPressApp(rumps.App):
                 env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
                 result = subprocess.run(
                     [docker_bin, "ps", "--format", "{{.Names}}"],
-                    capture_output=True, text=True, timeout=5, env=env
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5, env=env
                 )
                 our_containers = result.stdout.strip()
             except Exception:
@@ -1421,7 +1422,7 @@ class OnionPressApp(rumps.App):
             result = subprocess.run(
                 [self.launcher_script, command],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 encoding='utf-8',
                 errors='replace',
                 timeout=60
@@ -1440,7 +1441,7 @@ class OnionPressApp(rumps.App):
             result = subprocess.run(
                 ["curl", "-s", "--max-time", "3", "-H", "User-Agent: OnionPress-HealthCheck", f"http://localhost:{self.wp_port}"],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 encoding='utf-8',
                 errors='replace',
                 timeout=5
@@ -1491,7 +1492,7 @@ class OnionPressApp(rumps.App):
                 [docker_bin, "exec", "onionpress-tor",
                  "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 encoding='utf-8',
                 errors='replace',
                 timeout=5,
@@ -1516,7 +1517,7 @@ class OnionPressApp(rumps.App):
             bootstrap_result = subprocess.run(
                 [docker_bin, "logs", "onionpress-tor"],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 encoding='utf-8',
                 errors='replace',
                 timeout=10,
@@ -1546,7 +1547,7 @@ class OnionPressApp(rumps.App):
                  "-U", "OnionPress-HealthCheck",
                  "http://wordpress:80/"],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 encoding='utf-8',
                 errors='replace',
                 timeout=10,
@@ -1567,7 +1568,7 @@ class OnionPressApp(rumps.App):
                  "-H", "User-Agent: OnionPress-HealthCheck",
                  f"http://{self.onion_address}/"],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 timeout=15,
                 env=docker_env
             )
@@ -1620,7 +1621,7 @@ class OnionPressApp(rumps.App):
             result = subprocess.run(
                 ["curl", "-s", "--max-time", "3", "-o", "/dev/null", "-w", "%{http_code}",
                  "http://1.1.1.1/"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
             )
             return result.returncode == 0
         except Exception:
@@ -1638,7 +1639,7 @@ class OnionPressApp(rumps.App):
             docker_env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
             result = subprocess.run(
                 [docker_bin, "logs", "onionpress-tor"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10,
                 env=docker_env
             )
             output = result.stdout + result.stderr
@@ -2085,7 +2086,7 @@ class OnionPressApp(rumps.App):
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor",
                  "cat", "/var/lib/tor/hidden_service/healthcheck/hostname"],
-                capture_output=True, text=True, timeout=10, env=env
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, env=env
             )
             if result.returncode == 0:
                 addr = result.stdout.strip()
@@ -2113,7 +2114,7 @@ class OnionPressApp(rumps.App):
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor",
                  "ls", "/var/lib/tor/healthcheck-messages/"],
-                capture_output=True, text=True, timeout=10, env=env
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, env=env
             )
             if result.returncode != 0 or not result.stdout.strip():
                 if self.onionheaven_messages:
@@ -2136,7 +2137,7 @@ class OnionPressApp(rumps.App):
                     r = subprocess.run(
                         [docker_bin, "exec", "onionpress-tor",
                          "cat", f"/var/lib/tor/healthcheck-messages/{fname}"],
-                        capture_output=True, text=True, timeout=5, env=env
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5, env=env
                     )
                     if r.returncode == 0 and r.stdout.strip():
                         msg = json.loads(r.stdout.strip())
@@ -2290,11 +2291,15 @@ class OnionPressApp(rumps.App):
             self._yellow_since = time.time()
             self.update_menu()
         # SIGHUP Tor so it rebuilds stale circuits immediately
-        threading.Thread(target=self._sighup_tor, daemon=True).start()
+        gen = self._run_generation
+        threading.Thread(target=self._sighup_tor, args=(gen,), daemon=True).start()
 
-    def _sighup_tor(self):
+    def _sighup_tor(self, generation):
         """Send SIGHUP to Tor container to force circuit rebuild after wake.
-        If Tor hasn't bootstrapped within 2 minutes, restart the container."""
+        If Tor hasn't bootstrapped within 2 minutes, restart the container.
+        Bails out if a stop/start changed the generation."""
+        if generation != self._run_generation:
+            return
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             env = os.environ.copy()
@@ -2303,7 +2308,7 @@ class OnionPressApp(rumps.App):
             # Try SIGHUP on PID 1 (works for both C-tor and Arti entrypoint)
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor", "kill", "-HUP", "1"],
-                capture_output=True, text=True, env=env, timeout=10)
+                capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=10)
             if result.returncode == 0:
                 self.log("Sent SIGHUP to Tor/Arti — rebuilding circuits")
             else:
@@ -2313,6 +2318,8 @@ class OnionPressApp(rumps.App):
 
         # Wait up to 2 minutes for Tor to bootstrap; only restart if unhealthy
         time.sleep(120)
+        if generation != self._run_generation:
+            return  # User stopped or restarted — don't touch containers
         if not self.is_ready and not self._stopping and not self._quitting and self._tor_container_unhealthy():
             self.log("Tor unhealthy 2min after SIGHUP — restarting container")
             try:
@@ -2322,7 +2329,7 @@ class OnionPressApp(rumps.App):
                 env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
                 subprocess.run(
                     [docker_bin, "restart", "onionpress-tor"],
-                    capture_output=True, text=True, env=env, timeout=30)
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=30)
                 self.log("Tor container restarted")
             except Exception as e:
                 self.log(f"Failed to restart Tor container: {e}")
@@ -2338,8 +2345,8 @@ class OnionPressApp(rumps.App):
             env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
             result = subprocess.run(
                 [docker_bin, "logs", "onionpress-tor", "--tail", "50"],
-                capture_output=True, text=True, env=env, timeout=10)
-            logs = result.stderr + result.stdout  # Arti logs to stderr
+                capture_output=True, env=env, timeout=10)
+            logs = (result.stderr + result.stdout).decode("utf-8", errors="replace")
             # Signs of trouble that a restart can fix
             sick_patterns = [
                 "No usable guards",
@@ -2386,7 +2393,7 @@ class OnionPressApp(rumps.App):
             env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
             subprocess.run(
                 [docker_bin, "restart", "onionpress-tor"],
-                capture_output=True, text=True, env=env, timeout=30)
+                capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=30)
             self.log("Tor container restarted — retrying onion service setup")
         except Exception as e:
             self.log(f"Failed to auto-restart Tor container: {e}")
@@ -2696,7 +2703,7 @@ class OnionPressApp(rumps.App):
                      "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
                      "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}",
                      onion_url],
-                    capture_output=True, text=True, timeout=15, env=docker_env
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15, env=docker_env
                 )
                 if result.returncode == 0 and result.stdout.strip() in ["200", "301"]:
                     reachable = True
@@ -2837,7 +2844,7 @@ class OnionPressApp(rumps.App):
                 result = subprocess.run(
                     [docker_bin, "run", "--rm", "-v", "onionpress-tor-keys:/keys",
                      "alpine", "cat", "/keys/wordpress/hostname"],
-                    capture_output=True, text=True, env=env, timeout=15
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=15
                 )
                 hostname = result.stdout.strip().replace(".onion", "")
                 if hostname:
@@ -2907,7 +2914,7 @@ class OnionPressApp(rumps.App):
             result = subprocess.run(
                 [docker_bin, "run", "--rm", "-v", "onionpress-tor-keys:/keys",
                  "alpine", "cat", "/keys/wordpress/hostname"],
-                capture_output=True, text=True, env=env, timeout=15
+                capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=15
             )
             current_hostname = result.stdout.strip()
         except Exception as e:
@@ -2982,7 +2989,7 @@ class OnionPressApp(rumps.App):
                 # Delete docker volume
                 subprocess.run(
                     [docker_bin, "volume", "rm", "onionpress-tor-keys"],
-                    capture_output=True, text=True, env=env, timeout=15
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=15
                 )
                 self.log("Deleted onionpress-tor-keys volume")
 
@@ -3021,7 +3028,7 @@ class OnionPressApp(rumps.App):
                 result = subprocess.run(
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding='utf-8', errors='replace',
                     encoding='utf-8',
                     errors='replace',
                     timeout=5
@@ -3093,6 +3100,7 @@ class OnionPressApp(rumps.App):
     def stop_service(self, _):
         """Stop the WordPress + Tor service"""
         self._stopping = True  # Prevent health monitor from auto-restarting
+        self._run_generation += 1  # Cancel any pending SIGHUP threads
         self.menu["Starting..."].title = "Status: Stopping..."
 
         def stop():
@@ -3951,7 +3959,7 @@ class OnionPressApp(rumps.App):
             result = subprocess.run(
                 [docker_bin, "compose", "-f", docker_compose_file, "pull"],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 encoding='utf-8',
                 errors='replace',
                 timeout=300,  # 5 minute timeout
@@ -3985,7 +3993,7 @@ class OnionPressApp(rumps.App):
                 ["curl", "-s", "--cacert", "/etc/ssl/cert.pem",
                  "-H", "User-Agent: onionpress", "--max-time", "10", url],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 encoding='utf-8',
                 timeout=15
             )
@@ -4122,7 +4130,7 @@ class OnionPressApp(rumps.App):
                 result = subprocess.run(
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding='utf-8', errors='replace',
                     encoding='utf-8',
                     errors='replace',
                     timeout=5
