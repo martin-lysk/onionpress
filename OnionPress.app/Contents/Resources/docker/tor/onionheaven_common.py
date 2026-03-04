@@ -201,7 +201,15 @@ def db_ensure_schema(conn):
 # ---------------------------------------------------------------------------
 
 def is_farm_mode(conn):
-    """Check if any active takeover containers are registered."""
+    """Check if farm mode is active.
+
+    Always True on the OnionHeaven server (ONIONHEAVEN=1 env var).
+    On normal OnionPress instances, checks DB for active takeover containers.
+    """
+    if os.environ.get("ONIONHEAVEN") == "1":
+        return True
+    # Normal OnionPress: check DB
+    _discover_takeover_containers(conn)
     try:
         count = conn.execute(
             "SELECT COUNT(*) FROM takeover_containers WHERE status = 'active'"
@@ -211,8 +219,37 @@ def is_farm_mode(conn):
         return False
 
 
+def _discover_takeover_containers(conn):
+    """Discover running takeover containers and register any missing from DB."""
+    import socket as _sock
+    for idx in range(10):  # check up to 10 takeover containers
+        name = f"onionheaven-takeover-{idx}"
+        try:
+            _sock.getaddrinfo(name, 9050, proto=_sock.IPPROTO_TCP)
+        except _sock.gaierror:
+            continue
+        try:
+            existing = conn.execute(
+                "SELECT 1 FROM takeover_containers WHERE container_name = ?",
+                (name,)
+            ).fetchone()
+            if not existing:
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                conn.execute(
+                    "INSERT INTO takeover_containers "
+                    "(container_name, max_services, active_services, last_heartbeat, status) "
+                    "VALUES (?, 50, 0, ?, 'active')",
+                    (name, now)
+                )
+                conn.commit()
+                log(f"Discovered running takeover container not in DB: {name}")
+        except Exception as e:
+            log(f"Warning: takeover container discovery failed for {name}: {e}")
+
+
 def get_takeover_containers(conn):
     """Get list of active takeover container names (sorted for consistency)."""
+    _discover_takeover_containers(conn)
     try:
         rows = conn.execute(
             "SELECT container_name FROM takeover_containers "
@@ -249,12 +286,48 @@ def assign_takeover_container(conn):
     return next(_takeover_rr_cycle)
 
 
+def _discover_poll_containers(conn):
+    """Discover running poll containers and register any missing from DB.
+
+    The launcher creates poll-0 and poll-1 after the onionheaven container
+    starts, so they may not be in the DB yet when the poller first runs.
+    Uses DNS resolution (Docker network) since docker CLI isn't in the container.
+    """
+    import socket as _sock
+    for idx in range(20):  # check up to 20 poll containers
+        name = f"onionheaven-poll-{idx}"
+        try:
+            _sock.getaddrinfo(name, 9050, proto=_sock.IPPROTO_TCP)
+        except _sock.gaierror:
+            continue  # doesn't exist, try next index
+        try:
+            existing = conn.execute(
+                "SELECT 1 FROM poll_containers WHERE container_name = ?",
+                (name,)
+            ).fetchone()
+            if not existing:
+                socks_addr = f"{name}:9050"
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                conn.execute(
+                    "INSERT INTO poll_containers (container_name, socks_addr, last_heartbeat, status) "
+                    "VALUES (?, ?, ?, 'active')",
+                    (name, socks_addr, now)
+                )
+                conn.commit()
+                log(f"Discovered running poll container not in DB: {name}")
+        except Exception as e:
+            log(f"Warning: poll container discovery failed for {name}: {e}")
+
+
 def get_poll_socks_addrs(conn):
     """Get list of SOCKS proxy addresses from active poll containers.
 
     Always includes the default SOCKS_ADDR as a fallback.
     Returns list of "host:port" strings.
     """
+    # Auto-discover running poll containers not yet in DB
+    _discover_poll_containers(conn)
+
     default = os.environ.get("ONIONHEAVEN_SOCKS_ADDR", "onionpress-tor-client:9050")
     addrs = [default]
     try:

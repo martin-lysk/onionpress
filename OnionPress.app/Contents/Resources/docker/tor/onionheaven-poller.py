@@ -152,6 +152,27 @@ def startup_reconciliation(conn):
     conn.commit()
     log("startup reconciliation complete — all entries will be re-polled fresh")
 
+    # Clean stale farm container entries (containers that no longer exist)
+    # Use DNS resolution since docker CLI isn't available in this container
+    import socket as _sock
+    for table in ("poll_containers", "takeover_containers"):
+        try:
+            rows = conn.execute(
+                f"SELECT container_name FROM {table}"
+            ).fetchall()
+            for row in rows:
+                name = row[0]
+                try:
+                    _sock.getaddrinfo(name, 9050, proto=_sock.IPPROTO_TCP)
+                except _sock.gaierror:
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE container_name = ?", (name,)
+                    )
+                    log(f"  removed stale {table} entry: {name}")
+            conn.commit()
+        except Exception as e:
+            log(f"  warning: could not clean {table}: {e}")
+
 
 def main():
     log("healthcheck poller starting")

@@ -172,11 +172,27 @@ detect_onionheaven_mode() {
         export ONIONHEAVEN="1"
         log "OnionHeaven mode activated (address: $our_address)"
 
-        # OnionHeaven needs more memory for polling, takeover services, etc.
+        # OnionHeaven needs more memory and CPUs for polling, takeover services, etc.
         # If VM_MEMORY is below 5GB, bump to 5GB (preserve higher values).
+        # If VM_CPU is below 3/4 of host cores, bump it.
         local current_mem
         current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
         current_mem="${current_mem:-1}"
+        local oh_target_cpus
+        oh_target_cpus=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+        oh_target_cpus=$(( oh_target_cpus * 3 / 4 ))
+        [ "$oh_target_cpus" -lt 2 ] && oh_target_cpus=2
+        local current_cpu
+        current_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+        current_cpu="${current_cpu:-2}"
+        if [ "$current_cpu" -lt "$oh_target_cpus" ] 2>/dev/null; then
+            log "OnionHeaven: VM_CPU is ${current_cpu}, increasing to ${oh_target_cpus} (3/4 of host cores)"
+            if grep -q "^VM_CPU=" "$DATA_DIR/config" 2>/dev/null; then
+                sed -i.bak "s/^VM_CPU=.*/VM_CPU=${oh_target_cpus}/" "$DATA_DIR/config"
+            else
+                echo "VM_CPU=${oh_target_cpus}" >> "$DATA_DIR/config"
+            fi
+        fi
         if [ "$current_mem" -lt 5 ] 2>/dev/null; then
             log "OnionHeaven: VM_MEMORY is ${current_mem}GB, increasing to 5GB for OnionHeaven workload"
             if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
@@ -184,37 +200,51 @@ detect_onionheaven_mode() {
             else
                 echo "VM_MEMORY=5" >> "$DATA_DIR/config"
             fi
-            # Check if the running VM actually has less than 5GB — if so, restart it now
-            local vm_mem_kb
-            vm_mem_kb=$(docker compose exec -T tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
-            vm_mem_kb="${vm_mem_kb:-0}"
-            if [ "$vm_mem_kb" -lt 4500000 ] 2>/dev/null; then
-                log "OnionHeaven: VM has $(( vm_mem_kb / 1024 ))MB — restarting with 5GB..."
-                cd "$DOCKER_DIR"
-                docker compose $CF_COMPOSE --profile onionheaven down >> "$LOG_FILE" 2>&1
-                "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
-                "$BIN_DIR/colima" start \
-                    --mount "$DATA_DIR/shared:w" \
-                    --memory 5 \
-                    >> "$LOG_FILE" 2>&1
-                if [ $? -eq 0 ]; then
-                    log "OnionHeaven: VM restarted with 5GB"
-                    # Bring containers back up (start_containers will re-call detect_onionheaven_mode,
-                    # but this time the VM will have enough memory so no loop)
-                    docker compose up -d --pull always wordpress db >> "$LOG_FILE" 2>&1
-                    # Wait for WordPress to be ready
-                    local mem_wp_wait=0
-                    while [ $mem_wp_wait -lt 60 ]; do
-                        if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT:-8080}" >/dev/null 2>&1; then
-                            break
-                        fi
-                        sleep 2
-                        mem_wp_wait=$((mem_wp_wait + 2))
-                    done
-                    docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1
-                else
-                    log "OnionHeaven: ERROR — VM restart failed, continuing with $(( vm_mem_kb / 1024 ))MB"
-                fi
+        fi
+
+        # Check if the running VM needs a restart for memory or CPU changes
+        local _oh_need_restart=false
+        local vm_mem_kb
+        vm_mem_kb=$(docker compose exec -T tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
+        vm_mem_kb="${vm_mem_kb:-0}"
+        if [ "$vm_mem_kb" -gt 0 ] 2>/dev/null && [ "$vm_mem_kb" -lt 4500000 ] 2>/dev/null; then
+            log "OnionHeaven: VM memory too low ($(( vm_mem_kb / 1024 ))MB)"
+            _oh_need_restart=true
+        fi
+        local vm_cpus
+        vm_cpus=$(docker compose exec -T tor nproc 2>/dev/null | tr -d ' \n\r')
+        vm_cpus="${vm_cpus:-0}"
+        if [ "$vm_cpus" -gt 0 ] 2>/dev/null && [ "$vm_cpus" -lt "$oh_target_cpus" ] 2>/dev/null; then
+            log "OnionHeaven: VM CPUs too low (${vm_cpus}, need ${oh_target_cpus})"
+            _oh_need_restart=true
+        fi
+        if [ "$_oh_need_restart" = true ]; then
+            log "OnionHeaven: restarting VM with ${oh_target_cpus} CPUs, 5GB RAM..."
+            cd "$DOCKER_DIR"
+            docker compose $CF_COMPOSE --profile onionheaven down >> "$LOG_FILE" 2>&1
+            "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
+            "$BIN_DIR/colima" start \
+                --mount "$DATA_DIR/shared:w" \
+                --cpu "$oh_target_cpus" \
+                --memory 5 \
+                >> "$LOG_FILE" 2>&1
+            if [ $? -eq 0 ]; then
+                log "OnionHeaven: VM restarted with ${oh_target_cpus} CPUs, 5GB"
+                # Bring containers back up (start_containers will re-call detect_onionheaven_mode,
+                # but this time the VM will have correct resources so no loop)
+                docker compose up -d --pull always wordpress db >> "$LOG_FILE" 2>&1
+                # Wait for WordPress to be ready
+                local oh_wp_wait=0
+                while [ $oh_wp_wait -lt 60 ]; do
+                    if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT:-8080}" >/dev/null 2>&1; then
+                        break
+                    fi
+                    sleep 2
+                    oh_wp_wait=$((oh_wp_wait + 2))
+                done
+                docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1
+            else
+                log "OnionHeaven: ERROR — VM restart failed"
             fi
         fi
         # Build OnionHeaven-aware tor image (layers new files on top of pre-built image)
@@ -495,17 +525,37 @@ detect_container_runtime() {
                 _vm_mem_kb=$(docker exec onionpress-tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
                 _vm_mem_kb="${_vm_mem_kb:-0}"
                 _vm_mem_gb=$(( (_vm_mem_kb + 524288) / 1048576 ))  # round to nearest GB
+                # Read configured CPU count
+                _cfg_cpu=2
+                if [ -f "$DATA_DIR/config" ]; then
+                    _tmp_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" | cut -d= -f2)
+                    [ -n "$_tmp_cpu" ] && _cfg_cpu="$_tmp_cpu"
+                fi
+                # Get actual VM CPU count
+                _vm_cpus=$(docker exec onionpress-tor nproc 2>/dev/null | tr -d ' \n\r')
+                _vm_cpus="${_vm_cpus:-0}"
+
+                _need_restart=false
                 if [ "$_cfg_mem" -gt 0 ] 2>/dev/null && [ "$_vm_mem_gb" -gt 0 ] 2>/dev/null && [ "$_cfg_mem" -ne "$_vm_mem_gb" ]; then
-                    log "VM memory mismatch: config=${_cfg_mem}GB, running=${_vm_mem_gb}GB — restarting VM..."
+                    log "VM memory mismatch: config=${_cfg_mem}GB, running=${_vm_mem_gb}GB"
+                    _need_restart=true
+                fi
+                if [ "$_cfg_cpu" -gt 0 ] 2>/dev/null && [ "$_vm_cpus" -gt 0 ] 2>/dev/null && [ "$_cfg_cpu" -ne "$_vm_cpus" ]; then
+                    log "VM CPU mismatch: config=${_cfg_cpu}, running=${_vm_cpus}"
+                    _need_restart=true
+                fi
+                if [ "$_need_restart" = true ]; then
+                    log "Restarting VM with ${_cfg_cpu} CPUs, ${_cfg_mem}GB RAM..."
                     cd "$DOCKER_DIR"
                     docker compose down >> "$LOG_FILE" 2>&1 || true
                     "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
                     "$BIN_DIR/colima" start \
                         --mount "$DATA_DIR/shared:w" \
+                        --cpu "$_cfg_cpu" \
                         --memory "$_cfg_mem" \
                         >> "$LOG_FILE" 2>&1
                     if [ $? -eq 0 ]; then
-                        log "VM restarted with ${_cfg_mem}GB"
+                        log "VM restarted with ${_cfg_cpu} CPUs, ${_cfg_mem}GB"
                     else
                         log "WARNING: VM restart failed"
                     fi
@@ -516,15 +566,19 @@ detect_container_runtime() {
                 # Start Colima if stopped
                 log "Starting bundled Colima..."
 
-                # Read VM memory from config so restarts honour changes
+                # Read VM memory/CPU from config so restarts honour changes
                 _restart_mem=1
+                _restart_cpu=2
                 if [ -f "$DATA_DIR/config" ]; then
                     _cfg_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
                     [ -n "$_cfg_mem" ] && _restart_mem="$_cfg_mem"
+                    _cfg_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" | cut -d= -f2)
+                    [ -n "$_cfg_cpu" ] && _restart_cpu="$_cfg_cpu"
                 fi
 
                 "$BIN_DIR/colima" start \
                     --mount "$DATA_DIR/shared:w" \
+                    --cpu "$_restart_cpu" \
                     --memory "$_restart_mem" \
                     >> "$LOG_FILE" 2>&1
                 if [ $? -eq 0 ]; then
@@ -1085,18 +1139,33 @@ install_docker() {
 
     # Read VM memory from config (default: 1 GB)
     VM_MEMORY=1
+    VM_CPU=2
     if [ -f "$DATA_DIR/config" ]; then
         config_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
         if [ ! -z "$config_mem" ]; then
             VM_MEMORY="$config_mem"
         fi
+        config_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" | cut -d= -f2)
+        if [ ! -z "$config_cpu" ]; then
+            VM_CPU="$config_cpu"
+        fi
     fi
 
-    # Pre-check: if onionheaven key is imported, ensure at least 5GB (preserve higher values)
+    # Pre-check: if onionheaven key is imported, ensure at least 5GB + 3/4 host CPUs (preserve higher values)
     local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-    if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
-        log "OnionHeaven key detected — starting VM with 5GB (was ${VM_MEMORY}GB)"
-        VM_MEMORY=5
+    if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ]; then
+        if [ "$VM_MEMORY" -lt 5 ]; then
+            log "OnionHeaven key detected — starting VM with 5GB (was ${VM_MEMORY}GB)"
+            VM_MEMORY=5
+        fi
+        local host_cores
+        host_cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+        local oh_cpus=$(( host_cores * 3 / 4 ))
+        [ "$oh_cpus" -lt 2 ] && oh_cpus=2
+        if [ "$VM_CPU" -lt "$oh_cpus" ]; then
+            log "OnionHeaven key detected — starting VM with ${oh_cpus} CPUs (was ${VM_CPU}, host has ${host_cores})"
+            VM_CPU="$oh_cpus"
+        fi
     fi
 
     # Should not happen if launcher worked, but handle it
@@ -1106,7 +1175,7 @@ install_docker() {
             --vm-type vz \
             --mount-type virtiofs \
             --mount "$DATA_DIR/shared:w" \
-            --cpu 2 \
+            --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
             --arch "$VM_ARCH" \
             --vz-rosetta=false \
@@ -1117,7 +1186,7 @@ install_docker() {
             --vm-type qemu \
             --mount-type sshfs \
             --mount "$DATA_DIR/shared:w" \
-            --cpu 2 \
+            --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
             --arch "$VM_ARCH" \
             >> "$LOG_FILE" 2>&1
@@ -1756,30 +1825,35 @@ main() {
             echo $$ > "$PIDFILE"
             trap 'rm -f "$PIDFILE"' EXIT INT TERM HUP
 
-            # Pre-check: if onionheaven key is imported, ensure VM has at least 5GB (preserve higher values)
+            # Pre-check: if onionheaven key is imported, ensure VM has at least 5GB + 3/4 CPUs
             local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
             if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ]; then
+                mkdir -p "$DATA_DIR"
+                local _oh_cores
+                _oh_cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+                _oh_cores=$(( _oh_cores * 3 / 4 ))
+                [ "$_oh_cores" -lt 2 ] && _oh_cores=2
+
+                local _cfg_changed=false
                 local current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
                 if [ -z "$current_mem" ] || [ "$current_mem" -lt 5 ] 2>/dev/null; then
                     log "OnionHeaven key detected — setting VM_MEMORY to 5GB (was ${current_mem:-unset})"
-                    mkdir -p "$DATA_DIR"
                     if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
                         sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
                     else
                         echo "VM_MEMORY=5" >> "$DATA_DIR/config"
                     fi
-                    # If Colima is already running, restart it with 5GB
-                    if "$BIN_DIR/colima" status >/dev/null 2>&1; then
-                        log "OnionHeaven key detected — restarting VM with 5GB"
-                        cd "$DOCKER_DIR"
-                        docker compose $CF_COMPOSE --profile onionheaven down >> "$LOG_FILE" 2>&1 || true
-                        "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1 || true
-                        "$BIN_DIR/colima" start \
-                            --mount "$DATA_DIR/shared:w" \
-                            --memory 5 \
-                            >> "$LOG_FILE" 2>&1
-                        log "OnionHeaven: VM restarted with 5GB"
+                    _cfg_changed=true
+                fi
+                local current_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+                if [ -z "$current_cpu" ] || [ "$current_cpu" -lt "$_oh_cores" ] 2>/dev/null; then
+                    log "OnionHeaven key detected — setting VM_CPU to ${_oh_cores} (was ${current_cpu:-unset})"
+                    if grep -q "^VM_CPU=" "$DATA_DIR/config" 2>/dev/null; then
+                        sed -i.bak "s/^VM_CPU=.*/VM_CPU=${_oh_cores}/" "$DATA_DIR/config"
+                    else
+                        echo "VM_CPU=${_oh_cores}" >> "$DATA_DIR/config"
                     fi
+                    _cfg_changed=true
                 fi
             fi
 

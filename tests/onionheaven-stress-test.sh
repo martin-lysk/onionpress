@@ -214,6 +214,8 @@ preflight() {
         # Reduces FAIL_THRESHOLD (10→3) and HEALTHY_INTERVAL (15→5) so takeovers
         # happen in ~15s instead of ~150s. The modified poller reads these from env.
         log "  Injecting fast-poll onionheaven-poller.py..."
+        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven_common.py" \
+            onionheaven:/onionheaven_common.py
         docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-poller.py" \
             onionheaven:/onionheaven-poller.py
         # Kill ALL running pollers — there may be stale ones from previous runs.
@@ -573,7 +575,7 @@ get_container_mem_mb() {
 
 get_last_poll_duration() {
     if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-        docker_cmd logs --tail 100 onionheaven 2>/dev/null | grep 'poll pass complete' | tail -1 | sed 's/.*in //;s/s$//' | tr -d ' \n\r' || echo "-"
+        docker_cmd exec onionheaven sh -c 'grep "poll pass complete" /var/lib/onionpress/onionheaven/poller.log 2>/dev/null | tail -1 | sed "s/.*in //;s/s$//"' | tr -d ' \n\r' || echo "-"
     else
         echo "-"
     fi
@@ -607,10 +609,7 @@ print_dashboard() {
 
     log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
     echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | VM mem: ${mem_pct}%"
-    echo "           Farm: ${poll_ctrs:-0} poll + ${takeover_ctrs:-0} takeover + ${stress_ctrs:-0} stress containers"
-    if [ "$poll_dur" != "-" ]; then
-        echo "           Last poll pass: ${poll_dur}s"
-    fi
+    echo "           Farm: ${poll_ctrs:-0} poll + ${takeover_ctrs:-0} takeover + ${stress_ctrs:-0} stress containers | Last poll: ${poll_dur:-?}s"
 
     log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\",\"poll_containers\":${poll_ctrs:-0},\"takeover_containers\":${takeover_ctrs:-0},\"stress_containers\":${stress_ctrs:-0}"
 }
@@ -1047,60 +1046,59 @@ notify_offline() {
 
     log "Sending /offline notifications for workers ${start}..$(( start + count - 1 ))..."
 
-    local notified=0
-    for i in $(seq "$start" $((start + count - 1))); do
-        local ctr_idx=$((i / PER_CTR))
-        local local_idx=$((i % PER_CTR))
-        local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
+    # Build all offline payloads in one python3 call, then send them in a single
+    # docker exec to avoid 300+ subprocess calls (each ~1s under qemu).
+    local payloads
+    payloads=$(python3 -c "
+import json, glob, sys
+payloads = []
+for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
+    try:
+        workers = json.load(open(f))
+        for w in workers:
+            idx = w.get('global_index', -1)
+            if idx >= ${start} and idx < $((start + count)):
+                ca = w.get('content_address', '')
+                ha = w.get('healthcheck_address', '')
+                if ca and ha:
+                    payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha}))
+    except: pass
+for p in payloads:
+    print(p)
+" 2>/dev/null)
 
-        # Extract content_address and healthcheck_address from local worker info
-        local content_addr hc_addr
-        content_addr=$(python3 -c "
-import json, sys
-try:
-    with open('${info_file}') as f:
-        workers = json.load(f)
-    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
-    if w and w.get('content_address'):
-        print(w['content_address'])
-    else:
-        sys.exit(1)
-except:
-    sys.exit(1)
-" 2>/dev/null) || continue
-        hc_addr=$(python3 -c "
-import json, sys
-try:
-    with open('${info_file}') as f:
-        workers = json.load(f)
-    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
-    if w and w.get('healthcheck_address'):
-        print(w['healthcheck_address'])
-    else:
-        sys.exit(1)
-except:
-    sys.exit(1)
-" 2>/dev/null) || continue
+    if [ -z "$payloads" ]; then
+        log "WARNING: No payloads generated for /offline"
+        return
+    fi
 
-        # POST /offline to OnionHeaven — locally or over Tor
-        if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-            docker_cmd exec onionheaven \
+    local notified
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        # Send all /offline calls from inside the container in one shot
+        notified=$(echo "$payloads" | docker_cmd exec -i onionheaven sh -c '
+            n=0
+            while IFS= read -r payload; do
                 curl -s -X POST http://localhost:8083/offline \
-                -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
-        else
-            docker_cmd exec onionpress-tor-client \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" >/dev/null 2>&1 && n=$((n+1))
+            done
+            echo $n
+        ')
+    else
+        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
+            n=0
+            while IFS= read -r payload; do
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                -X POST "http://${ONIONHEAVEN_ADDR}:8083/offline" \
-                -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
-        fi
+                    -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" >/dev/null 2>&1 && n=$((n+1))
+            done
+            echo $n
+        ')
+    fi
 
-        notified=$((notified + 1))
-    done
-
-    log "Sent /offline for ${notified} workers"
-    log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified}"
+    log "Sent /offline for ${notified:-0} workers"
+    log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
 
 # POST /online to OnionHeaven for a range of workers (instant reset to healthy).
@@ -1111,60 +1109,56 @@ notify_online() {
 
     log "Sending /online notifications for workers ${start}..$(( start + count - 1 ))..."
 
-    local notified=0
-    for i in $(seq "$start" $((start + count - 1))); do
-        local ctr_idx=$((i / PER_CTR))
-        local local_idx=$((i % PER_CTR))
-        local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
+    local payloads
+    payloads=$(python3 -c "
+import json, glob, sys
+payloads = []
+for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
+    try:
+        workers = json.load(open(f))
+        for w in workers:
+            idx = w.get('global_index', -1)
+            if idx >= ${start} and idx < $((start + count)):
+                ca = w.get('content_address', '')
+                ha = w.get('healthcheck_address', '')
+                if ca and ha:
+                    payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha}))
+    except: pass
+for p in payloads:
+    print(p)
+" 2>/dev/null)
 
-        # Extract content_address and healthcheck_address from local worker info
-        local content_addr hc_addr
-        content_addr=$(python3 -c "
-import json, sys
-try:
-    with open('${info_file}') as f:
-        workers = json.load(f)
-    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
-    if w and w.get('content_address'):
-        print(w['content_address'])
-    else:
-        sys.exit(1)
-except:
-    sys.exit(1)
-" 2>/dev/null) || continue
-        hc_addr=$(python3 -c "
-import json, sys
-try:
-    with open('${info_file}') as f:
-        workers = json.load(f)
-    w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
-    if w and w.get('healthcheck_address'):
-        print(w['healthcheck_address'])
-    else:
-        sys.exit(1)
-except:
-    sys.exit(1)
-" 2>/dev/null) || continue
+    if [ -z "$payloads" ]; then
+        log "WARNING: No payloads generated for /online"
+        return
+    fi
 
-        # POST /online to OnionHeaven — locally or over Tor
-        if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-            docker_cmd exec onionheaven \
+    local notified
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        notified=$(echo "$payloads" | docker_cmd exec -i onionheaven sh -c '
+            n=0
+            while IFS= read -r payload; do
                 curl -s -X POST http://localhost:8083/online \
-                -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
-        else
-            docker_cmd exec onionpress-tor-client \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" >/dev/null 2>&1 && n=$((n+1))
+            done
+            echo $n
+        ')
+    else
+        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
+            n=0
+            while IFS= read -r payload; do
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                -X POST "http://${ONIONHEAVEN_ADDR}:8083/online" \
-                -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${content_addr}\", \"healthcheck_address\": \"${hc_addr}\"}" >/dev/null 2>&1 || true
-        fi
+                    -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" >/dev/null 2>&1 && n=$((n+1))
+            done
+            echo $n
+        ')
+    fi
 
-        notified=$((notified + 1))
-    done
-
-    log "Sent /online for ${notified} workers"
-    log_json "\"event\":\"online_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified}"
+    log "Sent /online for ${notified:-0} workers"
+    log_json "\"event\":\"online_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
 
 # Get content addresses that have active takeovers (one per line).
@@ -1364,9 +1358,71 @@ except: pass
 
 # ── Worker mode (full test) ──────────────────────────────────────────────────
 
+check_previous_artifacts() {
+    # Check for leftover stress test artifacts from a previous run
+    local stale_containers
+    stale_containers=$(docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' || true)
+    local stale_count=0
+    [ -n "$stale_containers" ] && stale_count=$(echo "$stale_containers" | wc -l | tr -d ' ')
+
+    local registry_count=0
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        registry_count=$(docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
+            "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL" 2>/dev/null || echo 0)
+    fi
+
+    if [ "$stale_count" -gt 0 ] || [ "$registry_count" -gt 0 ]; then
+        echo ""
+        echo "Found artifacts from a previous stress test:"
+        [ "$stale_count" -gt 0 ] && echo "  - ${stale_count} stress-worker container(s)"
+        [ "$registry_count" -gt 0 ] && echo "  - ${registry_count} registry entries"
+        echo ""
+        read -r -p "Clean up before starting? [Y/n] " answer
+        case "$answer" in
+            [nN]*)
+                log "Keeping previous artifacts"
+                ;;
+            *)
+                log "Cleaning previous artifacts..."
+                # Remove stress containers
+                if [ "$stale_count" -gt 0 ]; then
+                    echo "$stale_containers" | while read -r ctr; do
+                        docker_cmd rm -f "$ctr" 2>/dev/null || true
+                    done
+                    log "  Removed ${stale_count} stress-worker containers"
+                fi
+                # Clear registry
+                if [ "$registry_count" -gt 0 ] && [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+                    docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
+                        "DELETE FROM registry;" 2>/dev/null || true
+                    log "  Cleared ${registry_count} registry entries"
+                fi
+                # Remove extra poll containers (beyond the initial 0 and 1)
+                docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep '^onionheaven-poll-' | while read -r ctr; do
+                    local idx="${ctr#onionheaven-poll-}"
+                    if [ "$idx" -ge 2 ] 2>/dev/null; then
+                        docker_cmd rm -f "$ctr" 2>/dev/null || true
+                        log "  Removed scaled poll container: $ctr"
+                    fi
+                done || true
+                # Clean farm DB tables (keep only initial containers)
+                if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+                    docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
+                        "DELETE FROM poll_containers; DELETE FROM takeover_containers; DELETE FROM farm_scale_requests;" 2>/dev/null || true
+                fi
+                echo ""
+                ;;
+        esac
+    fi
+}
+
 run_worker() {
     preflight
     detect_onionheaven_addr
+
+    # Check for leftover artifacts before starting
+    check_previous_artifacts
+
     mkdir -p "$OUTPUT_DIR"
 
     log "=== OnionHeaven Stress Test (Arti) ==="

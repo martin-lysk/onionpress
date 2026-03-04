@@ -689,6 +689,7 @@ class OnionPressApp(rumps.App):
         self._wp_not_installed_count = 0  # Consecutive "not installed" results
         self._setup_page_opened = False  # Track if we've opened the setup page
         self._port_conflict = False  # True if ports are in use by another instance
+        self._ports_checked = False  # True after port conflict check completes
         self._has_internet = True          # Host-level internet connectivity
         self._last_bootstrap_pct = 0       # Last observed Tor bootstrap percentage
         self._bootstrap_stall_count = 0    # Consecutive checks with no bootstrap progress
@@ -1202,8 +1203,6 @@ class OnionPressApp(rumps.App):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True, encoding='utf-8', errors='replace',
-                encoding='utf-8',
-                errors='replace',
                 env={
                     "DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"
                 }
@@ -1355,6 +1354,8 @@ class OnionPressApp(rumps.App):
                 self.menu["Starting..."].title = "Status: Port conflict"
                 return
 
+        self._ports_checked = True
+
         # Check if UPDATE_ON_LAUNCH is enabled
         config_file = os.path.join(self.app_support, "config")
         update_on_launch = False
@@ -1423,8 +1424,6 @@ class OnionPressApp(rumps.App):
                 [self.launcher_script, command],
                 capture_output=True,
                 text=True, encoding='utf-8', errors='replace',
-                encoding='utf-8',
-                errors='replace',
                 timeout=60
             )
             return result.stdout.strip()
@@ -1442,8 +1441,6 @@ class OnionPressApp(rumps.App):
                 ["curl", "-s", "--max-time", "3", "-H", "User-Agent: OnionPress-HealthCheck", f"http://localhost:{self.wp_port}"],
                 capture_output=True,
                 text=True, encoding='utf-8', errors='replace',
-                encoding='utf-8',
-                errors='replace',
                 timeout=5
             )
             if result.returncode == 0:
@@ -1493,8 +1490,6 @@ class OnionPressApp(rumps.App):
                  "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
                 capture_output=True,
                 text=True, encoding='utf-8', errors='replace',
-                encoding='utf-8',
-                errors='replace',
                 timeout=5,
                 env=docker_env
             )
@@ -1518,8 +1513,6 @@ class OnionPressApp(rumps.App):
                 [docker_bin, "logs", "onionpress-tor"],
                 capture_output=True,
                 text=True, encoding='utf-8', errors='replace',
-                encoding='utf-8',
-                errors='replace',
                 timeout=10,
                 env=docker_env
             )
@@ -1548,8 +1541,6 @@ class OnionPressApp(rumps.App):
                  "http://wordpress:80/"],
                 capture_output=True,
                 text=True, encoding='utf-8', errors='replace',
-                encoding='utf-8',
-                errors='replace',
                 timeout=10,
                 env=docker_env
             )
@@ -1854,8 +1845,8 @@ class OnionPressApp(rumps.App):
                 if self.caffeinate_process is None or self.caffeinate_process.poll() is not None:
                     self.start_caffeinate()
 
-                # Start onion proxy if not already running
-                if self.proxy_server is None:
+                # Start onion proxy if not already running (wait for port check first)
+                if self.proxy_server is None and self._ports_checked:
                     self.start_onion_proxy()
                 elif self.proxy_server:
                     # Update onion address and readiness on existing proxy
@@ -3029,8 +3020,6 @@ class OnionPressApp(rumps.App):
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
                     text=True, encoding='utf-8', errors='replace',
-                    encoding='utf-8',
-                    errors='replace',
                     timeout=5
                 )
                 images = result.stdout.strip().split('\n')
@@ -3267,6 +3256,13 @@ class OnionPressApp(rumps.App):
             "or experience out-of-memory issues.\n\n"
             "Requires restart to take effect."
         ),
+        "VM_CPU": (
+            "Virtual Machine CPUs\n\n"
+            "Number of CPU cores allocated to the Linux VM.\n"
+            "2 is sufficient for normal use. OnionHeaven mode automatically "
+            "sets this to 3/4 of your Mac's cores.\n\n"
+            "Requires restart to take effect."
+        ),
         "PREVENT_SLEEP": (
             "Sleep Prevention Mode\n\n"
             "Controls whether OnionPress keeps your Mac awake.\n\n"
@@ -3324,6 +3320,10 @@ class OnionPressApp(rumps.App):
             "The VM will be resized on next restart. "
             "Brief downtime expected while the VM restarts."
         ),
+        "VM_CPU": (
+            "The VM will be resized on next restart. "
+            "Brief downtime expected while the VM restarts."
+        ),
         "PREVENT_SLEEP": {
             "normal": "Mac will sleep normally. Site goes offline when sleeping.",
             "on-battery": "Mac stays awake on AC power. Sleeps normally on battery.",
@@ -3377,6 +3377,7 @@ class OnionPressApp(rumps.App):
         settings_keys = [
             ("ADDRESS_PREFIX", "op2"),
             ("VM_MEMORY", "1"),
+            ("VM_CPU", "2"),
             ("PREVENT_SLEEP", "normal"),
             ("LAUNCH_ON_LOGIN", "yes"),
             ("UPDATE_ON_LAUNCH", "yes"),
@@ -3406,7 +3407,7 @@ class OnionPressApp(rumps.App):
         input_w = 100
         help_x = 280
         help_w = 25
-        container_h = 8 * row_h + 10
+        container_h = 9 * row_h + 10
 
         def _alert(title, message):
             """Show an alert with the OnionPress icon."""
@@ -3422,7 +3423,7 @@ class OnionPressApp(rumps.App):
         # Create help button target (shared across dialog rebuilds)
         help_target = _HelpButtonTarget.alloc().init()
         help_keys = [
-            "ADDRESS_PREFIX", "VM_MEMORY", "PREVENT_SLEEP",
+            "ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU", "PREVENT_SLEEP",
             "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH", "INSTALL_IA_PLUGIN",
             "REGISTER_WITH_ONIONHEAVEN", "CLOUDFLARE_TUNNEL_TOKEN",
         ]
@@ -3516,6 +3517,8 @@ class OnionPressApp(rumps.App):
             y -= row_h
             add_text_row(y, "VM Memory (GB):", "VM_MEMORY", form_values["VM_MEMORY"])
             y -= row_h
+            add_text_row(y, "VM CPUs:", "VM_CPU", form_values["VM_CPU"])
+            y -= row_h
             # Normalize legacy yes/no for the popup display
             sleep_val = form_values["PREVENT_SLEEP"].lower()
             if sleep_val == "yes":
@@ -3597,6 +3600,18 @@ class OnionPressApp(rumps.App):
                 form_values["VM_MEMORY"] = old_values["VM_MEMORY"]
                 continue
 
+            # -- Validate VM CPUs --
+            try:
+                cpus = int(new_values["VM_CPU"])
+                if cpus < 1:
+                    raise ValueError
+            except ValueError:
+                _alert("Invalid VM CPUs",
+                       "VM CPUs must be a whole number of at least 1.")
+                form_values = new_values
+                form_values["VM_CPU"] = old_values["VM_CPU"]
+                continue
+
             # Validation passed
             break
 
@@ -3620,6 +3635,7 @@ class OnionPressApp(rumps.App):
             labels = {
                 "ADDRESS_PREFIX": "Address Prefix",
                 "VM_MEMORY": "VM Memory (GB)",
+                "VM_CPU": "VM CPUs",
                 "PREVENT_SLEEP": "Sleep Prevention",
                 "LAUNCH_ON_LOGIN": "Launch on Login",
                 "UPDATE_ON_LAUNCH": "Update Docker on Launch",
@@ -3960,8 +3976,6 @@ class OnionPressApp(rumps.App):
                 [docker_bin, "compose", "-f", docker_compose_file, "pull"],
                 capture_output=True,
                 text=True, encoding='utf-8', errors='replace',
-                encoding='utf-8',
-                errors='replace',
                 timeout=300,  # 5 minute timeout
                 env=env
             )
@@ -3994,7 +4008,6 @@ class OnionPressApp(rumps.App):
                  "-H", "User-Agent: onionpress", "--max-time", "10", url],
                 capture_output=True,
                 text=True, encoding='utf-8', errors='replace',
-                encoding='utf-8',
                 timeout=15
             )
 
@@ -4131,8 +4144,6 @@ class OnionPressApp(rumps.App):
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
                     text=True, encoding='utf-8', errors='replace',
-                    encoding='utf-8',
-                    errors='replace',
                     timeout=5
                 )
                 current_images = result.stdout.strip().split('\n')
@@ -4382,6 +4393,12 @@ License: AGPL v3"""
             # Small delay to ensure UI updates
             time.sleep(0.5)
 
+            # Stop onion proxy first (release port 9077 immediately)
+            self.stop_onion_proxy()
+
+            # Stop caffeinate to allow Mac to sleep
+            self.stop_caffeinate()
+
             # Notify OnionHeaven before stopping services (containers needed for curl)
             if self._onionheaven_registration_started:
                 try:
@@ -4389,21 +4406,15 @@ License: AGPL v3"""
                 except Exception:
                     pass
 
-            # Now run cleanup
+            # Now run cleanup — 90s timeout for OnionHeaven farm containers
             try:
                 self.log("Stopping services...")
-                subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
+                subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=90)
                 self.log("Services stopped")
             except subprocess.TimeoutExpired:
                 self.log("Warning: Stop command timed out")
             except Exception as e:
                 self.log(f"Warning: Stop failed: {e}")
-
-            # Stop caffeinate to allow Mac to sleep
-            self.stop_caffeinate()
-
-            # Stop onion proxy
-            self.stop_onion_proxy()
 
             try:
                 colima_bin = os.path.join(self.bin_dir, "colima")
