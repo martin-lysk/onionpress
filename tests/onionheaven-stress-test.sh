@@ -360,8 +360,9 @@ STARTEOF
     chmod +x "$startup"
     docker_cmd cp "$startup" "${ctr_name}:/start.sh"
 
-    # Launch the startup script (single docker exec -d per container)
-    docker_cmd exec -d "$ctr_name" sh /start.sh
+    # Launch the startup script — use foreground exec backgrounded from bash
+    # (docker exec -d is unreliable under qemu: processes die silently as zombies)
+    docker_cmd exec "$ctr_name" sh /start.sh </dev/null >/dev/null 2>&1 &
 }
 
 # Start all worker containers, optionally in batches.
@@ -892,7 +893,7 @@ enable_workers() {
 
         # Re-register with OnionHeaven over Tor (like a real OnionPress restart).
         # This triggers immediate release of the taken-over address.
-        docker_cmd exec -d "$ctr_name" \
+        docker_cmd exec "$ctr_name" \
             python3 -c "
 import json, subprocess, sys, time
 with open('/worker-info.json') as f:
