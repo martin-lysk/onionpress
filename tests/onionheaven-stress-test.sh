@@ -235,8 +235,12 @@ preflight() {
             ONIONHEAVEN_LONG_FAIL_INTERVAL=30 \
             ONIONHEAVEN_FAIL_THRESHOLD=2 \
             ONIONHEAVEN_FAST_POLL_COUNT=5 \
+            ONIONHEAVEN_MAX_POLL_WORKERS=50 \
+            ONIONHEAVEN_POLL_INTERVAL=5 \
+            ONIONHEAVEN_CURL_TIMEOUT=5 \
+            ONIONHEAVEN_RETRY_DELAY=2 \
             python3 /onionheaven-poller.py
-        log "  Fast-poll poller started (threshold=2, interval=5s, fast_polls=5)"
+        log "  Fast-poll poller started (threshold=2, interval=5s, 50 workers)"
     else
         log "  Skipping file injections (not OnionHeaven host)"
         log "  Using production poller timing and existing container scripts"
@@ -288,6 +292,10 @@ state_dir = "/var/lib/arti/state"
 
 [storage.keystore]
 enabled = true
+
+[logging.files]
+path = "/tmp/arti.log"
+filter = "info,tor_hsservice=debug,tor_circmgr=debug,arti=debug"
 TOML_HEAD
 
     for i in $(seq 0 $((workers_in_ctr - 1))); do
@@ -520,6 +528,14 @@ get_healthy_count() {
     _onionheaven_field "online"
 }
 
+get_polled_healthy_count() {
+    _onionheaven_field "polled_healthy"
+}
+
+get_polled_unhealthy_count() {
+    _onionheaven_field "polled_unhealthy"
+}
+
 get_stress_fail_count() {
     # No direct "failing" field — derive from total minus online minus taken_over
     local total online taken_over
@@ -594,13 +610,15 @@ get_system_mem_pct() {
 }
 
 print_dashboard() {
-    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct poll_dur poll_ctrs takeover_ctrs stress_ctrs
+    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct poll_dur poll_ctrs takeover_ctrs stress_ctrs polled_ok polled_bad
     reg_count=$(get_registry_count)
     tor_mem=$(get_container_mem_mb onionpress-tor)
     wp_mem=$(get_container_mem_mb onionpress-wordpress)
     fail_count=$(get_stress_fail_count)
     takeover_count=$(get_takeover_count)
     healthy_count=$(get_healthy_count)
+    polled_ok=$(get_polled_healthy_count)
+    polled_bad=$(get_polled_unhealthy_count)
     mem_pct=$(get_system_mem_pct)
     poll_dur=$(get_last_poll_duration)
     poll_ctrs=$(get_poll_container_count)
@@ -608,10 +626,10 @@ print_dashboard() {
     stress_ctrs=$(docker_cmd ps --filter "name=stress-worker-" --format "{{.Names}}" 2>/dev/null | wc -l | tr -d ' ')
 
     log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
-    echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | VM mem: ${mem_pct}%"
+    echo "           Online: ${healthy_count} | Taken over: ${takeover_count} | Polled: ${polled_ok:-0} ok / ${polled_bad:-0} bad | VM mem: ${mem_pct}%"
     echo "           Farm: ${poll_ctrs:-0} poll + ${takeover_ctrs:-0} takeover + ${stress_ctrs:-0} stress containers | Last poll: ${poll_dur:-?}s"
 
-    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\",\"poll_containers\":${poll_ctrs:-0},\"takeover_containers\":${takeover_ctrs:-0},\"stress_containers\":${stress_ctrs:-0}"
+    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"polled_healthy\":${polled_ok:-0},\"polled_unhealthy\":${polled_bad:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\",\"poll_containers\":${poll_ctrs:-0},\"takeover_containers\":${takeover_ctrs:-0},\"stress_containers\":${stress_ctrs:-0}"
 }
 
 # ── Helper: get worker addresses from local info files ──────────────────────
@@ -882,8 +900,8 @@ with open('/worker-info.json') as f:
 w = next((x for x in workers if x.get('local_index') == ${local_idx}), None)
 if not w or not w.get('content_address'):
     sys.exit(0)
-# Stagger to avoid overwhelming Tor circuit builder (2s per worker)
-time.sleep(${local_idx} * 2)
+# Stagger to avoid overwhelming Tor circuit builder (1s per worker)
+time.sleep(${local_idx} * 1)
 # Re-read PEM from keystore
 import base64
 nick = 'w${ctr_idx}_${local_idx}_content'
@@ -950,7 +968,7 @@ print(f'Re-registered {w[\"content_address\"]}')
     done
 
     # Don't wait for re-registrations — they stagger themselves inside the container
-    log "Re-enabled ${count} workers, Arti restarting + re-registrations over Tor (2s apart)"
+    log "Re-enabled ${count} workers, Arti restarting + re-registrations over Tor (1s apart)"
 }
 
 wait_for_takeover() {

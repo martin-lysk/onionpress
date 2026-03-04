@@ -193,12 +193,12 @@ detect_onionheaven_mode() {
                 echo "VM_CPU=${oh_target_cpus}" >> "$DATA_DIR/config"
             fi
         fi
-        if [ "$current_mem" -lt 5 ] 2>/dev/null; then
-            log "OnionHeaven: VM_MEMORY is ${current_mem}GB, increasing to 5GB for OnionHeaven workload"
+        if [ "$current_mem" -lt 8 ] 2>/dev/null; then
+            log "OnionHeaven: VM_MEMORY is ${current_mem}GB, increasing to 8GB for OnionHeaven workload"
             if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
-                sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
+                sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=8/" "$DATA_DIR/config"
             else
-                echo "VM_MEMORY=5" >> "$DATA_DIR/config"
+                echo "VM_MEMORY=8" >> "$DATA_DIR/config"
             fi
         fi
 
@@ -207,7 +207,7 @@ detect_onionheaven_mode() {
         local vm_mem_kb
         vm_mem_kb=$(docker compose exec -T tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
         vm_mem_kb="${vm_mem_kb:-0}"
-        if [ "$vm_mem_kb" -gt 0 ] 2>/dev/null && [ "$vm_mem_kb" -lt 4500000 ] 2>/dev/null; then
+        if [ "$vm_mem_kb" -gt 0 ] 2>/dev/null && [ "$vm_mem_kb" -lt 7500000 ] 2>/dev/null; then
             log "OnionHeaven: VM memory too low ($(( vm_mem_kb / 1024 ))MB)"
             _oh_need_restart=true
         fi
@@ -219,17 +219,17 @@ detect_onionheaven_mode() {
             _oh_need_restart=true
         fi
         if [ "$_oh_need_restart" = true ]; then
-            log "OnionHeaven: restarting VM with ${oh_target_cpus} CPUs, 5GB RAM..."
+            log "OnionHeaven: restarting VM with ${oh_target_cpus} CPUs, 8GB RAM..."
             cd "$DOCKER_DIR"
             docker compose $CF_COMPOSE --profile onionheaven down >> "$LOG_FILE" 2>&1
             "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
             "$BIN_DIR/colima" start \
                 --mount "$DATA_DIR/shared:w" \
                 --cpu "$oh_target_cpus" \
-                --memory 5 \
+                --memory 8 \
                 >> "$LOG_FILE" 2>&1
             if [ $? -eq 0 ]; then
-                log "OnionHeaven: VM restarted with ${oh_target_cpus} CPUs, 5GB"
+                log "OnionHeaven: VM restarted with ${oh_target_cpus} CPUs, 8GB"
                 # Bring containers back up (start_containers will re-call detect_onionheaven_mode,
                 # but this time the VM will have correct resources so no loop)
                 docker compose up -d --pull always wordpress db >> "$LOG_FILE" 2>&1
@@ -1154,9 +1154,9 @@ install_docker() {
     # Pre-check: if onionheaven key is imported, ensure at least 5GB + 3/4 host CPUs (preserve higher values)
     local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
     if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ]; then
-        if [ "$VM_MEMORY" -lt 5 ]; then
-            log "OnionHeaven key detected — starting VM with 5GB (was ${VM_MEMORY}GB)"
-            VM_MEMORY=5
+        if [ "$VM_MEMORY" -lt 8 ]; then
+            log "OnionHeaven key detected — starting VM with 8GB (was ${VM_MEMORY}GB)"
+            VM_MEMORY=8
         fi
         local host_cores
         host_cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -1836,12 +1836,12 @@ main() {
 
                 local _cfg_changed=false
                 local current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-                if [ -z "$current_mem" ] || [ "$current_mem" -lt 5 ] 2>/dev/null; then
-                    log "OnionHeaven key detected — setting VM_MEMORY to 5GB (was ${current_mem:-unset})"
+                if [ -z "$current_mem" ] || [ "$current_mem" -lt 8 ] 2>/dev/null; then
+                    log "OnionHeaven key detected — setting VM_MEMORY to 8GB (was ${current_mem:-unset})"
                     if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
-                        sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
+                        sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=8/" "$DATA_DIR/config"
                     else
-                        echo "VM_MEMORY=5" >> "$DATA_DIR/config"
+                        echo "VM_MEMORY=8" >> "$DATA_DIR/config"
                     fi
                     _cfg_changed=true
                 fi

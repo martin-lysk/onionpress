@@ -200,6 +200,14 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             unregistered = conn.execute(
                 "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NOT NULL"
             ).fetchone()[0]
+            # Polled = has been healthchecked at least once by the poller
+            polled_healthy = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE status='online' AND last_polled IS NOT NULL"
+            ).fetchone()[0]
+            polled_unhealthy = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE status='online' AND last_polled IS NOT NULL "
+                "AND (last_healthy IS NULL OR last_healthy < last_polled)"
+            ).fetchone()[0]
             # Farm container counts
             try:
                 poll_containers = conn.execute(
@@ -217,6 +225,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "online": online,
                 "taken_over": taken_over,
                 "unregistered": unregistered,
+                "polled_healthy": polled_healthy,
+                "polled_unhealthy": polled_unhealthy,
                 "poll_containers": poll_containers,
                 "takeover_containers": takeover_containers,
             })

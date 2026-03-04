@@ -58,9 +58,9 @@ def check_healthcheck(healthcheck_address, socks_addr=None):
         result = subprocess.run(
             ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
              "--socks5-hostname", proxy,
-             "--max-time", "15",
+             "--max-time", os.environ.get("ONIONHEAVEN_CURL_TIMEOUT", "8"),
              f"http://{healthcheck_address}/"],
-            capture_output=True, text=True, timeout=25
+            capture_output=True, text=True, timeout=15
         )
         # Verify we got a real HTTP response, not just a connection.
         # 302 is excluded — could be OnionHeaven's own redirect service.
@@ -78,7 +78,7 @@ def ping(healthcheck_address, socks_addr=None):
     ok = check_healthcheck(healthcheck_address, socks_addr)
     if ok:
         return True
-    time.sleep(5)
+    time.sleep(int(os.environ.get("ONIONHEAVEN_RETRY_DELAY", "3")))
     ok2 = check_healthcheck(healthcheck_address, socks_addr)
     if ok2:
         log(f"{healthcheck_address} succeeded on 2nd try")

@@ -325,8 +325,9 @@ def get_poll_socks_addrs(conn):
     Always includes the default SOCKS_ADDR as a fallback.
     Returns list of "host:port" strings.
     """
-    # Auto-discover running poll containers not yet in DB
+    # Auto-discover running containers not yet in DB
     _discover_poll_containers(conn)
+    _discover_takeover_containers(conn)
 
     default = os.environ.get("ONIONHEAVEN_SOCKS_ADDR", "onionpress-tor-client:9050")
     addrs = [default]
