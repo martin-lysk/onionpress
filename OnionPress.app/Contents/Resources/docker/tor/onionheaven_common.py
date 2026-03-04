@@ -10,6 +10,7 @@ instead of executing locally. This distributes Arti guard pool usage across
 multiple containers to prevent circuit exhaustion under load.
 """
 
+import itertools
 import os
 import sqlite3
 import subprocess
@@ -210,17 +211,42 @@ def is_farm_mode(conn):
         return False
 
 
-def assign_takeover_container(conn):
-    """Pick the least-loaded active takeover container.
+def get_takeover_containers(conn):
+    """Get list of active takeover container names (sorted for consistency)."""
+    try:
+        rows = conn.execute(
+            "SELECT container_name FROM takeover_containers "
+            "WHERE status = 'active' ORDER BY container_name"
+        ).fetchall()
+        return [row["container_name"] for row in rows]
+    except sqlite3.OperationalError:
+        return []
 
-    Returns container_name or None if no active containers.
+
+# Round-robin state for takeover assignment within a poll pass
+_takeover_rr_cycle = None
+_takeover_rr_containers = None
+
+
+def assign_takeover_container(conn):
+    """Round-robin assignment across active takeover containers.
+
+    Avoids the stale-DB problem where least-loaded queries return the same
+    container for an entire batch because active_services hasn't been updated
+    by the worker yet.
     """
-    row = conn.execute(
-        "SELECT container_name FROM takeover_containers "
-        "WHERE status = 'active' "
-        "ORDER BY active_services ASC LIMIT 1"
-    ).fetchone()
-    return row["container_name"] if row else None
+    global _takeover_rr_cycle, _takeover_rr_containers
+
+    containers = get_takeover_containers(conn)
+    if not containers:
+        return None
+
+    # Reset cycle if container list changed (scale-up, container died, etc.)
+    if containers != _takeover_rr_containers:
+        _takeover_rr_containers = containers
+        _takeover_rr_cycle = itertools.cycle(containers)
+
+    return next(_takeover_rr_cycle)
 
 
 def get_poll_socks_addrs(conn):

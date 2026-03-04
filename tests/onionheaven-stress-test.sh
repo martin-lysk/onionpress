@@ -592,7 +592,7 @@ get_system_mem_pct() {
 }
 
 print_dashboard() {
-    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct poll_dur poll_ctrs takeover_ctrs
+    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct poll_dur poll_ctrs takeover_ctrs stress_ctrs
     reg_count=$(get_registry_count)
     tor_mem=$(get_container_mem_mb onionpress-tor)
     wp_mem=$(get_container_mem_mb onionpress-wordpress)
@@ -603,15 +603,16 @@ print_dashboard() {
     poll_dur=$(get_last_poll_duration)
     poll_ctrs=$(get_poll_container_count)
     takeover_ctrs=$(get_takeover_container_count)
+    stress_ctrs=$(docker_cmd ps --filter "name=stress-worker-" --format "{{.Names}}" 2>/dev/null | wc -l | tr -d ' ')
 
     log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
     echo "           Healthy: ${healthy_count} | Failing: ${fail_count} | Taken over: ${takeover_count} | VM mem: ${mem_pct}%"
-    echo "           Farm: ${poll_ctrs:-0} poll + ${takeover_ctrs:-0} takeover containers"
+    echo "           Farm: ${poll_ctrs:-0} poll + ${takeover_ctrs:-0} takeover + ${stress_ctrs:-0} stress containers"
     if [ "$poll_dur" != "-" ]; then
         echo "           Last poll pass: ${poll_dur}s"
     fi
 
-    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\",\"poll_containers\":${poll_ctrs:-0},\"takeover_containers\":${takeover_ctrs:-0}"
+    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\",\"poll_containers\":${poll_ctrs:-0},\"takeover_containers\":${takeover_ctrs:-0},\"stress_containers\":${stress_ctrs:-0}"
 }
 
 # ── Helper: get worker addresses from local info files ──────────────────────
