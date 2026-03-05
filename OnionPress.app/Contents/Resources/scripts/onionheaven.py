@@ -51,7 +51,7 @@ def _run_docker(app, args, timeout=15):
     try:
         result = subprocess.run(
             [_docker_bin(app)] + args,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
             env=_docker_env(app)
         )
         return result.returncode == 0, result.stdout.strip()
@@ -78,7 +78,7 @@ def _run_docker_rc(app, args, timeout=15):
     try:
         result = subprocess.run(
             [_docker_bin(app)] + args,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
             env=_docker_env(app)
         )
         return result.returncode, result.stdout.strip()
