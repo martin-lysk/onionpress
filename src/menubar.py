@@ -2235,7 +2235,7 @@ class OnionPressApp(rumps.App):
         self.log("="*60)
 
         # Notify OnionHeaven before stopping services
-        if self._onionheaven_registration_started:
+        if self._onionheaven_registration_started and not self.is_onionheaven:
             try:
                 onionheaven.notify_onionheaven_offline(self)
             except Exception:
@@ -3094,7 +3094,7 @@ class OnionPressApp(rumps.App):
 
         def stop():
             # Notify OnionHeaven before stopping services
-            if self._onionheaven_registration_started:
+            if self._onionheaven_registration_started and not self.is_onionheaven:
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
@@ -4400,7 +4400,7 @@ License: AGPL v3"""
             self.stop_caffeinate()
 
             # Notify OnionHeaven before stopping services (containers needed for curl)
-            if self._onionheaven_registration_started:
+            if self._onionheaven_registration_started and not self.is_onionheaven:
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:

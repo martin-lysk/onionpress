@@ -27,7 +27,7 @@ import sys
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from onionheaven_common import (
     db_connect, db_ensure_schema, log,
@@ -39,6 +39,13 @@ from onionheaven_common import (
 # SOCKS proxy — use tor-client's Arti so healthchecks don't compete
 # with taken-over onion services for circuits in onionheaven's Arti
 SOCKS_ADDR = os.environ.get("ONIONHEAVEN_SOCKS_ADDR", "onionpress-tor-client:9050")
+
+def wall_sleep(seconds):
+    """Sleep using wall-clock busy-wait — time.sleep() is unreliable under qemu."""
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    while datetime.now(timezone.utc) < deadline:
+        time.sleep(10)
+
 
 # Polling interval (seconds) — override via env for testing
 POLL_INTERVAL = int(os.environ.get("ONIONHEAVEN_POLL_INTERVAL", "15"))
@@ -78,7 +85,7 @@ def ping(healthcheck_address, socks_addr=None):
     ok = check_healthcheck(healthcheck_address, socks_addr)
     if ok:
         return True
-    time.sleep(int(os.environ.get("ONIONHEAVEN_RETRY_DELAY", "3")))
+    wall_sleep(int(os.environ.get("ONIONHEAVEN_RETRY_DELAY", "3")))
     ok2 = check_healthcheck(healthcheck_address, socks_addr)
     if ok2:
         log(f"{healthcheck_address} succeeded on 2nd try")
@@ -212,10 +219,10 @@ def main():
             if not rows:
                 log("poll pass complete — 0 entries in 0.0s")
                 conn.close()
-                time.sleep(POLL_INTERVAL)
+                wall_sleep(POLL_INTERVAL)
                 continue
 
-            pass_start = time.monotonic()
+            pass_start = datetime.now(timezone.utc)
             entries = [dict(row) for row in rows]
 
             # Build SOCKS proxy round-robin from farm poll containers + default
@@ -334,13 +341,13 @@ def main():
             # Check if farm needs to scale up
             check_farm_scaling(conn, len(entries))
 
-            elapsed = time.monotonic() - pass_start
+            elapsed = (datetime.now(timezone.utc) - pass_start).total_seconds()
             log(f"poll pass complete — {len(entries)} entries in {elapsed:.1f}s")
 
             conn.close()
             # Sleep at least as long as the pass took (50% duty cycle max)
-            sleep_time = max(POLL_INTERVAL, elapsed)
-            time.sleep(sleep_time)
+            # Use wall-clock busy-wait — time.sleep() is unreliable under qemu
+            wall_sleep(max(POLL_INTERVAL, elapsed))
 
         except Exception as e:
             log(f"poller error: {e}")
@@ -348,7 +355,7 @@ def main():
                 conn.close()
             except Exception:
                 pass
-            time.sleep(60)
+            wall_sleep(60)
 
 
 if __name__ == "__main__":

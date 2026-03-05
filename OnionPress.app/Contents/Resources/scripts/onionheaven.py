@@ -194,7 +194,7 @@ def register_with_onionheaven(app):
             try:
                 resp = json.loads(output)
                 if resp.get("registered"):
-                    app.log("OnionHeaven: registration successful")
+                    app.log(f"OnionHeaven: registration successful: {resp}")
                     _save_registration_status(app, {
                         "registered": True,
                         "last_attempt": datetime.now(timezone.utc).isoformat(),
@@ -264,10 +264,14 @@ def unregister_from_onionheaven(app, content_address=None):
         app.log(f"OnionHeaven: failed to extract key for unregister proof: {e}")
         return
 
-    payload = json.dumps({
+    hc_addr = getattr(app, 'healthcheck_address', None)
+    payload_dict = {
         "content_address": addr,
         "proof": proof,
-    })
+    }
+    if hc_addr and hc_addr.endswith('.onion'):
+        payload_dict["healthcheck_address"] = hc_addr
+    payload = json.dumps(payload_dict)
 
     # Retry with backoff — uninstall/address-change are one-shot, reliability > speed
     backoff = [5, 15, 30]
@@ -361,10 +365,12 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     last_output = ""
 
     for attempt in range(max_attempts):
+        # Use tor-client — it has independent circuits and likely a warm
+        # connection to OnionHeaven from healthcheck polling
         ok, output = _run_docker(app, [
             "exec", "onionpress-wordpress",
             "curl", "-s", "-X", "POST",
-            "--socks5-hostname", "onionpress-tor:9050",
+            "--socks5-hostname", "onionpress-tor-client:9050",
             "-H", "Content-Type: application/json",
             "-d", payload,
             "--max-time", str(max_time),
