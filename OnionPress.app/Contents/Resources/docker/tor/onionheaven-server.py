@@ -487,21 +487,38 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Mark rows as unregistered (soft delete — do NOT delete rows or keys)
-        if healthcheck_address:
-            conn.execute(
-                "UPDATE registry SET status = 'taken-over', unregistered_at = ?, "
-                "unregistered_reason = 'user_request' "
-                "WHERE content_address = ? AND healthcheck_address = ?",
-                (now, content_address, healthcheck_address)
-            )
+        # Stress test entries (version='stress-test') get hard-deleted to avoid
+        # accumulating junk rows across repeated test runs.
+        is_stress = entry["version"] == "stress-test"
+
+        if is_stress:
+            if healthcheck_address:
+                conn.execute(
+                    "DELETE FROM registry "
+                    "WHERE content_address = ? AND healthcheck_address = ?",
+                    (content_address, healthcheck_address)
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM registry WHERE content_address = ?",
+                    (content_address,)
+                )
         else:
-            conn.execute(
-                "UPDATE registry SET status = 'taken-over', unregistered_at = ?, "
-                "unregistered_reason = 'user_request' "
-                "WHERE content_address = ?",
-                (now, content_address)
-            )
+            # Soft delete — preserve rows and keys for real registrations
+            if healthcheck_address:
+                conn.execute(
+                    "UPDATE registry SET status = 'taken-over', unregistered_at = ?, "
+                    "unregistered_reason = 'user_request' "
+                    "WHERE content_address = ? AND healthcheck_address = ?",
+                    (now, content_address, healthcheck_address)
+                )
+            else:
+                conn.execute(
+                    "UPDATE registry SET status = 'taken-over', unregistered_at = ?, "
+                    "unregistered_reason = 'user_request' "
+                    "WHERE content_address = ?",
+                    (now, content_address)
+                )
         conn.commit()
 
         # Check if no healthy rows remain for this content-address — trigger takeover
@@ -525,6 +542,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         self._send_json(200, {
             "unregistered": True,
             "content_address": content_address,
+            "hard_deleted": is_stress,
         })
 
     # -- POST /online -------------------------------------------------------
