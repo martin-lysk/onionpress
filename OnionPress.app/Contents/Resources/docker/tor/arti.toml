@@ -4,6 +4,9 @@ console = "info,arti_client=debug,tor_hsservice=debug,tor_guardmgr=debug,tor_cir
 [proxy]
 socks_listen = "0.0.0.0:9050"
 
+[address_filter]
+allow_onion_addrs = true
+
 [path_rules]
 # Restrict to IPv4 only — Colima/Docker has no IPv6 routes,
 # so IPv6 relay connections fail with "Network unreachable"
