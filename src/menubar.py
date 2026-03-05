@@ -2336,8 +2336,8 @@ class OnionPressApp(rumps.App):
             env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
             result = subprocess.run(
                 [docker_bin, "logs", "onionpress-tor", "--tail", "50"],
-                capture_output=True, env=env, timeout=10)
-            logs = (result.stderr + result.stdout).decode("utf-8", errors="replace")
+                capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, timeout=10)
+            logs = (result.stderr or "") + (result.stdout or "")
             # Signs of trouble that a restart can fix
             sick_patterns = [
                 "No usable guards",
