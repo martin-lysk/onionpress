@@ -4172,14 +4172,14 @@ Run your own website from your Mac. Just Works. Free, forever.
 WordPress + Tor Onion Service
 
 Features:
-• Tor Onion Service with custom address prefixes (op2*)
+• Tor Onion Service with an address you own, forever
 • Requires visitors to use Tor or Brave browsers
-• Internet Archive Wayback Machine integration
-• Bundled container runtime (no Docker needed)
+• Full WordPress that you own and run
+• Internet Archive's Wayback Machine integration
 • Privacy-first design
 • Free and open source
 
-Created by Brewster Kahle
+Created by the Internet Archive
 License: AGPL v3"""
 
         github_url = "https://github.com/brewsterkahle/onionpress"

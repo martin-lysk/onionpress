@@ -382,7 +382,7 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
             try:
                 resp = json.loads(output)
                 if resp.get("online" if endpoint == "online" else "offline"):
-                    app.log(f"OnionHeaven: /{endpoint} notification sent")
+                    app.log(f"OnionHeaven: /{endpoint} notification sent successfully")
                     return True
                 error_msg = resp.get("error", "unknown error")
                 app.log(f"OnionHeaven: /{endpoint} rejected: {error_msg}")
