@@ -695,6 +695,8 @@ class OnionPressApp(rumps.App):
         self._bootstrap_stall_count = 0    # Consecutive checks with no bootstrap progress
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
+        self._tor_internally_ready = False # Checks 1-4 passed (Arti+WordPress up)
+        self._onionheaven_reclaim_sent = False  # Whether we've sent /online to reclaim after takeover
         self._tor_auto_restarted = False   # Whether we've auto-restarted tor this startup
         self._wordpress_confirmed = False  # WordPress responded at least once (stays up reliably)
         self.healthcheck_address = None    # Healthcheck .onion address
@@ -1470,6 +1472,7 @@ class OnionPressApp(rumps.App):
 
     def check_tor_reachability(self, log_result=True):
         """Check if the .onion service is properly configured and published"""
+        self._tor_internally_ready = False
         if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
             return False
 
@@ -1548,6 +1551,9 @@ class OnionPressApp(rumps.App):
                 if log_result:
                     self.log(f"✗ WordPress not reachable from Tor container")
                 return False
+
+            # Checks 1-4 passed — mark internally ready
+            self._tor_internally_ready = True
 
             # Check 5: Verify onion service is actually reachable through Tor network
             # Uses the independent tor-client container (not onionpress-tor which hosts
@@ -1770,6 +1776,7 @@ class OnionPressApp(rumps.App):
                     if ready_now and not previous_ready:
                         self.is_ready = True
                         self._was_ready = True
+                        self._onionheaven_reclaim_sent = False
                         self._bootstrap_stall_count = 0
                         self._yellow_since = None
                         elapsed = int(time.time() - self.startup_time)
@@ -1891,6 +1898,19 @@ class OnionPressApp(rumps.App):
                         # Already registered, coming back online (wake/reconnect)
                         onionheaven.start_online_notification_thread(self)
 
+                # OnionHeaven: reclaim address after takeover.
+                # If internally ready (checks 1-4) but self-check fails (check 5),
+                # OnionHeaven may have taken over our address (serving 302 redirect).
+                # Send /online as soon as Tor network is up — don't wait for
+                # the self-check, which can't pass until the takeover is released.
+                if (self._tor_internally_ready and not self.is_ready
+                        and self._was_ready
+                        and self._onionheaven_registration_started
+                        and not self._onionheaven_reclaim_sent):
+                    self._onionheaven_reclaim_sent = True
+                    self.log("Internally ready but self-check failing — sending /online to reclaim address")
+                    onionheaven.start_online_notification_thread(self)
+
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
                     wp_installed = self.check_wp_installed()
@@ -1946,6 +1966,8 @@ class OnionPressApp(rumps.App):
                 self._onionheaven_alert_shown = False
                 self._onionheaven_checked = False
                 self._onionheaven_registration_started = False
+                self._onionheaven_reclaim_sent = False
+                self._tor_internally_ready = False
 
                 # Stop web log capture if running
                 if self.web_log_process is not None:

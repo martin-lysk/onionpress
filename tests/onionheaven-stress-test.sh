@@ -293,8 +293,8 @@ state_dir = "/var/lib/arti/state"
 [storage.keystore]
 enabled = true
 
-[logging.files]
-path = "/tmp/arti.log"
+[[logging.files]]
+path = "/var/lib/arti/arti.log"
 filter = "info,tor_hsservice=debug,tor_circmgr=debug,arti=debug"
 TOML_HEAD
 
@@ -1572,6 +1572,7 @@ run_worker() {
 # ── Coordinator mode ──────────────────────────────────────────────────────────
 run_coordinator() {
     preflight
+    detect_onionheaven_addr
     mkdir -p "$OUTPUT_DIR"
 
     log "=== OnionHeaven Stress Test (coordinator — read-only monitor) ==="
