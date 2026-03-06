@@ -771,6 +771,7 @@ parallel_check_addrs() {
     PCHECK_TOTAL=0
     PCHECK_302=0
     PCHECK_200=0
+    PCHECK_000=0
 
     local tmpdir
     tmpdir=$(mktemp -d)
@@ -815,6 +816,7 @@ parallel_check_addrs() {
         case "$code" in
             200) PCHECK_200=$((PCHECK_200 + 1)) ;;
             302) PCHECK_302=$((PCHECK_302 + 1)) ;;
+            000) PCHECK_000=$((PCHECK_000 + 1)) ;;
         esac
         for ac in $accept_codes; do
             if [ "$code" = "$ac" ]; then
@@ -1185,7 +1187,7 @@ wait_for_takeover() {
         now=$(date +%s)
         if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
-            log "  (taken over: ${taken_over}/${total_checked} — looking for 302 redirects)"
+            log "  (taken over: ${taken_over}/${total_checked} — 302:${PCHECK_302} 200:${PCHECK_200} 000:${PCHECK_000})"
             last_dashboard=$now
         fi
 
@@ -1305,30 +1307,18 @@ for p in payloads:
         return
     fi
 
+    # Always send over Tor (simulates real OnionPress behavior)
     local notified
-    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-        # Send all /offline calls from inside the container in one shot
-        notified=$(echo "$payloads" | docker_cmd exec -i onionheaven sh -c '
-            n=0
-            while IFS= read -r payload; do
-                curl -s -X POST http://localhost:8083/offline \
-                    -H "Content-Type: application/json" \
-                    -d "$payload" >/dev/null 2>&1 && n=$((n+1))
-            done
-            echo $n
-        ')
-    else
-        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
-            n=0
-            while IFS= read -r payload; do
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                    -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
-                    -H "Content-Type: application/json" \
-                    -d "$payload" >/dev/null 2>&1 && n=$((n+1))
-            done
-            echo $n
-        ')
-    fi
+    notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
+        n=0
+        while IFS= read -r payload; do
+            curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
+                -H "Content-Type: application/json" \
+                -d "$payload" >/dev/null 2>&1 && n=$((n+1))
+        done
+        echo $n
+    ')
 
     log "Sent /offline for ${notified:-0} workers"
     log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
@@ -1366,29 +1356,18 @@ for p in payloads:
         return
     fi
 
+    # Always send over Tor (simulates real OnionPress behavior)
     local notified
-    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-        notified=$(echo "$payloads" | docker_cmd exec -i onionheaven sh -c '
-            n=0
-            while IFS= read -r payload; do
-                curl -s -X POST http://localhost:8083/online \
-                    -H "Content-Type: application/json" \
-                    -d "$payload" >/dev/null 2>&1 && n=$((n+1))
-            done
-            echo $n
-        ')
-    else
-        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
-            n=0
-            while IFS= read -r payload; do
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                    -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
-                    -H "Content-Type: application/json" \
-                    -d "$payload" >/dev/null 2>&1 && n=$((n+1))
-            done
-            echo $n
-        ')
-    fi
+    notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
+        n=0
+        while IFS= read -r payload; do
+            curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
+                -H "Content-Type: application/json" \
+                -d "$payload" >/dev/null 2>&1 && n=$((n+1))
+        done
+        echo $n
+    ')
 
     log "Sent /online for ${notified:-0} workers"
     log_json "\"event\":\"online_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
@@ -1455,52 +1434,76 @@ verify_redirects() {
     local sampled_addrs
     sampled_addrs=$(echo "$addrs" | awk 'BEGIN{srand()}{print rand()"\t"$0}' | sort -n | cut -f2 | head -n "$sample_size")
 
+    # Verify all sampled addresses in parallel
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local pids=""
     local sampled=0
-    local passed=0
-    local failed=0
 
     while IFS= read -r addr; do
         addr=$(echo "$addr" | tr -d '\r\n ')
         [ -z "$addr" ] && continue
         sampled=$((sampled + 1))
 
-        # Verify redirect via onionpress-wordpress → onionpress-tor SOCKS.
-        # We CANNOT use onionheaven's own SOCKS proxy — Arti has a bug where
-        # self-connections (SOCKS → own onion service) return empty replies.
-        # Using a different Arti instance (onionpress-tor) works correctly.
-        local http_response="000"
-        local attempt
-        for attempt in 1 2 3; do
-            http_response=$(docker_cmd exec onionpress-wordpress \
-                curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
-                --http1.0 \
-                --socks5-hostname onionpress-tor:9050 \
-                --max-time 30 \
-                "http://${addr}" 2>/dev/null) || http_response="000"
-            local code
-            code=$(echo "$http_response" | awk '{print $1}')
-            [ "$code" != "000" ] && break
-            [ "$attempt" -lt 3 ] && { log "  Retry ${attempt}/3 for ${addr} (descriptor not yet available)..."; sleep 15; }
-        done
+        (
+            # Verify redirect via onionpress-wordpress → onionpress-tor SOCKS.
+            # We CANNOT use onionheaven's own SOCKS proxy — Arti has a bug where
+            # self-connections (SOCKS → own onion service) return empty replies.
+            local http_response="000"
+            local attempt
+            for attempt in 1 2 3; do
+                http_response=$(docker_cmd exec onionpress-wordpress \
+                    curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
+                    --http1.0 \
+                    --socks5-hostname onionpress-tor:9050 \
+                    --max-time 30 \
+                    "http://${addr}" 2>/dev/null) || http_response="000"
+                local code
+                code=$(echo "$http_response" | awk '{print $1}')
+                [ "$code" != "000" ] && break
+                [ "$attempt" -lt 3 ] && sleep 15
+            done
 
-        local http_code redirect_url
-        http_code=$(echo "$http_response" | awk '{print $1}')
-        redirect_url=$(echo "$http_response" | awk '{print $2}')
+            local http_code redirect_url
+            http_code=$(echo "$http_response" | awk '{print $1}')
+            redirect_url=$(echo "$http_response" | awk '{print $2}')
 
-        if [ "$http_code" = "302" ]; then
-            # Check that redirect points to Wayback Machine
-            if echo "$redirect_url" | grep -qi 'web.archive.org\|archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion'; then
-                log "  PASS: ${addr} → 302 → ${redirect_url}"
-                passed=$((passed + 1))
+            if [ "$http_code" = "302" ]; then
+                if echo "$redirect_url" | grep -qi 'web.archive.org\|archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion'; then
+                    echo "PASS ${addr} ${redirect_url}" > "${tmpdir}/${addr}"
+                else
+                    echo "FAIL ${addr} 302-wrong-dest ${redirect_url}" > "${tmpdir}/${addr}"
+                fi
             else
-                log "  FAIL: ${addr} → 302 but redirect to unexpected: ${redirect_url}"
-                failed=$((failed + 1))
+                echo "FAIL ${addr} HTTP-${http_code}" > "${tmpdir}/${addr}"
             fi
+        ) &
+        pids="$pids $!"
+    done <<< "$sampled_addrs"
+
+    # Wait for all verification jobs
+    for pid in $pids; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    # Collect results
+    local passed=0
+    local failed=0
+    for result_file in "${tmpdir}"/*; do
+        [ -f "$result_file" ] || continue
+        local result
+        result=$(cat "$result_file")
+        local status
+        status=$(echo "$result" | awk '{print $1}')
+        if [ "$status" = "PASS" ]; then
+            log "  PASS: $(echo "$result" | awk '{print $2}') → 302 → $(echo "$result" | awk '{print $3}')"
+            passed=$((passed + 1))
         else
-            log "  FAIL: ${addr} → HTTP ${http_code} (expected 302)"
+            log "  FAIL: $(echo "$result" | awk '{print $2}') → $(echo "$result" | awk '{print $3}')"
             failed=$((failed + 1))
         fi
-    done <<< "$sampled_addrs"
+    done
+    rm -rf "$tmpdir"
 
     local verify_elapsed=$(( $(date +%s) - verify_start_ts ))
     WAIT_RESULT="${passed}/${sampled} passed, ${failed} failed in $(fmt_duration $verify_elapsed)"
@@ -1558,27 +1561,12 @@ except: pass
             addr=$(echo "$addr" | tr -d '\r\n ')
             [ -z "$addr" ] && continue
 
-            # POST /unregister — locally or over Tor
-            local resp
-            if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-                resp=$(docker_cmd exec onionheaven \
-                    curl -s -X POST http://localhost:8083/unregister \
-                    -H "Content-Type: application/json" \
-                    -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
-            else
-                resp=$(docker_cmd exec onionpress-tor-client \
-                    curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                    -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
-            fi
-
-            # If takeover was active and we're on OnionHeaven host, release Arti config
-            if [ "$IS_ONIONHEAVEN_HOST" = true ] && echo "$resp" | grep -q '"takeover_was_active":true'; then
-                docker_cmd exec onionpress-tor \
-                    /onionheaven-tor-manager.sh release "$addr" 2>/dev/null || true
-                released_arti=$((released_arti + 1))
-            fi
+            # POST /unregister — always over Tor
+            docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null || true
 
             count=$((count + 1))
         done
@@ -2033,24 +2021,12 @@ except: pass
         [ -z "$addr" ] && continue
 
         (
-            local resp
-            if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-                resp=$(docker_cmd exec onionheaven \
-                    curl -s -X POST http://localhost:8083/unregister \
-                    -H "Content-Type: application/json" \
-                    -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
-                # If takeover was active, release Arti config
-                if echo "$resp" | grep -q '"takeover_was_active":true'; then
-                    docker_cmd exec onionpress-tor \
-                        /onionheaven-tor-manager.sh release "$addr" 2>/dev/null || true
-                fi
-            else
-                resp=$(docker_cmd exec onionpress-tor-client \
-                    curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                    -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
-            fi
+            # Always unregister over Tor
+            docker_cmd exec onionpress-tor-client \
+                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
+                -H "Content-Type: application/json" \
+                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null || true
             echo "done" > "${tmpdir}/${addr}"
         ) &
         pids="$pids $!"
