@@ -972,6 +972,61 @@ print(f'Re-registered {w[\"content_address\"]}')
     log "Re-enabled ${count} workers, Arti restarting + re-registrations over Tor (1s apart)"
 }
 
+# Re-enable workers WITHOUT re-registering or sending /online.
+# Tests pure poller-based recovery: OnionHeaven must discover the service
+# is healthy again by polling the healthcheck address.
+enable_workers_silent() {
+    local start="$1"
+    local count="$2"
+
+    log "Re-enabling responders for workers ${start}..$(( start + count - 1 )) (no /online, no /register)..."
+
+    local affected_containers=""
+
+    for i in $(seq "$start" $((start + count - 1))); do
+        local ctr_idx=$((i / PER_CTR))
+        local local_idx=$((i % PER_CTR))
+        local ctr_name="stress-worker-${ctr_idx}"
+        local cp=$((BASE_PORT + local_idx * 2))
+        local hp=$((BASE_PORT + local_idx * 2 + 1))
+
+        # Re-enable Arti onion services
+        local content_nick="w${ctr_idx}_${local_idx}_content"
+        local hc_nick="w${ctr_idx}_${local_idx}_hc"
+        docker_cmd exec "$ctr_name" \
+            sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
+            /etc/arti/arti.toml 2>/dev/null || true
+        docker_cmd exec "$ctr_name" \
+            sed -i "/^\[onion_services\.\"${hc_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
+            /etc/arti/arti.toml 2>/dev/null || true
+
+        if ! echo "$affected_containers" | grep -q "$ctr_name"; then
+            affected_containers="${affected_containers} ${ctr_name}"
+        fi
+
+        # Re-enable HTTP responders
+        docker_cmd exec "$ctr_name" \
+            curl -s -X POST http://127.0.0.1:9000/enable \
+            -H "Content-Type: application/json" \
+            -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
+    done
+
+    # Restart Arti in each affected container with all services re-enabled
+    for ctr_name in $affected_containers; do
+        docker_cmd exec "$ctr_name" sh -c '
+            for d in /proc/[0-9]*; do
+                if [ "$(cat $d/comm 2>/dev/null)" = "arti" ]; then
+                    kill $(basename $d) 2>/dev/null
+                fi
+            done
+            sleep 2
+            su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+        ' 2>/dev/null || true
+    done
+
+    log "Re-enabled ${count} workers silently (Arti restarting, no notifications sent)"
+}
+
 wait_for_takeover() {
     local expected="$1"
     local timeout_secs="${2:-600}"
@@ -1522,27 +1577,52 @@ run_worker() {
         fi
         echo ""
 
-        # ── Crash simulation (existing behavior, renumbered) ──
+        # ── Silent crash + silent recovery (poller-only detection) ──
 
-        # Phase 7: Crash simulation — disable responders only (no /offline)
-        log "Phase 7: Crash simulation — disabling responders for ${FAILING} workers (no /offline)..."
+        # Phase 7: Silent crash — disable responders, no /offline sent.
+        # OnionHeaven must detect the failure purely by polling healthchecks.
+        log "Phase 7: Silent crash — disabling responders for ${FAILING} workers (no /offline)..."
         disable_workers "$fail_start" "$FAILING"
         echo ""
 
-        # Phase 8: Wait for OnionHeaven to detect failures and takeover
-        log "Phase 8: Waiting for takeovers from crash simulation..."
+        # Phase 8: Wait for poller to detect failures and takeover
+        log "Phase 8: Waiting for poller-detected takeovers (no /offline was sent)..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
         fi
         echo ""
 
-        # Phase 8b: Verify 302 redirects again (after crash takeover)
+        # Phase 8b: Verify 302 redirects
         verify_redirects "Phase 8b" 5
         echo ""
 
-        # Phase 9: Recovery — workers come back online and re-register over Tor
-        # (just like a real OnionPress instance restarting)
-        log "Phase 9: Workers coming back online — re-enabling + re-registering over Tor..."
+        # Phase 9: Silent recovery — re-enable responders, no /online or /register.
+        # OnionHeaven must detect recovery purely by polling healthchecks.
+        log "Phase 9: Silent recovery — re-enabling responders (no /online, no /register)..."
+        enable_workers_silent "$fail_start" "$FAILING"
+        echo ""
+
+        log "Phase 9b: Waiting for poller-detected recovery (no /online was sent)..."
+        if ! wait_for_recovery "$TOTAL" 900; then
+            log "WARNING: Not all workers recovered via poller detection"
+        fi
+        echo ""
+
+        # ── Crash + re-register recovery ──
+
+        # Phase 10: Crash again — same as Phase 7
+        log "Phase 10: Crash simulation — disabling responders for ${FAILING} workers (no /offline)..."
+        disable_workers "$fail_start" "$FAILING"
+        echo ""
+
+        log "Phase 10b: Waiting for takeovers..."
+        if ! wait_for_takeover "$FAILING" 600; then
+            log "WARNING: Not all expected takeovers happened"
+        fi
+        echo ""
+
+        # Phase 11: Recovery with re-register (like a real OnionPress restart)
+        log "Phase 11: Recovery with re-register — re-enabling + re-registering over Tor..."
         enable_workers "$fail_start" "$FAILING"
         echo ""
 
@@ -1555,8 +1635,8 @@ run_worker() {
         echo ""
     fi
 
-    # Phase 10: Final dashboard + cleanup
-    log "=== Phase 10: Final metrics ==="
+    # Phase 12: Final dashboard + cleanup
+    log "=== Phase 12: Final metrics ==="
     print_dashboard
     echo ""
 
