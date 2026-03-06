@@ -1614,7 +1614,11 @@ check_previous_artifacts() {
         [ "$stale_count" -gt 0 ] && echo "  - ${stale_count} stress-worker container(s)"
         [ "$registry_count" -gt 0 ] && echo "  - ${registry_count} registry entries"
         echo ""
-        read -r -p "Clean up before starting? [Y/n] " answer
+        if [ -t 0 ]; then
+            read -r -p "Clean up before starting? [Y/n] " answer
+        else
+            answer="y"  # auto-clean when not interactive
+        fi
         case "$answer" in
             [nN]*)
                 log "Keeping previous artifacts"
@@ -1661,8 +1665,14 @@ run_worker() {
     check_previous_artifacts
 
     mkdir -p "$OUTPUT_DIR"
+    # Archive previous phase log if it has content
+    if [ -s "${OUTPUT_DIR}/phase.log" ]; then
+        local ts
+        ts=$(date '+%Y%m%d-%H%M%S')
+        mv "${OUTPUT_DIR}/phase.log" "${OUTPUT_DIR}/phase-${ts}.log"
+    fi
     PHASE_LOG="${OUTPUT_DIR}/phase.log"
-    : > "$PHASE_LOG"  # truncate
+    : > "$PHASE_LOG"  # start fresh
     write_phase_header
     open_phase_log_window
 
