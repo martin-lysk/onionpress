@@ -15,6 +15,8 @@ Endpoints:
   GET  /status/<addr> — Per-content-address detail
 """
 
+ONIONHEAVEN_SERVER_VERSION = "2.4.22"
+
 import base64
 import hashlib
 import json
@@ -221,6 +223,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 takeover_containers = 0
             conn.close()
             self._send_json(200, {
+                "version": ONIONHEAVEN_SERVER_VERSION,
                 "total": total,
                 "online": online,
                 "taken_over": taken_over,
