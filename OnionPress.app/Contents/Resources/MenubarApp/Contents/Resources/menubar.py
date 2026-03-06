@@ -1903,9 +1903,9 @@ class OnionPressApp(rumps.App):
                 # OnionHeaven may have taken over our address (serving 302 redirect).
                 # Send /online as soon as Tor network is up — don't wait for
                 # the self-check, which can't pass until the takeover is released.
+                # This also handles fresh launches where a previous session's address
+                # was taken over while we were offline.
                 if (self._tor_internally_ready and not self.is_ready
-                        and self._was_ready
-                        and self._onionheaven_registration_started
                         and not self._onionheaven_reclaim_sent):
                     self._onionheaven_reclaim_sent = True
                     self.log("Internally ready but self-check failing — sending /online to reclaim address")
