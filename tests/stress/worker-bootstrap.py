@@ -176,7 +176,7 @@ def main():
         if not content_addr or not hc_addr:
             print(f"[worker {i}] ERROR: timed out waiting for addresses", flush=True)
             workers.append({
-                "index": CONTAINER_IDX * NUM_WORKERS + i,
+                "global_index": CONTAINER_IDX * NUM_WORKERS + i,
                 "local_index": i,
                 "container": CONTAINER_IDX,
                 "registered": False,
@@ -198,7 +198,7 @@ def main():
         if not os.path.exists(pem_path):
             print(f"[worker {i}] ERROR: PEM not found at {pem_path}", flush=True)
             workers.append({
-                "index": CONTAINER_IDX * NUM_WORKERS + i,
+                "global_index": CONTAINER_IDX * NUM_WORKERS + i,
                 "local_index": i,
                 "container": CONTAINER_IDX,
                 "content_address": content_addr,
@@ -213,7 +213,7 @@ def main():
         except Exception as e:
             print(f"[worker {i}] ERROR: failed to parse PEM: {e}", flush=True)
             workers.append({
-                "index": CONTAINER_IDX * NUM_WORKERS + i,
+                "global_index": CONTAINER_IDX * NUM_WORKERS + i,
                 "local_index": i,
                 "container": CONTAINER_IDX,
                 "content_address": content_addr,
@@ -248,7 +248,7 @@ def main():
             time.sleep(2)
 
         workers.append({
-            "index": CONTAINER_IDX * NUM_WORKERS + i,
+            "global_index": CONTAINER_IDX * NUM_WORKERS + i,
             "local_index": i,
             "container": CONTAINER_IDX,
             "content_address": content_addr,
