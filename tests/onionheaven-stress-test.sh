@@ -119,6 +119,72 @@ log_json() {
     echo "{\"ts\":\"$ts\",$1}" >> "$OUTPUT_DIR/metrics.jsonl"
 }
 
+# Phase log — written by run_worker, read by run_coordinator
+PHASE_LOG=""  # set after OUTPUT_DIR is known
+
+phase_start() {
+    local phase="$1"
+    local desc="$2"
+    [ -z "$PHASE_LOG" ] && return
+    echo "[$(date '+%H:%M:%S')] PHASE ${phase}: ${desc}" >> "$PHASE_LOG"
+}
+
+phase_result() {
+    local phase="$1"
+    local result="$2"
+    [ -z "$PHASE_LOG" ] && return
+    echo "[$(date '+%H:%M:%S')]   -> ${result}" >> "$PHASE_LOG"
+}
+
+# Format seconds as "Xm:XXs" (e.g., 135 -> "2m:15s", 45 -> "0m:45s")
+fmt_duration() {
+    local secs="$1"
+    printf "%dm:%02ds" $((secs / 60)) $((secs % 60))
+}
+
+# Get OnionHeaven server version from /status API
+get_onionheaven_version() {
+    local status
+    status=$(query_onionheaven_status)
+    if echo "$status" | grep -q '"version"'; then
+        echo "$status" | sed 's/.*"version"[[:space:]]*:[[:space:]]*"//' | sed 's/".*//' | tr -d '\n\r'
+    else
+        echo "pre-2.4.22"
+    fi
+}
+
+# Write phase.log header with test parameters and versions
+write_phase_header() {
+    local oh_version
+    oh_version=$(get_onionheaven_version)
+    cat >> "$PHASE_LOG" << EOF
+====================================================================
+  OnionHeaven Stress Test
+  $(date '+%Y-%m-%d %H:%M:%S')
+--------------------------------------------------------------------
+  Workers: ${TOTAL} total (${HEALTHY} healthy, ${FAILING} failing)
+  Containers: ${NUM_CONTAINERS} x ${PER_CTR}/container
+  OnionHeaven: ${ONIONHEAVEN_ADDR}
+  OnionHeaven server version: ${oh_version:-unknown}
+  Stress test version: ${STRESS_VERSION}
+====================================================================
+
+EOF
+}
+
+# Open a Terminal.app window tailing the phase log
+open_phase_log_window() {
+    [ -z "$PHASE_LOG" ] && return
+    local abs_path
+    abs_path=$(cd "$(dirname "$PHASE_LOG")" && pwd)/$(basename "$PHASE_LOG")
+    osascript -e "
+        tell application \"Terminal\"
+            activate
+            do script \"tail -f '${abs_path}'\"
+        end tell
+    " 2>/dev/null &
+}
+
 # ── Preflight checks ─────────────────────────────────────────────────────────
 preflight() {
     log "Preflight checks..."
@@ -400,17 +466,23 @@ start_all_workers() {
 }
 
 # Wait for all workers to bootstrap (register with OnionHeaven over Tor).
+WAIT_RESULT=""  # human-readable result from last wait_for_* call
+
 wait_for_bootstrap() {
     local timeout_secs="${1:-900}"
     log "Waiting for all workers to bootstrap and register (timeout: ${timeout_secs}s)..."
 
-    local deadline=$(($(date +%s) + timeout_secs))
+    local start_ts
+    start_ts=$(date +%s)
+    local deadline=$((start_ts + timeout_secs))
     local last_status=0
+    local registered_count=0
+    local prev_registered=0
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local all_ready=true
         local ready_count=0
-        local registered_count=0
+        registered_count=0
 
         for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
             local ctr_name="stress-worker-${idx}"
@@ -430,10 +502,12 @@ print(sum(1 for x in w if x.get('registered')))
             fi
         done
 
-        # Also check OnionHeaven registry for real-time registration count
-        local api_count
-        api_count=$(get_registry_count)
-        [ -n "$api_count" ] && [ "$api_count" -gt 0 ] 2>/dev/null && registered_count=$api_count
+        # Write progress dots to phase log (one dot per newly registered worker)
+        if [ -n "$PHASE_LOG" ] && [ "$registered_count" -gt "$prev_registered" ]; then
+            local new_dots=$((registered_count - prev_registered))
+            printf '%0.s.' $(seq 1 "$new_dots") >> "$PHASE_LOG"
+            prev_registered=$registered_count
+        fi
 
         local now
         now=$(date +%s)
@@ -443,6 +517,9 @@ print(sum(1 for x in w if x.get('registered')))
         fi
 
         if [ "$all_ready" = true ]; then
+            local elapsed=$(( $(date +%s) - start_ts ))
+            [ -n "$PHASE_LOG" ] && echo " ${registered_count}/${TOTAL}" >> "$PHASE_LOG"
+            WAIT_RESULT="${registered_count}/${TOTAL} registered in $(fmt_duration $elapsed)"
             log "All containers bootstrapped: ${registered_count} workers registered"
             return 0
         fi
@@ -450,6 +527,9 @@ print(sum(1 for x in w if x.get('registered')))
         sleep 5
     done
 
+    local elapsed=$(( $(date +%s) - start_ts ))
+    [ -n "$PHASE_LOG" ] && echo " ${registered_count}/${TOTAL} (timed out)" >> "$PHASE_LOG"
+    WAIT_RESULT="${registered_count}/${TOTAL} registered, timed out after $(fmt_duration $elapsed)"
     log "WARNING: Bootstrap timed out — some containers not ready"
     return 1
 }
@@ -757,8 +837,12 @@ wait_for_healthy() {
 
     log "${phase_name}: Waiting for ${target} workers to be reachable via Tor (timeout: ${timeout_secs}s)..."
 
-    local deadline=$(($(date +%s) + timeout_secs))
+    local start_ts
+    start_ts=$(date +%s)
+    local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
+    local reachable=0
+    local prev_reachable=0
 
     # Get all our healthcheck addresses
     local hc_addrs
@@ -766,8 +850,15 @@ wait_for_healthy() {
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         parallel_check_addrs "$hc_addrs" "200"
-        local reachable=$PCHECK_MATCHED
+        reachable=$PCHECK_MATCHED
         local total_checked=$PCHECK_TOTAL
+
+        # Write progress dots to phase log (one dot per newly healthy worker)
+        if [ -n "$PHASE_LOG" ] && [ "$reachable" -gt "$prev_reachable" ]; then
+            local new_dots=$((reachable - prev_reachable))
+            printf '%0.s.' $(seq 1 "$new_dots") >> "$PHASE_LOG"
+            prev_reachable=$reachable
+        fi
 
         local now
         now=$(date +%s)
@@ -778,6 +869,9 @@ wait_for_healthy() {
         fi
 
         if [ "$reachable" -ge "$target" ] 2>/dev/null; then
+            local elapsed=$(( $(date +%s) - start_ts ))
+            [ -n "$PHASE_LOG" ] && echo " ${reachable}/${target}" >> "$PHASE_LOG"
+            WAIT_RESULT="${reachable}/${target} healthy in $(fmt_duration $elapsed)"
             log "${phase_name}: ${reachable}/${total_checked} workers reachable via Tor"
             print_dashboard
             return 0
@@ -786,6 +880,9 @@ wait_for_healthy() {
         sleep 5
     done
 
+    local elapsed=$(( $(date +%s) - start_ts ))
+    [ -n "$PHASE_LOG" ] && echo " ${reachable:-0}/${target} (timed out)" >> "$PHASE_LOG"
+    WAIT_RESULT="${reachable:-0}/${target} healthy, timed out after $(fmt_duration $elapsed)"
     log "${phase_name}: Timed out — only ${reachable:-0} reachable (wanted ${target})"
     print_dashboard
     return 1
@@ -955,21 +1052,24 @@ print(f'Re-registered {w[\"content_address\"]}')
 " 2>/dev/null &
     done
 
-    # Restart Arti in each affected container with all services re-enabled
+    # Restart Arti if dead, or SIGHUP if alive (preserves circuits for faster recovery)
     for ctr_name in $affected_containers; do
         docker_cmd exec "$ctr_name" sh -c '
+            arti_running=false
             for d in /proc/[0-9]*; do
                 if [ "$(cat $d/comm 2>/dev/null)" = "arti" ]; then
-                    kill $(basename $d) 2>/dev/null
+                    kill -HUP $(basename $d) 2>/dev/null
+                    arti_running=true
                 fi
             done
-            sleep 2
-            su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+            if [ "$arti_running" = false ]; then
+                su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+            fi
         ' 2>/dev/null || true
     done
 
     # Don't wait for re-registrations — they stagger themselves inside the container
-    log "Re-enabled ${count} workers, Arti restarting + re-registrations over Tor (1s apart)"
+    log "Re-enabled ${count} workers, Arti restarted + re-registrations over Tor (1s apart)"
 }
 
 # Re-enable workers WITHOUT re-registering or sending /online.
@@ -1011,20 +1111,44 @@ enable_workers_silent() {
             -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
     done
 
-    # Restart Arti in each affected container with all services re-enabled
+    # Restart Arti if dead, or SIGHUP if alive (preserves circuits for faster recovery)
     for ctr_name in $affected_containers; do
         docker_cmd exec "$ctr_name" sh -c '
+            arti_running=false
             for d in /proc/[0-9]*; do
                 if [ "$(cat $d/comm 2>/dev/null)" = "arti" ]; then
-                    kill $(basename $d) 2>/dev/null
+                    kill -HUP $(basename $d) 2>/dev/null
+                    arti_running=true
                 fi
             done
-            sleep 2
-            su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+            if [ "$arti_running" = false ]; then
+                su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+            fi
         ' 2>/dev/null || true
     done
 
-    log "Re-enabled ${count} workers silently (Arti restarting, no notifications sent)"
+    log "Re-enabled ${count} workers silently (Arti restarted, no notifications sent)"
+}
+
+# Restart onionpress-tor-client to flush its HSDir descriptor cache.
+# Without this, the client keeps connecting using the old (takeover) descriptor
+# even after the takeover is released, making recovery appear much slower than
+# it really is.
+flush_client_descriptor_cache() {
+    log "Restarting onionpress-tor-client to flush descriptor cache..."
+    docker_cmd restart onionpress-tor-client >/dev/null 2>&1 || true
+    # Wait for Arti SOCKS proxy to come back up
+    local attempt
+    for attempt in $(seq 1 30); do
+        if docker_cmd exec onionpress-tor-client \
+            curl -s -o /dev/null --socks5-hostname 127.0.0.1:9050 --max-time 5 \
+            "http://example.com/" 2>/dev/null; then
+            log "  tor-client SOCKS proxy ready (${attempt}s)"
+            return
+        fi
+        sleep 2
+    done
+    log "  WARNING: tor-client SOCKS proxy not ready after 60s"
 }
 
 wait_for_takeover() {
@@ -1033,8 +1157,12 @@ wait_for_takeover() {
 
     log "Waiting for ${expected} takeovers — polling disabled workers' .onion addresses for 302 redirects (timeout: ${timeout_secs}s)..."
 
-    local deadline=$(($(date +%s) + timeout_secs))
+    local start_ts
+    start_ts=$(date +%s)
+    local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
+    local taken_over=0
+    local prev_taken=0
 
     # Get content addresses of the workers we disabled
     local fail_start=$((TOTAL - FAILING))
@@ -1043,8 +1171,15 @@ wait_for_takeover() {
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         parallel_check_addrs "$content_addrs" "302"
-        local taken_over=$PCHECK_302
+        taken_over=$PCHECK_302
         local total_checked=$PCHECK_TOTAL
+
+        # Progress dots
+        if [ -n "$PHASE_LOG" ] && [ "$taken_over" -gt "$prev_taken" ]; then
+            local new_dots=$((taken_over - prev_taken))
+            printf '%0.s.' $(seq 1 "$new_dots") >> "$PHASE_LOG"
+            prev_taken=$taken_over
+        fi
 
         local now
         now=$(date +%s)
@@ -1055,6 +1190,9 @@ wait_for_takeover() {
         fi
 
         if [ "$taken_over" -ge "$expected" ] 2>/dev/null; then
+            local elapsed=$(( $(date +%s) - start_ts ))
+            [ -n "$PHASE_LOG" ] && echo " ${taken_over}/${expected}" >> "$PHASE_LOG"
+            WAIT_RESULT="${taken_over}/${expected} taken over in $(fmt_duration $elapsed)"
             log "Takeover: ${taken_over}/${total_checked} returning 302 (target: ${expected})"
             print_dashboard
             return 0
@@ -1063,6 +1201,9 @@ wait_for_takeover() {
         sleep 5
     done
 
+    local elapsed=$(( $(date +%s) - start_ts ))
+    [ -n "$PHASE_LOG" ] && echo " ${taken_over:-0}/${expected} (timed out)" >> "$PHASE_LOG"
+    WAIT_RESULT="${taken_over:-0}/${expected} taken over, timed out after $(fmt_duration $elapsed)"
     log "Takeover: Timed out — ${taken_over:-0} returning 302 (wanted ${expected})"
     print_dashboard
     return 1
@@ -1074,8 +1215,13 @@ wait_for_recovery() {
 
     log "Waiting for recovery — polling previously-failed workers for 200 OK (timeout: ${timeout_secs}s)..."
 
-    local deadline=$(($(date +%s) + timeout_secs))
+    local start_ts
+    start_ts=$(date +%s)
+    local deadline=$((start_ts + timeout_secs))
     local last_dashboard=0
+    local recovered=0
+    local still_taken=0
+    local prev_recovered=0
 
     # Get content addresses of the workers that were disabled
     local fail_start=$((TOTAL - FAILING))
@@ -1084,9 +1230,16 @@ wait_for_recovery() {
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         parallel_check_addrs "$content_addrs" "200 302"
-        local recovered=$PCHECK_200
-        local still_taken=$PCHECK_302
+        recovered=$PCHECK_200
+        still_taken=$PCHECK_302
         local total_checked=$PCHECK_TOTAL
+
+        # Progress dots
+        if [ -n "$PHASE_LOG" ] && [ "$recovered" -gt "$prev_recovered" ]; then
+            local new_dots=$((recovered - prev_recovered))
+            printf '%0.s.' $(seq 1 "$new_dots") >> "$PHASE_LOG"
+            prev_recovered=$recovered
+        fi
 
         local now
         now=$(date +%s)
@@ -1097,6 +1250,9 @@ wait_for_recovery() {
         fi
 
         if [ "$recovered" -ge "$FAILING" ] 2>/dev/null && [ "$still_taken" -eq 0 ] 2>/dev/null; then
+            local elapsed=$(( $(date +%s) - start_ts ))
+            [ -n "$PHASE_LOG" ] && echo " ${recovered}/${FAILING}" >> "$PHASE_LOG"
+            WAIT_RESULT="${recovered}/${FAILING} recovered in $(fmt_duration $elapsed)"
             log "Recovery complete — ${recovered} workers back to 200 OK, 0 still redirecting"
             print_dashboard
             return 0
@@ -1105,6 +1261,9 @@ wait_for_recovery() {
         sleep 5
     done
 
+    local elapsed=$(( $(date +%s) - start_ts ))
+    [ -n "$PHASE_LOG" ] && echo " ${recovered:-0}/${FAILING} (timed out)" >> "$PHASE_LOG"
+    WAIT_RESULT="${recovered:-0}/${FAILING} recovered, ${still_taken:-0} still taken over, timed out after $(fmt_duration $elapsed)"
     log "Recovery: Timed out — ${recovered:-0} recovered, ${still_taken:-0} still taken over"
     print_dashboard
     return 1
@@ -1267,6 +1426,8 @@ except: pass
 verify_redirects() {
     local phase_label="$1"
     local sample_size="${2:-5}"
+    local verify_start_ts
+    verify_start_ts=$(date +%s)
 
     log "${phase_label}: Verifying 302 redirects on sample of taken-over addresses..."
 
@@ -1341,6 +1502,8 @@ verify_redirects() {
         fi
     done <<< "$sampled_addrs"
 
+    local verify_elapsed=$(( $(date +%s) - verify_start_ts ))
+    WAIT_RESULT="${passed}/${sampled} passed, ${failed} failed in $(fmt_duration $verify_elapsed)"
     log "${phase_label}: Redirect verification — ${passed}/${sampled} passed, ${failed} failed (${total_taken} total taken over)"
     log_json "\"event\":\"redirect_verify\",\"phase\":\"${phase_label}\",\"total_taken\":${total_taken},\"sampled\":${sampled},\"passed\":${passed},\"failed\":${failed}"
 
@@ -1498,6 +1661,10 @@ run_worker() {
     check_previous_artifacts
 
     mkdir -p "$OUTPUT_DIR"
+    PHASE_LOG="${OUTPUT_DIR}/phase.log"
+    : > "$PHASE_LOG"  # truncate
+    write_phase_header
+    open_phase_log_window
 
     log "=== OnionHeaven Stress Test (Arti) ==="
     log "OnionHeaven: ${ONIONHEAVEN_ADDR}"
@@ -1509,19 +1676,32 @@ run_worker() {
     log "Output: ${OUTPUT_DIR}"
     echo ""
 
+    RUN_START_TS=$(date +%s)
+    phase_start "1" "Starting ${NUM_CONTAINERS} worker containers (${TOTAL} workers) (est. <1m)"
+
     trap 'log "Cleaning up before exit..."; cleanup_stress_test' EXIT
     trap 'log "Interrupted..."; exit 130' INT TERM
 
     # Phase 1: Start worker containers (Arti + Python HTTP server)
     log "Phase 1: Starting ${NUM_CONTAINERS} worker containers..."
     start_all_workers
+    phase_result "1" "Started ${NUM_CONTAINERS} containers"
     echo ""
 
+    # Track results for summary table
+    local r_phase2="" r_phase3=""
+    local r_a1="" r_a1v="" r_a2="" r_a_sum=""
+    local r_b1="" r_b1v="" r_b2="" r_b_sum=""
+    local r_c1="" r_c2="" r_c_sum=""
+
     # Phase 2: Wait for all workers to bootstrap and self-register over Tor
+    phase_start "2" "Waiting for workers to bootstrap and register over Tor (est. 2m)"
     log "Phase 2: Waiting for workers to bootstrap and register over Tor..."
     if ! wait_for_bootstrap 900; then
         log "WARNING: Not all workers bootstrapped"
     fi
+    r_phase2="$WAIT_RESULT"
+    phase_result "2" "$WAIT_RESULT"
     extract_all_worker_info
 
     # Nudge Arti to re-publish onion descriptors (works around slow initial publication)
@@ -1535,109 +1715,199 @@ run_worker() {
     echo ""
 
     # Phase 3: Wait for onionheaven poller to confirm workers are healthy
+    phase_start "3" "Waiting for poller to confirm all ${TOTAL} workers are healthy (est. 1m)"
     if ! wait_for_healthy "$TOTAL" "Phase 3" 600; then
         log "WARNING: Not all workers became healthy, continuing anyway..."
     fi
+    r_phase3="$WAIT_RESULT"
+    phase_result "3" "$WAIT_RESULT"
     echo ""
 
     if [ "$FAILING" -gt 0 ]; then
         local fail_start=$((TOTAL - FAILING))
+        local scenario_ts
 
-        # ── Graceful offline/online lifecycle ──
+        # ══════════════════════════════════════════════════════════════
+        # Scenario A: Graceful offline/online (with /offline + /online)
+        # ══════════════════════════════════════════════════════════════
 
-        # Phase 4: Graceful offline — POST /offline + disable responders
-        # This matches real behavior: instance calls /offline then shuts down
-        log "Phase 4: Graceful offline — sending /offline + disabling responders for ${FAILING} workers..."
+        phase_start "A" "GRACEFUL OFFLINE/ONLINE (with /offline and /online notifications)"
+
+        # A1: Takeover — /offline + disable, then wait for 302s
+        phase_start "A.1" "Graceful takeover: /offline + disable ${FAILING} workers, wait for takeover (est. 3m)"
+        scenario_ts=$(date +%s)
+        log "Phase A.1: Graceful offline — sending /offline + disabling responders for ${FAILING} workers..."
         notify_offline "$fail_start" "$FAILING"
         disable_workers "$fail_start" "$FAILING"
-        echo ""
-
-        # Phase 5: Wait for OnionHeaven to takeover (from graceful offline)
-        log "Phase 5: Waiting for takeovers from graceful offline..."
+        flush_client_descriptor_cache
+        log "Phase A.1: Waiting for takeovers..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
         fi
+        local takeover_elapsed=$(( $(date +%s) - scenario_ts ))
+        r_a1="$WAIT_RESULT ($(fmt_duration $takeover_elapsed) e2e)"
+        phase_result "A.1" "Takeover: $r_a1"
         echo ""
 
-        # Phase 5b: Verify 302 redirects on taken-over addresses
-        verify_redirects "Phase 5b" 5
+        # A1v: Verify 302 redirects
+        phase_start "A.1v" "Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)"
+        verify_redirects "A.1v" 5
+        r_a1v="$WAIT_RESULT"
+        phase_result "A.1v" "$r_a1v"
         echo ""
 
-        # Phase 6: Graceful recovery — re-enable responders + POST /online
-        # Re-enable HTTP first (so healthchecks pass), then /online (instant reset)
-        log "Phase 6: Graceful recovery — re-enabling responders + sending /online..."
+        # A2: Recovery — re-enable + /online, then wait for 200s
+        phase_start "A.2" "Graceful recovery: re-enable + /online for ${FAILING} workers, wait for recovery (est. 1m)"
+        scenario_ts=$(date +%s)
+        log "Phase A.2: Graceful recovery — re-enabling responders + sending /online..."
         enable_workers "$fail_start" "$FAILING"
         notify_online "$fail_start" "$FAILING"
-        echo ""
-
-        # Phase 6b: Wait for recovery from graceful offline
-        log "Phase 6b: Waiting for recovery from graceful offline..."
+        flush_client_descriptor_cache
+        log "Phase A.2: Waiting for recovery..."
         if ! wait_for_recovery "$TOTAL" 600; then
             log "WARNING: Not all workers recovered from graceful offline"
         fi
+        local recovery_elapsed=$(( $(date +%s) - scenario_ts ))
+        r_a2="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
+        phase_result "A.2" "Recovery: $r_a2"
         echo ""
 
-        # ── Silent crash + silent recovery (poller-only detection) ──
+        r_a_sum="takeover $(fmt_duration $takeover_elapsed), recovery $(fmt_duration $recovery_elapsed)"
+        phase_result "A" "Graceful: $r_a_sum"
+        echo ""
 
-        # Phase 7: Silent crash — disable responders, no /offline sent.
-        # OnionHeaven must detect the failure purely by polling healthchecks.
-        log "Phase 7: Silent crash — disabling responders for ${FAILING} workers (no /offline)..."
+        # ══════════════════════════════════════════════════════════════
+        # Scenario B: Silent crash + silent recovery (poller-only)
+        # ══════════════════════════════════════════════════════════════
+
+        phase_start "B" "SILENT CRASH/RECOVERY (no notifications, poller-only detection)"
+
+        # B1: Takeover — disable only (no /offline), wait for poller to detect
+        phase_start "B.1" "Silent crash: disable ${FAILING} workers (no /offline), wait for poller takeover (est. 9m)"
+        scenario_ts=$(date +%s)
+        log "Phase B.1: Silent crash — disabling responders for ${FAILING} workers (no /offline)..."
         disable_workers "$fail_start" "$FAILING"
-        echo ""
-
-        # Phase 8: Wait for poller to detect failures and takeover
-        log "Phase 8: Waiting for poller-detected takeovers (no /offline was sent)..."
+        flush_client_descriptor_cache
+        log "Phase B.1: Waiting for poller-detected takeovers..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
         fi
+        takeover_elapsed=$(( $(date +%s) - scenario_ts ))
+        r_b1="$WAIT_RESULT ($(fmt_duration $takeover_elapsed) e2e)"
+        phase_result "B.1" "Takeover: $r_b1"
         echo ""
 
-        # Phase 8b: Verify 302 redirects
-        verify_redirects "Phase 8b" 5
+        # B1v: Verify 302 redirects
+        phase_start "B.1v" "Double-check taken-over addresses redirect (302) to Wayback Machine from here (est. <1m)"
+        verify_redirects "B.1v" 5
+        r_b1v="$WAIT_RESULT"
+        phase_result "B.1v" "$r_b1v"
         echo ""
 
-        # Phase 9: Silent recovery — re-enable responders, no /online or /register.
-        # OnionHeaven must detect recovery purely by polling healthchecks.
-        log "Phase 9: Silent recovery — re-enabling responders (no /online, no /register)..."
+        # B2: Recovery — re-enable only (no /online, no /register), wait for poller
+        phase_start "B.2" "Silent recovery: re-enable ${FAILING} workers (no /online), wait for poller recovery (est. 1m)"
+        scenario_ts=$(date +%s)
+        log "Phase B.2: Silent recovery — re-enabling responders (no /online, no /register)..."
         enable_workers_silent "$fail_start" "$FAILING"
-        echo ""
-
-        log "Phase 9b: Waiting for poller-detected recovery (no /online was sent)..."
+        flush_client_descriptor_cache
+        log "Phase B.2: Waiting for poller-detected recovery..."
         if ! wait_for_recovery "$TOTAL" 900; then
             log "WARNING: Not all workers recovered via poller detection"
         fi
+        recovery_elapsed=$(( $(date +%s) - scenario_ts ))
+        r_b2="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
+        phase_result "B.2" "Recovery: $r_b2"
         echo ""
 
-        # ── Crash + re-register recovery ──
+        r_b_sum="takeover $(fmt_duration $takeover_elapsed), recovery $(fmt_duration $recovery_elapsed)"
+        phase_result "B" "Silent: $r_b_sum"
+        echo ""
 
-        # Phase 10: Crash again — same as Phase 7
-        log "Phase 10: Crash simulation — disabling responders for ${FAILING} workers (no /offline)..."
+        # ══════════════════════════════════════════════════════════════
+        # Scenario C: Crash + re-register recovery
+        # ══════════════════════════════════════════════════════════════
+
+        phase_start "C" "CRASH + RE-REGISTER (no /offline, recovery via /register)"
+
+        # C1: Takeover — disable only (no /offline), wait for poller
+        phase_start "C.1" "Crash: disable ${FAILING} workers (no /offline), wait for takeover (est. 9m)"
+        scenario_ts=$(date +%s)
+        log "Phase C.1: Crash simulation — disabling responders for ${FAILING} workers (no /offline)..."
         disable_workers "$fail_start" "$FAILING"
-        echo ""
-
-        log "Phase 10b: Waiting for takeovers..."
+        flush_client_descriptor_cache
+        log "Phase C.1: Waiting for takeovers..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
         fi
+        takeover_elapsed=$(( $(date +%s) - scenario_ts ))
+        r_c1="$WAIT_RESULT ($(fmt_duration $takeover_elapsed) e2e)"
+        phase_result "C.1" "Takeover: $r_c1"
         echo ""
 
-        # Phase 11: Recovery with re-register (like a real OnionPress restart)
-        log "Phase 11: Recovery with re-register — re-enabling + re-registering over Tor..."
+        # C2: Recovery — re-enable + re-register (like real OnionPress restart)
+        phase_start "C.2" "Recovery with /register: re-enable + re-register ${FAILING} workers, wait for recovery (est. 1m)"
+        scenario_ts=$(date +%s)
+        log "Phase C.2: Recovery with re-register — re-enabling + re-registering over Tor..."
         enable_workers "$fail_start" "$FAILING"
-        echo ""
-
+        flush_client_descriptor_cache
+        log "Phase C.2: Waiting for recovery..."
         if ! wait_for_recovery "$TOTAL" 600; then
             log "WARNING: Not all workers recovered"
         fi
+        recovery_elapsed=$(( $(date +%s) - scenario_ts ))
+        r_c2="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
+        phase_result "C.2" "Recovery: $r_c2"
         echo ""
+
+        r_c_sum="takeover $(fmt_duration $takeover_elapsed), recovery $(fmt_duration $recovery_elapsed)"
+        phase_result "C" "Re-register: $r_c_sum"
+        echo ""
+
     else
         log "No failing workers configured — skipping failure/recovery test"
         echo ""
     fi
 
-    # Phase 12: Final dashboard + cleanup
-    log "=== Phase 12: Final metrics ==="
+    # Summary table in phase log
+    if [ -n "$PHASE_LOG" ]; then
+        local total_elapsed=$(( $(date +%s) - RUN_START_TS ))
+        cat >> "$PHASE_LOG" << SUMMARY
+
+====================================================================
+  SUMMARY — $(date '+%Y-%m-%d %H:%M:%S') — total $(fmt_duration $total_elapsed)
+--------------------------------------------------------------------
+  Phase 2 (bootstrap):   $r_phase2
+  Phase 3 (healthy):     $r_phase3
+SUMMARY
+        if [ "$FAILING" -gt 0 ]; then
+            cat >> "$PHASE_LOG" << SUMMARY
+  ---
+  A. Graceful (/offline + /online):
+     A.1  Takeover:       ${r_a1:-(not run)}
+     A.1v Verify 302s:    ${r_a1v:-(not run)}
+     A.2  Recovery:       ${r_a2:-(not run)}
+     => ${r_a_sum:-(incomplete)}
+  ---
+  B. Silent (poller-only, no notifications):
+     B.1  Takeover:       ${r_b1:-(not run)}
+     B.1v Verify 302s:    ${r_b1v:-(not run)}
+     B.2  Recovery:       ${r_b2:-(not run)}
+     => ${r_b_sum:-(incomplete)}
+  ---
+  C. Crash + re-register:
+     C.1  Takeover:       ${r_c1:-(not run)}
+     C.2  Recovery:       ${r_c2:-(not run)}
+     => ${r_c_sum:-(incomplete)}
+SUMMARY
+        fi
+        echo "====================================================================" >> "$PHASE_LOG"
+    fi
+
+    # Final metrics + cleanup
+    phase_start "done" "Final metrics and cleanup"
+    log "=== Final metrics ==="
     print_dashboard
+    phase_result "done" "Stress test complete"
     echo ""
 
     # Cleanup
@@ -1654,13 +1924,31 @@ run_coordinator() {
     preflight
     detect_onionheaven_addr
     mkdir -p "$OUTPUT_DIR"
+    PHASE_LOG="${OUTPUT_DIR}/phase.log"
 
     log "=== OnionHeaven Stress Test (coordinator — read-only monitor) ==="
     log "Output: ${OUTPUT_DIR}"
+    log "Phase log: ${PHASE_LOG}"
     log "Press Ctrl-C to stop"
     echo ""
 
+    # Open a Terminal window tailing the phase log (written by the worker process)
+    if [ -f "$PHASE_LOG" ]; then
+        open_phase_log_window
+    else
+        log "Phase log not yet created — will open window when test starts"
+    fi
+
+    local log_window_opened=false
+    [ -f "$PHASE_LOG" ] && log_window_opened=true
+
     while true; do
+        # Open log window once phase.log appears
+        if [ "$log_window_opened" = false ] && [ -f "$PHASE_LOG" ]; then
+            open_phase_log_window
+            log_window_opened=true
+        fi
+
         print_dashboard
         sleep 10
     done
@@ -1724,42 +2012,52 @@ except: pass
         return
     fi
 
-    # Unregister each entry — locally or over Tor
-    local unregistered=0
-    local released_arti=0
+    # Unregister entries in parallel — each /unregister goes over Tor so sequential is slow
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local pids=""
+    local job_count=0
+
     for addr in $stress_addrs; do
         addr=$(echo "$addr" | tr -d '\r\n ')
         [ -z "$addr" ] && continue
 
-        local resp
-        if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-            resp=$(docker_cmd exec onionheaven \
-                curl -s -X POST http://localhost:8083/unregister \
-                -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
-        else
-            resp=$(docker_cmd exec onionpress-tor-client \
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
-                -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
-        fi
-
-        # If takeover was active and we're on OnionHeaven host, release Arti config
-        if [ "$IS_ONIONHEAVEN_HOST" = true ] && echo "$resp" | grep -q '"takeover_was_active":true'; then
-            docker_cmd exec onionpress-tor \
-                /onionheaven-tor-manager.sh release "$addr" 2>/dev/null || true
-            released_arti=$((released_arti + 1))
-        fi
-
-        unregistered=$((unregistered + 1))
+        (
+            local resp
+            if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+                resp=$(docker_cmd exec onionheaven \
+                    curl -s -X POST http://localhost:8083/unregister \
+                    -H "Content-Type: application/json" \
+                    -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+                # If takeover was active, release Arti config
+                if echo "$resp" | grep -q '"takeover_was_active":true'; then
+                    docker_cmd exec onionpress-tor \
+                        /onionheaven-tor-manager.sh release "$addr" 2>/dev/null || true
+                fi
+            else
+                resp=$(docker_cmd exec onionpress-tor-client \
+                    curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                    -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"content_address\": \"${addr}\"}" 2>/dev/null) || true
+            fi
+            echo "done" > "${tmpdir}/${addr}"
+        ) &
+        pids="$pids $!"
+        job_count=$((job_count + 1))
     done
 
-    log "Unregistered ${unregistered} entries"
+    # Wait for all unregister jobs
+    local failed=0
+    for pid in $pids; do
+        wait "$pid" 2>/dev/null || failed=$((failed + 1))
+    done
 
-    if [ "$released_arti" -gt 0 ]; then
-        log "Released ${released_arti} Arti takeover entries"
-    fi
+    local succeeded
+    succeeded=$(ls "$tmpdir" 2>/dev/null | wc -l | tr -d ' ')
+    rm -rf "$tmpdir"
+
+    log "Unregistered ${succeeded}/${job_count} entries (parallel)"
 
     echo ""
     log "Cleanup complete: ${count} stress-test entries removed"
