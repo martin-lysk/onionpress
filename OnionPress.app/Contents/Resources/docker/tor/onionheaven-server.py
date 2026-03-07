@@ -12,7 +12,7 @@ Endpoints:
   POST /online       — Notify OnionHeaven that instance is back online
   POST /offline      — Notify OnionHeaven that instance is going offline
   GET  /status       — Public status summary (no auth)
-  GET  /status/<addr> — Per-content-address detail
+  GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
 ONIONHEAVEN_SERVER_VERSION = "2.4.22"
@@ -30,7 +30,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from onionheaven_common import (
     db_connect, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_arti,
-    KEYS_DIR,
+    KEYS_DIR, PROPAGATION_DELAY,
 )
 
 # ---------------------------------------------------------------------------
@@ -236,29 +236,41 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json(500, {"error": str(e)})
 
-    # -- GET /status/<content-address> --------------------------------------
+    # -- GET /status/<address> ------------------------------------------------
 
-    def _handle_status_detail(self, content_address):
-        if not ONION_RE.match(content_address):
-            self._send_json(400, {"error": "Invalid content_address format"})
+    def _handle_status_detail(self, address):
+        if not ONION_RE.match(address):
+            self._send_json(400, {"error": "Invalid .onion address format"})
             return
 
         try:
             conn = db_connect()
             db_ensure_schema(conn)
+
+            # Try content_address first, then healthcheck_address
             rows = conn.execute(
                 "SELECT * FROM registry WHERE content_address = ? ORDER BY registered_at",
-                (content_address,)
+                (address,)
             ).fetchall()
+            lookup_type = "content_address"
+
+            if not rows:
+                rows = conn.execute(
+                    "SELECT * FROM registry WHERE healthcheck_address = ? ORDER BY registered_at",
+                    (address,)
+                ).fetchall()
+                lookup_type = "healthcheck_address"
+
             conn.close()
 
             if not rows:
-                self._send_json(404, {"error": "No entries found"})
+                self._send_json(404, {"error": "No entries found for this address (checked both content_address and healthcheck_address)"})
                 return
 
+            now = datetime.now(timezone.utc)
             entries = []
             for row in rows:
-                entries.append({
+                entry = {
                     "content_address": row["content_address"],
                     "healthcheck_address": row["healthcheck_address"],
                     "status": row["status"],
@@ -271,15 +283,61 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     "last_released": row["last_released"],
                     "last_taken_over": row["last_taken_over"],
                     "last_redirect": row["last_redirect"],
-                })
+                }
+
+                # Add computed debugging fields
+                entry["seconds_since_last_polled"] = self._seconds_since(row["last_polled"], now)
+                entry["seconds_since_last_healthy"] = self._seconds_since(row["last_healthy"], now)
+                entry["seconds_since_last_taken_over"] = self._seconds_since(row["last_taken_over"], now)
+                entry["seconds_since_last_released"] = self._seconds_since(row["last_released"], now)
+
+                # Was the last poll successful? (last_healthy >= last_polled)
+                entry["last_poll_healthy"] = self._ts_gte(row["last_healthy"], row["last_polled"])
+
+                # Would the poller take over right now?
+                # Conditions: status == 'online', last_healthy is stale (> PROPAGATION_DELAY)
+                stale = True
+                if row["last_healthy"]:
+                    age = self._seconds_since(row["last_healthy"], now)
+                    if age is not None:
+                        stale = age > PROPAGATION_DELAY
+                entry["last_healthy_stale"] = stale if row["status"] == "online" else None
+                entry["propagation_delay_seconds"] = PROPAGATION_DELAY
+
+                entries.append(entry)
 
             self._send_json(200, {
-                "content_address": content_address,
+                "lookup_type": lookup_type,
+                "address": address,
                 "entries": entries,
                 "count": len(entries),
+                "server_time": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
         except Exception as e:
             self._send_json(500, {"error": str(e)})
+
+    @staticmethod
+    def _seconds_since(ts_str, now):
+        """Return seconds elapsed since a timestamp string, or None."""
+        if not ts_str:
+            return None
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            return round((now - ts).total_seconds())
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _ts_gte(a, b):
+        """Return True if timestamp a >= b, None if either is missing."""
+        if not a or not b:
+            return None
+        try:
+            ta = datetime.fromisoformat(a.replace("Z", "+00:00"))
+            tb = datetime.fromisoformat(b.replace("Z", "+00:00"))
+            return ta >= tb
+        except (ValueError, TypeError):
+            return None
 
     # -- POST dispatch ------------------------------------------------------
 

@@ -6,6 +6,21 @@
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
 
+# Persistent Arti log — survives container restarts (on arti-state volume)
+ARTI_LOG="/var/lib/arti/arti.log"
+
+# Rotate log if >10MB
+rotate_log() {
+    if [ -f "$ARTI_LOG" ]; then
+        size=$(stat -c%s "$ARTI_LOG" 2>/dev/null || wc -c < "$ARTI_LOG")
+        if [ "$size" -gt 10485760 ] 2>/dev/null; then
+            mv "$ARTI_LOG" "${ARTI_LOG}.1"
+        fi
+    fi
+}
+rotate_log
+echo "=== Arti starting at $(date -u '+%Y-%m-%dT%H:%M:%SZ') ===" >> "$ARTI_LOG"
+
 # Clean ephemeral state that causes "Too many preemptive onion service circuits
 # failed" after container restarts. The keystore (identity keys) must survive,
 # but guards, circuit timeouts, and intro point state become stale/poisoned
@@ -100,7 +115,7 @@ if [ "${POLLING_ONLY}" = "1" ]; then
     else
         # Plain polling mode: just SOCKS proxy, no onion services
         echo "Polling-only mode: starting Arti SOCKS proxy (no onion services)..."
-        exec su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml"
+        su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml" 2>&1 | tee -a "$ARTI_LOG"
     fi
 fi
 
@@ -140,8 +155,8 @@ if ! kill -0 $HC_PID 2>/dev/null; then
     echo "ERROR: healthcheck-server.sh failed to start"
 fi
 
-# Start Arti in background
-su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
+# Start Arti in background (log to persistent file + docker logs)
+su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" 2>&1 | tee -a "$ARTI_LOG" &
 ARTI_PID=$!
 sleep 2
 if ! kill -0 $ARTI_PID 2>/dev/null; then

@@ -119,15 +119,18 @@ def register_with_onionheaven(app):
     """
     Register this instance with OnionHeaven.
     Sends content address, healthcheck address, and secret key to OnionHeaven.
-    Called from a background thread; tries once per app startup.
+    Called from a background thread. Sets app._onionheaven_registration_succeeded
+    on success; clears app._onionheaven_registration_in_flight when done.
     """
     # Check if registration is disabled
     if app.read_config_value("REGISTER_WITH_ONIONHEAVEN", "yes").lower() == "no":
         app.log("OnionHeaven registration disabled (REGISTER_WITH_ONIONHEAVEN=no)")
+        app._onionheaven_registration_in_flight = False
         return
 
     # Don't register with ourselves
     if getattr(app, 'is_onionheaven', False):
+        app._onionheaven_registration_in_flight = False
         return
 
     content_addr = app.onion_address
@@ -135,91 +138,97 @@ def register_with_onionheaven(app):
 
     if not content_addr or not content_addr.endswith('.onion'):
         app.log("OnionHeaven: no content address available, skipping registration")
+        app._onionheaven_registration_in_flight = False
         return
     if not hc_addr or not hc_addr.endswith('.onion'):
         app.log("OnionHeaven: no healthcheck address available, skipping registration")
+        app._onionheaven_registration_in_flight = False
         return
 
     app.log("Registering with OnionHeaven...")
 
-    # Extract the secret key (raw bytes)
     try:
-        import key_manager
-        secret_key_bytes = key_manager.extract_private_key()
-    except Exception as e:
-        app.log(f"OnionHeaven: failed to extract key: {e}")
-        return
+        # Extract the secret key (raw bytes)
+        try:
+            import key_manager
+            secret_key_bytes = key_manager.extract_private_key()
+        except Exception as e:
+            app.log(f"OnionHeaven: failed to extract key: {e}")
+            return
 
-    # Also get the public key (from same Arti keystore file)
-    try:
-        public_key_raw = key_manager.extract_public_key()
-    except Exception as e:
-        app.log(f"OnionHeaven: failed to read public key: {e}")
-        return
+        # Also get the public key (from same Arti keystore file)
+        try:
+            public_key_raw = key_manager.extract_public_key()
+        except Exception as e:
+            app.log(f"OnionHeaven: failed to read public key: {e}")
+            return
 
-    # Build Arti OpenSSH PEM for OnionHeaven storage
-    arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
+        # Build Arti OpenSSH PEM for OnionHeaven storage
+        arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
 
-    # Build registration payload (keys as base64-encoded strings)
-    import base64
-    payload = json.dumps({
-        "content_address": content_addr,
-        "healthcheck_address": hc_addr,
-        "secret_key": base64.b64encode(secret_key_bytes).decode('ascii'),
-        "public_key": base64.b64encode(public_key_raw).decode('ascii'),
-        "arti_key_pem": base64.b64encode(arti_pem).decode('ascii'),
-        "version": getattr(app, 'version', 'unknown'),
-    })
+        # Build registration payload (keys as base64-encoded strings)
+        import base64
+        payload = json.dumps({
+            "content_address": content_addr,
+            "healthcheck_address": hc_addr,
+            "secret_key": base64.b64encode(secret_key_bytes).decode('ascii'),
+            "public_key": base64.b64encode(public_key_raw).decode('ascii'),
+            "arti_key_pem": base64.b64encode(arti_pem).decode('ascii'),
+            "version": getattr(app, 'version', 'unknown'),
+        })
 
-    # Send via wordpress container's curl through tor SOCKS proxy
-    # (per CLAUDE.md: use docker exec for all Tor communication)
-    # Retry with backoff to handle flaky Tor circuits
-    backoff = [10, 30, 60]
-    max_attempts = 4
-    last_output = ""
+        # Send via wordpress container's curl through tor SOCKS proxy
+        # (per CLAUDE.md: use docker exec for all Tor communication)
+        # Retry with backoff to handle flaky Tor circuits
+        backoff = [10, 30]
+        max_attempts = 4
+        last_output = ""
 
-    for attempt in range(max_attempts):
-        ok, output = _run_docker(app, [
-            "exec", "onionpress-wordpress",
-            "curl", "-s", "-X", "POST",
-            "--socks5-hostname", "onionpress-tor:9050",
-            "-H", "Content-Type: application/json",
-            "-d", payload,
-            "--max-time", "60",
-            f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/register"
-        ], timeout=75)
-        last_output = output
+        for attempt in range(max_attempts):
+            ok, output = _run_docker(app, [
+                "exec", "onionpress-wordpress",
+                "curl", "-s", "-X", "POST",
+                "--socks5-hostname", "onionpress-tor:9050",
+                "-H", "Content-Type: application/json",
+                "-d", payload,
+                "--max-time", "60",
+                f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/register"
+            ], timeout=75)
+            last_output = output
 
-        if ok and output:
-            try:
-                resp = json.loads(output)
-                if resp.get("registered"):
-                    app.log(f"OnionHeaven: registration successful: {resp}")
-                    _save_registration_status(app, {
-                        "registered": True,
-                        "last_attempt": datetime.now(timezone.utc).isoformat(),
-                        "onionheaven_address": ONIONHEAVEN_ADDRESS,
-                        "content_address": content_addr,
-                    })
-                    return
-                # Server returned a structured error — don't retry
-                error_msg = resp.get("error", "unknown error")
-                app.log(f"OnionHeaven: registration rejected: {error_msg}")
-                break
-            except json.JSONDecodeError:
-                pass
+            if ok and output:
+                try:
+                    resp = json.loads(output)
+                    if resp.get("registered"):
+                        app.log(f"OnionHeaven: registration successful: {resp}")
+                        _save_registration_status(app, {
+                            "registered": True,
+                            "last_attempt": datetime.now(timezone.utc).isoformat(),
+                            "onionheaven_address": ONIONHEAVEN_ADDRESS,
+                            "content_address": content_addr,
+                        })
+                        app._onionheaven_registration_succeeded = True
+                        return
+                    # Server returned a structured error — don't retry
+                    error_msg = resp.get("error", "unknown error")
+                    app.log(f"OnionHeaven: registration rejected: {error_msg}")
+                    break
+                except json.JSONDecodeError:
+                    pass
 
-        if attempt < max_attempts - 1:
-            delay = backoff[min(attempt, len(backoff) - 1)]
-            app.log(f"OnionHeaven: registration attempt {attempt + 1} failed, retrying in {delay}s...")
-            time.sleep(delay)
+            if attempt < max_attempts - 1:
+                delay = backoff[min(attempt, len(backoff) - 1)]
+                app.log(f"OnionHeaven: registration attempt {attempt + 1} failed, retrying in {delay}s...")
+                time.sleep(delay)
 
-    app.log(f"OnionHeaven: registration failed after {max_attempts} attempts (will retry on next startup) — last response: {last_output!r}")
-    _save_registration_status(app, {
-        "registered": False,
-        "last_attempt": datetime.now(timezone.utc).isoformat(),
-        "onionheaven_address": ONIONHEAVEN_ADDRESS,
-    })
+        app.log(f"OnionHeaven: registration failed after {max_attempts} attempts (will retry) — last response: {last_output!r}")
+        _save_registration_status(app, {
+            "registered": False,
+            "last_attempt": datetime.now(timezone.utc).isoformat(),
+            "onionheaven_address": ONIONHEAVEN_ADDRESS,
+        })
+    finally:
+        app._onionheaven_registration_in_flight = False
 
 
 def start_registration_thread(app):
@@ -392,7 +401,7 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
 
         if attempt < max_attempts - 1:
             delay = backoff[min(attempt, len(backoff) - 1)]
-            app.log(f"OnionHeaven: /{endpoint} attempt {attempt + 1} failed, retrying in {delay}s...")
+            app.log(f"OnionHeaven: /{endpoint} attempt {attempt + 1}/{max_attempts} failed, retrying in {delay}s...")
             time.sleep(delay)
 
     app.log(f"OnionHeaven: /{endpoint} failed after {max_attempts} attempts — last response: {last_output!r}")
@@ -414,12 +423,23 @@ def notify_onionheaven_offline(app):
 def notify_onionheaven_online(app):
     """Notify OnionHeaven that this instance is back online (wake/reconnect).
 
-    Retries with backoff since Tor circuits may take time to rebuild after wake.
+    Keeps retrying with backoff until successful — this is critical for
+    reclaiming an address after OnionHeaven takeover. Without a successful
+    /online, the site stays unreachable behind OnionHeaven's redirect.
+    Sets app._onionheaven_reclaim_succeeded on success; clears
+    app._onionheaven_reclaim_in_flight when done.
     """
     if getattr(app, 'is_onionheaven', False):
+        app._onionheaven_reclaim_in_flight = False
         return False
     app.log("Notifying OnionHeaven: coming online")
-    return _send_onionheaven_notification(app, "online", "online", max_attempts=3, max_time=30)
+    try:
+        result = _send_onionheaven_notification(app, "online", "online", max_attempts=30, max_time=30)
+        if result:
+            app._onionheaven_reclaim_succeeded = True
+        return result
+    finally:
+        app._onionheaven_reclaim_in_flight = False
 
 
 def start_online_notification_thread(app):
