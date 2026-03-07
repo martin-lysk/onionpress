@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.23"
+        self.version = "2.4.24"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -651,6 +651,13 @@ class OnionPressApp(rumps.App):
             except Exception as e:
                 self.log(f"Native messaging install failed: {e}")
 
+            # Sync login item LaunchAgent with config
+            launch_on_login = self._read_config_value("LAUNCH_ON_LOGIN", "yes")
+            if launch_on_login == "yes" and not self._is_login_item_installed():
+                self.add_login_item()
+            elif launch_on_login != "yes" and self._is_login_item_installed():
+                self.remove_login_item()
+
             # Check if Cloudflare Tunnel is configured
             cf_token = self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN")
             if cf_token:
@@ -696,15 +703,18 @@ class OnionPressApp(rumps.App):
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
         self._tor_internally_ready = False # Checks 1-4 passed (Arti+WordPress up)
-        self._onionheaven_reclaim_sent = False  # Whether we've sent /online to reclaim after takeover
-        self._tor_auto_restarted = False   # Whether we've auto-restarted tor this startup
+        self._onionheaven_reclaim_succeeded = False  # Whether /online reclaim succeeded
+        self._onionheaven_reclaim_in_flight = False  # Whether a reclaim thread is running
+        self._onionheaven_reclaim_last_attempt = 0   # Timestamp of last reclaim attempt
+        self._tor_last_auto_restart = 0    # Timestamp of last auto-restart (cooldown-based)
         self._wordpress_confirmed = False  # WordPress responded at least once (stays up reliably)
         self.healthcheck_address = None    # Healthcheck .onion address
         self.onionheaven_messages = []          # Messages received from OnionHeaven
         self._onionheaven_alert_shown = False   # Whether we've shown OnionHeaven alert icon
         self.is_onionheaven = False             # True if this instance is OnionHeaven
         self._onionheaven_checked = False       # Whether onionheaven mode has been checked
-        self._onionheaven_registration_started = False  # Whether registration thread is running
+        self._onionheaven_registration_succeeded = False  # Whether registration succeeded
+        self._onionheaven_registration_in_flight = False  # Whether registration thread is running
         self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
         self._quitting = False                 # True once quit cleanup has started
         self._stopping = False                 # True while Stop button is in progress
@@ -1379,43 +1389,46 @@ class OnionPressApp(rumps.App):
         self.start_service(None)
 
 
+    LAUNCHAGENT_LABEL = "com.onionpress.launcher"
+    LAUNCHAGENT_PATH = os.path.expanduser(
+        f"~/Library/LaunchAgents/{LAUNCHAGENT_LABEL}.plist")
+
+    def _is_login_item_installed(self):
+        """Check if LaunchAgent plist exists"""
+        return os.path.exists(self.LAUNCHAGENT_PATH)
+
     def add_login_item(self):
-        """Add app to login items - prompts user to add manually"""
+        """Install LaunchAgent plist for auto-start on login"""
         try:
-            # Open System Settings to Login Items
-            # Modern macOS doesn't allow programmatic login item addition without prompts
-            rumps.alert(
-                title="Enable Launch on Login",
-                message="Please add OnionPress to Login Items:\n\n1. System Settings will open\n2. Go to General → Login Items\n3. Click the + button\n4. Select OnionPress.app from Applications\n\nNote: You can also disable this setting in the config file.",
-                ok="Open System Settings"
-            )
-
-            # Open System Settings to Login Items
-            subprocess.run(["open", "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"])
-
-            self.log("User prompted to add login item manually")
+            plist = {
+                "Label": self.LAUNCHAGENT_LABEL,
+                "ProgramArguments": ["open", "-a", "/Applications/OnionPress.app"],
+                "RunAtLoad": True,
+                "LimitLoadToSessionType": "Aqua",
+            }
+            os.makedirs(os.path.dirname(self.LAUNCHAGENT_PATH), exist_ok=True)
+            with open(self.LAUNCHAGENT_PATH, "wb") as f:
+                plistlib.dump(plist, f)
+            self.log("LaunchAgent installed for login auto-start")
             return True
         except Exception as e:
-            self.log(f"Error prompting login item addition: {e}")
+            self.log(f"Error installing LaunchAgent: {e}")
             return False
 
     def remove_login_item(self):
-        """Remove app from login items - prompts user to remove manually"""
+        """Remove LaunchAgent plist"""
         try:
-            # Open System Settings to Login Items
-            rumps.alert(
-                title="Disable Launch on Login",
-                message="Please remove OnionPress from Login Items:\n\n1. System Settings will open\n2. Go to General → Login Items\n3. Select OnionPress\n4. Click the - button to remove it",
-                ok="Open System Settings"
-            )
-
-            # Open System Settings to Login Items
-            subprocess.run(["open", "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"])
-
-            self.log("User prompted to remove login item manually")
+            if os.path.exists(self.LAUNCHAGENT_PATH):
+                # Unload first (ignore errors if not loaded)
+                subprocess.run(
+                    ["launchctl", "bootout", f"gui/{os.getuid()}",
+                     self.LAUNCHAGENT_PATH],
+                    capture_output=True, timeout=10)
+                os.remove(self.LAUNCHAGENT_PATH)
+            self.log("LaunchAgent removed")
             return True
         except Exception as e:
-            self.log(f"Error prompting login item removal: {e}")
+            self.log(f"Error removing LaunchAgent: {e}")
             return False
 
 
@@ -1776,7 +1789,9 @@ class OnionPressApp(rumps.App):
                     if ready_now and not previous_ready:
                         self.is_ready = True
                         self._was_ready = True
-                        self._onionheaven_reclaim_sent = False
+                        self._onionheaven_reclaim_succeeded = False
+                        self._onionheaven_reclaim_in_flight = False
+                        self._onionheaven_reclaim_last_attempt = 0
                         self._bootstrap_stall_count = 0
                         self._yellow_since = None
                         elapsed = int(time.time() - self.startup_time)
@@ -1816,7 +1831,7 @@ class OnionPressApp(rumps.App):
                             self.is_ready = False
                             self._yellow_since = time.time()
                             self._bootstrap_stall_count = 0
-                            self._tor_auto_restarted = False  # Allow auto-restart again
+                            self._tor_last_auto_restart = 0  # Allow immediate auto-restart
                             self.log("Service became unreachable — reconnecting")
                     else:
                         # Not ready yet — track bootstrap progress for stuck detection
@@ -1834,13 +1849,14 @@ class OnionPressApp(rumps.App):
                         # guards, circuit failures). If Arti is healthy but
                         # just waiting for descriptor propagation, don't restart
                         # — that would reset progress.
+                        # Uses cooldown (5 min) so we can retry if the spiral recurs.
                         if (self._yellow_since
-                                and not self._tor_auto_restarted
                                 and not self._stopping
                                 and not self._quitting
                                 and (time.time() - self._yellow_since) > 120
+                                and (time.time() - self._tor_last_auto_restart) > 300
                                 and self._tor_container_unhealthy()):
-                            self._tor_auto_restarted = True
+                            self._tor_last_auto_restart = time.time()
                             self.log("Tor container unhealthy after 2min — restarting")
                             threading.Thread(target=self._auto_restart_tor, daemon=True).start()
 
@@ -1869,7 +1885,7 @@ class OnionPressApp(rumps.App):
                 if self.is_ready:
                     self.poll_onionheaven_messages()
 
-                # OnionHeaven: detect onionheaven mode, register, or notify online
+                # OnionHeaven: detect onionheaven mode (one-shot)
                 if self.is_ready and not self._onionheaven_checked:
                     self._onionheaven_checked = True
                     if onionheaven.is_onionheaven_instance(self.onion_address):
@@ -1890,13 +1906,19 @@ class OnionPressApp(rumps.App):
                         self.stop_caffeinate()
                         self.start_caffeinate()
                         self.update_menu()
-                    elif not self._onionheaven_registration_started:
-                        # First time — full registration with keys
-                        self._onionheaven_registration_started = True
-                        onionheaven.start_registration_thread(self)
-                    else:
-                        # Already registered, coming back online (wake/reconnect)
-                        onionheaven.start_online_notification_thread(self)
+
+                # OnionHeaven: register or notify online (retries until success)
+                if (self.is_ready and not self.is_onionheaven
+                        and not self._onionheaven_registration_succeeded
+                        and not self._onionheaven_registration_in_flight):
+                    # First time or previous registration failed — full registration with keys
+                    self._onionheaven_registration_in_flight = True
+                    onionheaven.start_registration_thread(self)
+                elif (self.is_ready and not self.is_onionheaven
+                        and self._onionheaven_registration_succeeded
+                        and ready_now and not previous_ready):
+                    # Already registered, coming back online (wake/reconnect)
+                    onionheaven.start_online_notification_thread(self)
 
                 # OnionHeaven: reclaim address after takeover.
                 # If internally ready (checks 1-4) but self-check fails (check 5),
@@ -1905,9 +1927,13 @@ class OnionPressApp(rumps.App):
                 # the self-check, which can't pass until the takeover is released.
                 # This also handles fresh launches where a previous session's address
                 # was taken over while we were offline.
+                # Keep retrying every 60s until we get a positive response.
                 if (self._tor_internally_ready and not self.is_ready
-                        and not self._onionheaven_reclaim_sent):
-                    self._onionheaven_reclaim_sent = True
+                        and not self._onionheaven_reclaim_succeeded
+                        and not self._onionheaven_reclaim_in_flight
+                        and (time.time() - self._onionheaven_reclaim_last_attempt) > 60):
+                    self._onionheaven_reclaim_in_flight = True
+                    self._onionheaven_reclaim_last_attempt = time.time()
                     self.log("Internally ready but self-check failing — sending /online to reclaim address")
                     onionheaven.start_online_notification_thread(self)
 
@@ -1965,8 +1991,11 @@ class OnionPressApp(rumps.App):
                 self.onionheaven_messages = []
                 self._onionheaven_alert_shown = False
                 self._onionheaven_checked = False
-                self._onionheaven_registration_started = False
-                self._onionheaven_reclaim_sent = False
+                self._onionheaven_registration_succeeded = False
+                self._onionheaven_registration_in_flight = False
+                self._onionheaven_reclaim_succeeded = False
+                self._onionheaven_reclaim_in_flight = False
+                self._onionheaven_reclaim_last_attempt = 0
                 self._tor_internally_ready = False
 
                 # Stop web log capture if running
@@ -2239,7 +2268,7 @@ class OnionPressApp(rumps.App):
         self.log("System going to sleep")
         if not self.is_onionheaven:
             # Notify OnionHeaven before sleeping so it can take over quickly
-            if self.is_ready and self._onionheaven_registration_started:
+            if self.is_ready and self._onionheaven_registration_succeeded:
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
@@ -2257,7 +2286,7 @@ class OnionPressApp(rumps.App):
         self.log("="*60)
 
         # Notify OnionHeaven before stopping services
-        if self._onionheaven_registration_started and not self.is_onionheaven:
+        if self._onionheaven_registration_succeeded and not self.is_onionheaven:
             try:
                 onionheaven.notify_onionheaven_offline(self)
             except Exception:
@@ -2365,28 +2394,23 @@ class OnionPressApp(rumps.App):
                 "No usable guards",
                 "Too many preemptive onion service circuits failed",
                 "Rejected 60/60 as down",
+                "Could not connect rendezvous circuit",
             ]
-            # Signs of health — Arti is working, just waiting
+            # Signs of health — Arti is working, just waiting for propagation.
+            # "reuploading descriptor" is NOT included because it can coexist
+            # with a circuit failure spiral — Arti can still upload descriptors
+            # even when it can't build rendezvous circuits.
             healthy_patterns = [
                 "Sufficiently bootstrapped",
-                "reuploading descriptor",
             ]
             has_sick = any(p in logs for p in sick_patterns)
             has_healthy = any(p in logs for p in healthy_patterns)
-            if has_sick and not has_healthy:
+            if has_sick:
+                # Any sick pattern means trouble — restart will help
                 self.log("Tor health check: unhealthy (circuit/guard failures)")
                 return True
-            if has_healthy and not has_sick:
+            if has_healthy:
                 self.log("Tor health check: healthy, waiting for propagation")
-                return False
-            if has_sick and has_healthy:
-                # Mixed signals — check which came last (later in log = more recent)
-                last_sick = max(logs.rfind(p) for p in sick_patterns if p in logs)
-                last_healthy = max(logs.rfind(p) for p in healthy_patterns if p in logs)
-                if last_sick > last_healthy:
-                    self.log("Tor health check: degraded after healthy start")
-                    return True
-                self.log("Tor health check: recovered, waiting for propagation")
                 return False
             # No recognizable patterns — assume unhealthy if we've been waiting
             self.log("Tor health check: no clear signals, restarting as precaution")
@@ -3116,7 +3140,7 @@ class OnionPressApp(rumps.App):
 
         def stop():
             # Notify OnionHeaven before stopping services
-            if self._onionheaven_registration_started and not self.is_onionheaven:
+            if self._onionheaven_registration_succeeded and not self.is_onionheaven:
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
@@ -3298,7 +3322,7 @@ class OnionPressApp(rumps.App):
         "LAUNCH_ON_LOGIN": (
             "Launch on Login\n\n"
             "Automatically start OnionPress when you log in to macOS.\n"
-            "You can also manage this in System Settings \u2192 General \u2192 Login Items."
+            "Installs a LaunchAgent that runs OnionPress at login."
         ),
         "UPDATE_ON_LAUNCH": (
             "Update Docker Images on Launch\n\n"
@@ -3721,6 +3745,13 @@ class OnionPressApp(rumps.App):
         if "PREVENT_SLEEP" in changes:
             self.stop_caffeinate()
             self.start_caffeinate()
+
+        # Apply login item change immediately
+        if "LAUNCH_ON_LOGIN" in changes:
+            if new_values["LAUNCH_ON_LOGIN"] == "yes":
+                self.add_login_item()
+            else:
+                self.remove_login_item()
 
         self.log(f"Settings updated: {', '.join(changes)}")
         saved = AppKit.NSAlert.alloc().init()
@@ -4357,6 +4388,9 @@ License: AGPL v3"""
                 subprocess.run(["pkill", "-f", f"{self.colima_home}"], capture_output=True, timeout=10)
                 # Note: Docker volumes lived inside the Colima VM and are deleted with it
 
+                # Remove login item LaunchAgent
+                self.remove_login_item()
+
                 # Step 3: Remove data directory (but keep it until after we show dialog)
                 self.log("Uninstall: Preparing to remove data directory...")
                 import shutil
@@ -4392,7 +4426,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.23 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.24 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
@@ -4422,7 +4456,7 @@ License: AGPL v3"""
             self.stop_caffeinate()
 
             # Notify OnionHeaven before stopping services (containers needed for curl)
-            if self._onionheaven_registration_started and not self.is_onionheaven:
+            if self._onionheaven_registration_succeeded and not self.is_onionheaven:
                 try:
                     onionheaven.notify_onionheaven_offline(self)
                 except Exception:
