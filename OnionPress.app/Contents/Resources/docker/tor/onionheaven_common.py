@@ -28,7 +28,11 @@ TOR_MANAGER = "/onionheaven-tor-manager.sh"
 
 # How long to wait after the last successful healthcheck before considering
 # a node stale enough for Arti takeover. Override via env for testing.
-PROPAGATION_DELAY = int(os.environ.get("TOR_PROPAGATION_DELAY", "180"))
+PROPAGATION_DELAY = int(os.environ.get("TOR_PROPAGATION_DELAY", "600"))
+
+# How many consecutive failed polls before considering takeover.
+# Combined with PROPAGATION_DELAY — BOTH must be satisfied.
+CONSECUTIVE_FAILS_THRESHOLD = int(os.environ.get("ONIONHEAVEN_CONSECUTIVE_FAILS", "3"))
 
 # Minimum interval between SIGHUPs to Arti (seconds)
 SIGHUP_MIN_INTERVAL = int(os.environ.get("ONIONHEAVEN_SIGHUP_INTERVAL", "5"))
@@ -152,6 +156,7 @@ def db_ensure_schema(conn):
             takeover_container  TEXT,
             takeover_pending    TEXT,
             release_pending     TEXT,
+            consecutive_fails   INTEGER DEFAULT 0,
             PRIMARY KEY (content_address, healthcheck_address)
         )""")
         conn.commit()
@@ -168,9 +173,13 @@ def db_ensure_schema(conn):
             ("takeover_container", None),
             ("takeover_pending", None),
             ("release_pending", None),
+            ("consecutive_fails", None),
         ]:
             if col not in cols:
-                conn.execute(f"ALTER TABLE registry ADD COLUMN {col} TEXT")
+                if col == "consecutive_fails":
+                    conn.execute("ALTER TABLE registry ADD COLUMN consecutive_fails INTEGER DEFAULT 0")
+                else:
+                    conn.execute(f"ALTER TABLE registry ADD COLUMN {col} TEXT")
         conn.commit()
 
     # Farm coordination tables (always created, idempotent)

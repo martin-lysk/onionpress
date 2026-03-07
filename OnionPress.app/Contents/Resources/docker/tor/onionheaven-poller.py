@@ -33,7 +33,7 @@ from onionheaven_common import (
     db_connect, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_arti,
     get_poll_socks_addrs, is_farm_mode, check_farm_scaling,
-    PROPAGATION_DELAY, TOR_MANAGER,
+    PROPAGATION_DELAY, CONSECUTIVE_FAILS_THRESHOLD, TOR_MANAGER,
 )
 
 # SOCKS proxy — use tor-client's Arti so healthchecks don't compete
@@ -265,9 +265,9 @@ def main():
                     )
 
                     if ping_ok:
-                        # Record last_healthy
+                        # Record last_healthy, reset consecutive_fails
                         conn.execute(
-                            "UPDATE registry SET last_healthy = ? "
+                            "UPDATE registry SET last_healthy = ?, consecutive_fails = 0 "
                             "WHERE content_address = ? AND healthcheck_address = ?",
                             (now, ca, ha)
                         )
@@ -301,15 +301,22 @@ def main():
 
                         online_count += 1
                     else:
-                        # Ping failed — check if we should take over
+                        # Ping failed — increment consecutive_fails, check if we should take over
+                        conn.execute(
+                            "UPDATE registry SET consecutive_fails = COALESCE(consecutive_fails, 0) + 1 "
+                            "WHERE content_address = ? AND healthcheck_address = ?",
+                            (ca, ha)
+                        )
                         conn.commit()
                         current = conn.execute(
-                            "SELECT status, last_healthy FROM registry "
+                            "SELECT status, last_healthy, consecutive_fails FROM registry "
                             "WHERE content_address = ? AND healthcheck_address = ?",
                             (ca, ha)
                         ).fetchone()
 
                         if current and current["status"] == "online":
+                            fails = current["consecutive_fails"] or 0
+
                             # Check if last_healthy is stale
                             last_healthy_stale = True
                             if current["last_healthy"]:
@@ -323,8 +330,14 @@ def main():
                                 except (ValueError, TypeError):
                                     last_healthy_stale = True
 
-                            if last_healthy_stale:
+                            # Both conditions must be met: enough consecutive
+                            # failures AND last_healthy older than propagation delay
+                            if fails < CONSECUTIVE_FAILS_THRESHOLD:
+                                log(f"Ping failed for {ha} ({fails}/{CONSECUTIVE_FAILS_THRESHOLD} consecutive fails) — not taking over yet")
+                            elif last_healthy_stale:
                                 takeover_function(conn, ca, ha, force=False)
+                            else:
+                                log(f"Ping failed for {ha} ({fails} consecutive fails) but last_healthy not yet stale")
 
                 conn.commit()
 
