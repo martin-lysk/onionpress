@@ -77,6 +77,28 @@ def check_healthcheck(healthcheck_address, socks_addr=None):
         return False
 
 
+def check_content_alive(content_address, socks_addr=None):
+    """Check if the content .onion address serves real content (not a 302 redirect).
+
+    Used as a final guard before takeover — if the content address responds
+    with 200/301, the site is alive even if the healthcheck address is flaky.
+    """
+    proxy = socks_addr or SOCKS_ADDR
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "--socks5-hostname", proxy,
+             "--max-time", os.environ.get("ONIONHEAVEN_CURL_TIMEOUT", "8"),
+             f"http://{content_address}/"],
+            capture_output=True, text=True, timeout=15
+        )
+        http_code = result.stdout.strip()
+        # 200/301 = real site is serving. 302 = OnionHeaven redirect (already taken over).
+        return result.returncode == 0 and http_code in ("200", "301")
+    except Exception:
+        return False
+
+
 def ping(healthcheck_address, socks_addr=None):
     """Double-ping: try healthcheck, retry once after 5s on failure.
 
@@ -334,10 +356,20 @@ def main():
                             # failures AND last_healthy older than propagation delay
                             if fails < CONSECUTIVE_FAILS_THRESHOLD:
                                 log(f"Ping failed for {ha} ({fails}/{CONSECUTIVE_FAILS_THRESHOLD} consecutive fails) — not taking over yet")
-                            elif last_healthy_stale:
-                                takeover_function(conn, ca, ha, force=False)
-                            else:
+                            elif not last_healthy_stale:
                                 log(f"Ping failed for {ha} ({fails} consecutive fails) but last_healthy not yet stale")
+                            else:
+                                # Final guard: check if content address still serves real content
+                                if check_content_alive(ca):
+                                    log(f"Healthcheck failed for {ha} but content address {ca} is alive — skipping takeover")
+                                    conn.execute(
+                                        "UPDATE registry SET last_healthy = ?, consecutive_fails = 0 "
+                                        "WHERE content_address = ? AND healthcheck_address = ?",
+                                        (now, ca, ha)
+                                    )
+                                    conn.commit()
+                                else:
+                                    takeover_function(conn, ca, ha, force=False)
 
                 conn.commit()
 
