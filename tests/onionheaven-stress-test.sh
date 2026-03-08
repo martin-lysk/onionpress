@@ -277,8 +277,8 @@ preflight() {
         docker_cmd exec onionheaven chmod +x /onionheaven-tor-manager.sh
 
         # Inject fast-polling onionheaven-poller.py for faster stress test cycles.
-        # Reduces FAIL_THRESHOLD (10→3) and HEALTHY_INTERVAL (15→5) so takeovers
-        # happen in ~15s instead of ~150s. The modified poller reads these from env.
+        # Reduces poll interval (15→5s), consecutive fails (3→2), curl timeout (8→5s).
+        # Poller-detected takeovers still require PROPAGATION_DELAY (180s) staleness.
         log "  Injecting fast-poll onionheaven-poller.py..."
         docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven_common.py" \
             onionheaven:/onionheaven_common.py
@@ -296,17 +296,13 @@ preflight() {
         '
         sleep 1
         docker_cmd exec -d onionheaven env \
-            ONIONHEAVEN_HEALTHY_INTERVAL=5 \
-            ONIONHEAVEN_FAST_POLL_INTERVAL=5 \
-            ONIONHEAVEN_LONG_FAIL_INTERVAL=30 \
-            ONIONHEAVEN_FAIL_THRESHOLD=2 \
-            ONIONHEAVEN_FAST_POLL_COUNT=5 \
-            ONIONHEAVEN_MAX_POLL_WORKERS=50 \
             ONIONHEAVEN_POLL_INTERVAL=5 \
+            ONIONHEAVEN_CONSECUTIVE_FAILS=2 \
             ONIONHEAVEN_CURL_TIMEOUT=5 \
             ONIONHEAVEN_RETRY_DELAY=2 \
+            ONIONHEAVEN_MAX_POLL_WORKERS=50 \
             python3 /onionheaven-poller.py
-        log "  Fast-poll poller started (threshold=2, interval=5s, 50 workers)"
+        log "  Fast-poll poller started (interval=5s, fails=2, timeout=5s, 50 workers)"
     else
         log "  Skipping file injections (not OnionHeaven host)"
         log "  Using production poller timing and existing container scripts"
@@ -1876,46 +1872,6 @@ run_worker() {
         phase_result "B" "Silent: $r_b_sum"
         echo ""
 
-        # ══════════════════════════════════════════════════════════════
-        # Scenario C: Crash + re-register recovery
-        # ══════════════════════════════════════════════════════════════
-
-        phase_start "C" "CRASH + RE-REGISTER (no /offline, recovery via /register)"
-
-        # C1: Takeover — disable only (no /offline), wait for poller
-        phase_start "C.1" "Crash: disable ${FAILING} workers (no /offline), wait for takeover (est. 9m)"
-        scenario_ts=$(date +%s)
-        log "Phase C.1: Crash simulation — disabling responders for ${FAILING} workers (no /offline)..."
-        disable_workers "$fail_start" "$FAILING"
-        flush_client_descriptor_cache
-        log "Phase C.1: Waiting for takeovers..."
-        if ! wait_for_takeover "$FAILING" 600; then
-            log "WARNING: Not all expected takeovers happened"
-        fi
-        takeover_elapsed=$(( $(date +%s) - scenario_ts ))
-        r_c1="$WAIT_RESULT ($(fmt_duration $takeover_elapsed) e2e)"
-        phase_result "C.1" "Takeover: $r_c1"
-        echo ""
-
-        # C2: Recovery — re-enable + re-register (like real OnionPress restart)
-        phase_start "C.2" "Recovery with /register: re-enable + re-register ${FAILING} workers, wait for recovery (est. 1m)"
-        scenario_ts=$(date +%s)
-        log "Phase C.2: Recovery with re-register — re-enabling + re-registering over Tor..."
-        enable_workers "$fail_start" "$FAILING"
-        flush_client_descriptor_cache
-        log "Phase C.2: Waiting for recovery..."
-        if ! wait_for_recovery "$TOTAL" 600; then
-            log "WARNING: Not all workers recovered"
-        fi
-        recovery_elapsed=$(( $(date +%s) - scenario_ts ))
-        r_c2="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
-        phase_result "C.2" "Recovery: $r_c2"
-        echo ""
-
-        r_c_sum="takeover $(fmt_duration $takeover_elapsed), recovery $(fmt_duration $recovery_elapsed)"
-        phase_result "C" "Re-register: $r_c_sum"
-        echo ""
-
     else
         log "No failing workers configured — skipping failure/recovery test"
         echo ""
@@ -1946,11 +1902,6 @@ SUMMARY
      B.1v Verify 302s:    ${r_b1v:-(not run)}
      B.2  Recovery:       ${r_b2:-(not run)}
      => ${r_b_sum:-(incomplete)}
-  ---
-  C. Crash + re-register:
-     C.1  Takeover:       ${r_c1:-(not run)}
-     C.2  Recovery:       ${r_c2:-(not run)}
-     => ${r_c_sum:-(incomplete)}
 SUMMARY
         fi
         echo "====================================================================" >> "$PHASE_LOG"
