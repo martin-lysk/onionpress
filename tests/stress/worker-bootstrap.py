@@ -82,7 +82,7 @@ def parse_openssh_pem(path):
     return pubkey, privkey
 
 
-def register_with_onionheaven(content_addr, hc_addr, secret_b64, public_b64, pem_b64):
+def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64):
     """Register with OnionHeaven over Tor (via this container's SOCKS proxy).
 
     Uses exponential backoff: retries up to 6 times with delays of
@@ -90,13 +90,16 @@ def register_with_onionheaven(content_addr, hc_addr, secret_b64, public_b64, pem
     per worker, but this trades speed for reliability when Tor circuits
     are flaky.
     """
+    from onion_auth import sign_payload, make_timestamp
+    timestamp = make_timestamp()
+    signature = sign_payload(privkey, pubkey, "/register", content_addr, hc_addr, timestamp)
     payload = json.dumps({
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
-        "secret_key": secret_b64,
-        "public_key": public_b64,
         "arti_key_pem": pem_b64,
         "version": "stress-test",
+        "timestamp": timestamp,
+        "signature": signature,
     })
 
     max_attempts = 6
@@ -226,13 +229,11 @@ def main():
         with open(pem_path, "rb") as f:
             pem_data = f.read()
 
-        secret_b64 = base64.b64encode(privkey).decode()
-        public_b64 = base64.b64encode(pubkey).decode()
         pem_b64 = base64.b64encode(pem_data).decode()
 
         # Self-register with OnionHeaven over Tor (retries with backoff inside)
         print(f"[worker {i}] Registering with OnionHeaven over Tor...", flush=True)
-        result = register_with_onionheaven(content_addr, hc_addr, secret_b64, public_b64, pem_b64)
+        result = register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64)
         ok = False
         try:
             resp = json.loads(result)
@@ -256,6 +257,8 @@ def main():
             "content_port": BASE_PORT + i * 2,
             "hc_port": BASE_PORT + i * 2 + 1,
             "registered": ok,
+            "privkey_b64": base64.b64encode(privkey).decode(),
+            "pubkey_b64": base64.b64encode(pubkey).decode(),
         })
 
     # Write info for stress test script to read

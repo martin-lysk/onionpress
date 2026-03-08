@@ -392,6 +392,7 @@ EOF
     docker_cmd cp "$arti_conf" "${ctr_name}:/etc/arti/arti.toml"
     docker_cmd cp "${SCRIPT_DIR}/stress/worker-server.py" "${ctr_name}:/worker-server.py"
     docker_cmd cp "${SCRIPT_DIR}/stress/worker-bootstrap.py" "${ctr_name}:/worker-bootstrap.py"
+    docker_cmd cp "${SCRIPT_DIR}/../src/onion_auth.py" "${ctr_name}:/onion_auth.py"
 
     # Generate startup script
     local startup="${OUTPUT_DIR}/${ctr_name}-start.sh"
@@ -1004,6 +1005,7 @@ if not w or not w.get('content_address'):
 time.sleep(${local_idx} * 1)
 # Re-read PEM from keystore
 import base64
+from onion_auth import sign_payload, make_timestamp
 nick = 'w${ctr_idx}_${local_idx}_content'
 pem_path = f'/var/lib/arti/state/keystore/hss/{nick}/ks_hs_id.ed25519_expanded_private'
 try:
@@ -1011,36 +1013,17 @@ try:
         pem_b64 = base64.b64encode(f.read()).decode()
 except:
     pem_b64 = ''
-# Parse raw keys from worker-info (bootstrap already extracted them)
-import struct
-with open(pem_path, 'rb') as f:
-    pem_data = f.read()
-lines = pem_data.decode().strip().splitlines()
-b64 = ''.join(l for l in lines if not l.startswith('-----'))
-blob = base64.b64decode(b64)
-pos = 15
-def rs(d, o):
-    ln = struct.unpack_from('!I', d, o)[0]
-    return d[o+4:o+4+ln], o+4+ln
-_, pos = rs(blob, pos)
-_, pos = rs(blob, pos)
-_, pos = rs(blob, pos)
-pos += 4
-pub_blob, pos = rs(blob, pos)
-_, pp = rs(pub_blob, 0)
-pubkey, _ = rs(pub_blob, pp)
-priv_blob, pos = rs(blob, pos)
-pp = 8
-_, pp = rs(priv_blob, pp)
-_, pp = rs(priv_blob, pp)
-privkey, _ = rs(priv_blob, pp)
+privkey = base64.b64decode(w.get('privkey_b64', ''))
+pubkey = base64.b64decode(w.get('pubkey_b64', ''))
+timestamp = make_timestamp()
+signature = sign_payload(privkey, pubkey, '/register', w['content_address'], w['healthcheck_address'], timestamp)
 payload = json.dumps({
     'content_address': w['content_address'],
     'healthcheck_address': w['healthcheck_address'],
-    'secret_key': base64.b64encode(privkey).decode(),
-    'public_key': base64.b64encode(pubkey).decode(),
     'arti_key_pem': pem_b64,
     'version': 'stress-test',
+    'timestamp': timestamp,
+    'signature': signature,
 })
 subprocess.run([
     'curl', '-s', '-X', 'POST',
@@ -1285,7 +1268,9 @@ notify_offline() {
     # docker exec to avoid 300+ subprocess calls (each ~1s under qemu).
     local payloads
     payloads=$(python3 -c "
-import json, glob, sys
+import json, glob, sys, base64
+sys.path.insert(0, '${SCRIPT_DIR}/../src')
+from onion_auth import sign_payload, make_timestamp
 payloads = []
 for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
     try:
@@ -1295,8 +1280,14 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
             if idx >= ${start} and idx < $((start + count)):
                 ca = w.get('content_address', '')
                 ha = w.get('healthcheck_address', '')
-                if ca and ha:
-                    payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha}))
+                pk = w.get('privkey_b64', '')
+                pub = w.get('pubkey_b64', '')
+                if ca and ha and pk and pub:
+                    privkey = base64.b64decode(pk)
+                    pubkey = base64.b64decode(pub)
+                    ts = make_timestamp()
+                    sig = sign_payload(privkey, pubkey, '/offline', ca, ha, ts)
+                    payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
     except: pass
 for p in payloads:
     print(p)
@@ -1334,7 +1325,9 @@ notify_online() {
 
     local payloads
     payloads=$(python3 -c "
-import json, glob, sys
+import json, glob, sys, base64
+sys.path.insert(0, '${SCRIPT_DIR}/../src')
+from onion_auth import sign_payload, make_timestamp
 payloads = []
 for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
     try:
@@ -1344,8 +1337,14 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
             if idx >= ${start} and idx < $((start + count)):
                 ca = w.get('content_address', '')
                 ha = w.get('healthcheck_address', '')
-                if ca and ha:
-                    payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha}))
+                pk = w.get('privkey_b64', '')
+                pub = w.get('pubkey_b64', '')
+                if ca and ha and pk and pub:
+                    privkey = base64.b64decode(pk)
+                    pubkey = base64.b64decode(pub)
+                    ts = make_timestamp()
+                    sig = sign_payload(privkey, pubkey, '/online', ca, ha, ts)
+                    payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
     except: pass
 for p in payloads:
     print(p)
@@ -1534,49 +1533,44 @@ cleanup_stress_test() {
     done || true
     log "  Removed worker containers"
 
-    # Unregister stress-test workers from OnionHeaven
-    # Get addresses from local worker-info files (works on any machine)
-    local stress_addrs=""
-    for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
-        local info_file="${OUTPUT_DIR}/worker-${idx}-info.json"
-        local addrs
-        addrs=$(python3 -c "
-import json, sys
-try:
-    with open('${info_file}') as f:
-        workers = json.load(f)
-    for w in workers:
-        if w.get('content_address'):
-            print(w['content_address'])
-except: pass
+    # Unregister stress-test workers from OnionHeaven (signed payloads)
+    local payloads
+    payloads=$(python3 -c "
+import json, glob, sys, base64
+sys.path.insert(0, '${SCRIPT_DIR}/../src')
+from onion_auth import sign_payload, make_timestamp
+for idx in range(${NUM_CONTAINERS}):
+    f = '${OUTPUT_DIR}/worker-' + str(idx) + '-info.json'
+    try:
+        workers = json.load(open(f))
+        for w in workers:
+            ca = w.get('content_address', '')
+            ha = w.get('healthcheck_address', '')
+            pk = w.get('privkey_b64', '')
+            pub = w.get('pubkey_b64', '')
+            if ca and pk and pub:
+                privkey = base64.b64decode(pk)
+                pubkey = base64.b64decode(pub)
+                ts = make_timestamp()
+                sig = sign_payload(privkey, pubkey, '/unregister', ca, ha, ts)
+                print(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
+    except: pass
 " 2>/dev/null) || true
-        [ -n "$addrs" ] && stress_addrs="${stress_addrs}${addrs}
-"
-    done
 
     local count=0
-    local released_arti=0
-    if [ -n "$stress_addrs" ]; then
-        for addr in $stress_addrs; do
-            addr=$(echo "$addr" | tr -d '\r\n ')
-            [ -z "$addr" ] && continue
-
-            # POST /unregister — always over Tor
+    if [ -n "$payloads" ]; then
+        while IFS= read -r payload; do
+            [ -z "$payload" ] && continue
             docker_cmd exec onionpress-tor-client \
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
                 -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
                 -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null || true
-
+                -d "$payload" 2>/dev/null || true
             count=$((count + 1))
-        done
+        done <<< "$payloads"
     fi
 
     log "  Unregistered ${count} entries"
-
-    if [ "$released_arti" -gt 0 ]; then
-        log "  Released ${released_arti} Arti takeover entries"
-    fi
 
     log "Cleanup complete"
 }
@@ -1981,27 +1975,31 @@ run_cleanup() {
     # Also remove old-style container
     docker_cmd rm -f stress-worker-tor 2>/dev/null || true
 
-    # Get stress-test addresses from local worker-info files
-    local stress_addrs=""
-    for info_file in "${OUTPUT_DIR}"/worker-*-info.json; do
-        [ -f "$info_file" ] || continue
-        local addrs
-        addrs=$(python3 -c "
-import json, sys
-try:
-    with open('${info_file}') as f:
-        workers = json.load(f)
-    for w in workers:
-        if w.get('content_address'):
-            print(w['content_address'])
-except: pass
+    # Build signed unregister payloads from local worker-info files
+    local payloads
+    payloads=$(python3 -c "
+import json, glob, sys, base64
+sys.path.insert(0, '${SCRIPT_DIR}/../src')
+from onion_auth import sign_payload, make_timestamp
+for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
+    try:
+        workers = json.load(open(f))
+        for w in workers:
+            ca = w.get('content_address', '')
+            ha = w.get('healthcheck_address', '')
+            pk = w.get('privkey_b64', '')
+            pub = w.get('pubkey_b64', '')
+            if ca and pk and pub:
+                privkey = base64.b64decode(pk)
+                pubkey = base64.b64decode(pub)
+                ts = make_timestamp()
+                sig = sign_payload(privkey, pubkey, '/unregister', ca, ha, ts)
+                print(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
+    except: pass
 " 2>/dev/null) || true
-        [ -n "$addrs" ] && stress_addrs="${stress_addrs}${addrs}
-"
-    done
 
     local count
-    count=$(echo "$stress_addrs" | grep -c '\.onion' 2>/dev/null || true)
+    count=$(echo "$payloads" | grep -c 'content_address' 2>/dev/null || true)
     [ -z "$count" ] && count=0
     log "Found ${count} stress-test entries to clean up"
 
@@ -2016,22 +2014,20 @@ except: pass
     local pids=""
     local job_count=0
 
-    for addr in $stress_addrs; do
-        addr=$(echo "$addr" | tr -d '\r\n ')
-        [ -z "$addr" ] && continue
+    while IFS= read -r payload; do
+        [ -z "$payload" ] && continue
 
         (
-            # Always unregister over Tor
             docker_cmd exec onionpress-tor-client \
                 curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
                 -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
                 -H "Content-Type: application/json" \
-                -d "{\"content_address\": \"${addr}\"}" 2>/dev/null || true
-            echo "done" > "${tmpdir}/${addr}"
+                -d "$payload" 2>/dev/null || true
+            echo "done" > "${tmpdir}/job_${job_count}"
         ) &
         pids="$pids $!"
         job_count=$((job_count + 1))
-    done
+    done <<< "$payloads"
 
     # Wait for all unregister jobs
     local failed=0
