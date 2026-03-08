@@ -34,7 +34,7 @@ from onionheaven_common import (
 )
 
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "unknown")
-MAX_SERVICES = int(os.environ.get("MAX_TAKEOVER_SERVICES", "50"))
+MAX_SERVICES = int(os.environ.get("MAX_TAKEOVER_SERVICES", "10"))
 LOOP_INTERVAL = 2  # seconds between DB checks
 HEARTBEAT_INTERVAL = 30  # seconds between heartbeats
 
