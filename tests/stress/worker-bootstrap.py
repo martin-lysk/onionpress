@@ -92,7 +92,7 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64):
     """
     from onion_auth import sign_payload, make_timestamp
     timestamp = make_timestamp()
-    signature = sign_payload(privkey, pubkey, "/register", content_addr, hc_addr, timestamp)
+    signature = sign_payload(privkey, pubkey, "register", content_addr, hc_addr, timestamp)
     payload = json.dumps({
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
