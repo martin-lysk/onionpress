@@ -520,7 +520,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         # Stress test entries (version='stress-test') get hard-deleted to avoid
         # accumulating junk rows across repeated test runs.
-        is_stress = entry["version"] == "stress-test"
+        is_stress = (entry["version"] or "").startswith("stress-test")
 
         if is_stress:
             if healthcheck_address:

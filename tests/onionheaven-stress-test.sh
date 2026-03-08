@@ -43,7 +43,7 @@ OUTPUT_DIR="./onionheaven-stress-results"
 CLEANUP=false
 PER_CTR=50        # workers per container
 BATCH_SIZE=0      # 0 = start all containers at once
-STRESS_VERSION="stress-test"
+STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
 BASE_PORT=9100    # port range start inside each container
 IS_ONIONHEAVEN_HOST=false  # auto-detected in preflight
 
@@ -420,7 +420,7 @@ su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
 ARTI_PID=\$!
 
 # Wait for Arti keys, then self-register with OnionHeaven over Tor
-python3 /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} &
+STRESS_VERSION="${STRESS_VERSION}" python3 /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} &
 
 wait \$ARTI_PID
 STARTEOF
@@ -1021,7 +1021,7 @@ payload = json.dumps({
     'content_address': w['content_address'],
     'healthcheck_address': w['healthcheck_address'],
     'arti_key_pem': pem_b64,
-    'version': 'stress-test',
+    'version': '${STRESS_VERSION}',
     'timestamp': timestamp,
     'signature': signature,
 })

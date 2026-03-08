@@ -97,7 +97,7 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64):
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
         "arti_key_pem": pem_b64,
-        "version": "stress-test",
+        "version": os.environ.get("STRESS_VERSION", "stress-test"),
         "timestamp": timestamp,
         "signature": signature,
     })
