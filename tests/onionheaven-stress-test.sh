@@ -1115,14 +1115,23 @@ enable_workers_silent() {
     log "Re-enabled ${count} workers silently (Arti restarted, no notifications sent)"
 }
 
-# Restart onionpress-tor-client to flush its HSDir descriptor cache.
-# Without this, the client keeps connecting using the old (takeover) descriptor
-# even after the takeover is released, making recovery appear much slower than
-# it really is.
+# Restart Tor/Arti SOCKS proxies to flush HSDir descriptor caches.
+# Without this, clients keep connecting using old (stale) descriptors
+# even after takeover/release, making transitions appear much slower.
+# Flushes BOTH the test client AND the poller's poll containers.
 flush_client_descriptor_cache() {
-    log "Restarting onionpress-tor-client to flush descriptor cache..."
+    log "Flushing descriptor caches (tor-client + poll containers)..."
+
+    # Restart all poll containers so the poller gets fresh descriptors
+    for poll_ctr in $(docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep '^onionheaven-poll-' || true); do
+        docker_cmd restart "$poll_ctr" >/dev/null 2>&1 || true
+        log "  restarted $poll_ctr"
+    done
+
+    # Restart the test client
     docker_cmd restart onionpress-tor-client >/dev/null 2>&1 || true
-    # Wait for Arti SOCKS proxy to come back up
+
+    # Wait for tor-client SOCKS proxy to come back up
     local attempt
     for attempt in $(seq 1 30); do
         if docker_cmd exec onionpress-tor-client \
@@ -1256,7 +1265,7 @@ wait_for_recovery() {
 
 # ── Graceful offline/online notification ─────────────────────────────────────
 
-# POST /offline to OnionHeaven for a range of workers (instant fail_count=10).
+# POST /offline to OnionHeaven for a range of workers (triggers immediate takeover).
 # This simulates a real OnionPress instance calling /offline before sleeping/quitting.
 notify_offline() {
     local start="$1"
@@ -1298,24 +1307,50 @@ for p in payloads:
         return
     fi
 
-    # Always send over Tor (simulates real OnionPress behavior)
     local notified
-    notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
-        n=0
-        while IFS= read -r payload; do
-            curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
-                -H "Content-Type: application/json" \
-                -d "$payload" >/dev/null 2>&1 && n=$((n+1))
-        done
-        echo $n
-    ')
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        # Local: send directly over Docker network (fast, reliable — no Tor latency)
+        notified=$(echo "$payloads" | docker_cmd exec -i onionheaven sh -c '
+            n=0; tmpdir=$(mktemp -d); i=0
+            while IFS= read -r payload; do
+                i=$((i+1))
+                (curl -s --max-time 10 \
+                    -X POST "http://127.0.0.1:8083/offline" \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
+                # Limit to 10 concurrent to avoid overwhelming the server
+                [ $((i % 10)) -eq 0 ] && wait
+            done
+            wait
+            n=$(ls "$tmpdir"/ok.* 2>/dev/null | wc -l)
+            rm -rf "$tmpdir"
+            echo $n
+        ')
+    else
+        # Remote: send over Tor with parallelism (up to 10 concurrent)
+        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
+            n=0; tmpdir=$(mktemp -d); i=0
+            while IFS= read -r payload; do
+                i=$((i+1))
+                (curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                    -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
+                # Limit to 10 concurrent to avoid overwhelming Arti SOCKS
+                [ $((i % 10)) -eq 0 ] && wait
+            done
+            wait
+            n=$(ls "$tmpdir"/ok.* 2>/dev/null | wc -l)
+            rm -rf "$tmpdir"
+            echo $n
+        ')
+    fi
 
     log "Sent /offline for ${notified:-0} workers"
     log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
 
-# POST /online to OnionHeaven for a range of workers (instant reset to healthy).
+# POST /online to OnionHeaven for a range of workers (triggers immediate release).
 # This simulates a real OnionPress instance calling /online after waking up.
 notify_online() {
     local start="$1"
@@ -1355,18 +1390,44 @@ for p in payloads:
         return
     fi
 
-    # Always send over Tor (simulates real OnionPress behavior)
     local notified
-    notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
-        n=0
-        while IFS= read -r payload; do
-            curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
-                -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
-                -H "Content-Type: application/json" \
-                -d "$payload" >/dev/null 2>&1 && n=$((n+1))
-        done
-        echo $n
-    ')
+    if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        # Local: send directly over Docker network (fast, reliable — no Tor latency)
+        notified=$(echo "$payloads" | docker_cmd exec -i onionheaven sh -c '
+            n=0; tmpdir=$(mktemp -d); i=0
+            while IFS= read -r payload; do
+                i=$((i+1))
+                (curl -s --max-time 10 \
+                    -X POST "http://127.0.0.1:8083/online" \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
+                # Limit to 10 concurrent to avoid overwhelming the server
+                [ $((i % 10)) -eq 0 ] && wait
+            done
+            wait
+            n=$(ls "$tmpdir"/ok.* 2>/dev/null | wc -l)
+            rm -rf "$tmpdir"
+            echo $n
+        ')
+    else
+        # Remote: send over Tor with parallelism (up to 10 concurrent)
+        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
+            n=0; tmpdir=$(mktemp -d); i=0
+            while IFS= read -r payload; do
+                i=$((i+1))
+                (curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                    -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
+                    -H "Content-Type: application/json" \
+                    -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
+                # Limit to 10 concurrent to avoid overwhelming Arti SOCKS
+                [ $((i % 10)) -eq 0 ] && wait
+            done
+            wait
+            n=$(ls "$tmpdir"/ok.* 2>/dev/null | wc -l)
+            rm -rf "$tmpdir"
+            echo $n
+        ')
+    fi
 
     log "Sent /online for ${notified:-0} workers"
     log_json "\"event\":\"online_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
@@ -1726,7 +1787,7 @@ run_worker() {
         phase_start "A" "GRACEFUL OFFLINE/ONLINE (with /offline and /online notifications)"
 
         # A1: Takeover — /offline + disable, then wait for 302s
-        phase_start "A.1" "Graceful takeover: /offline + disable ${FAILING} workers, wait for takeover (est. 3m)"
+        phase_start "A.1" "Graceful takeover: /offline + disable ${FAILING} workers, wait for takeover (est. 1-2m)"
         scenario_ts=$(date +%s)
         log "Phase A.1: Graceful offline — sending /offline + disabling responders for ${FAILING} workers..."
         notify_offline "$fail_start" "$FAILING"
@@ -1749,7 +1810,7 @@ run_worker() {
         echo ""
 
         # A2: Recovery — re-enable + /online, then wait for 200s
-        phase_start "A.2" "Graceful recovery: re-enable + /online for ${FAILING} workers, wait for recovery (est. 1m)"
+        phase_start "A.2" "Graceful recovery: re-enable + /online for ${FAILING} workers, wait for recovery (est. 1-2m)"
         scenario_ts=$(date +%s)
         log "Phase A.2: Graceful recovery — re-enabling responders + sending /online..."
         enable_workers "$fail_start" "$FAILING"

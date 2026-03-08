@@ -390,10 +390,37 @@ _onionheaven_farm_monitor() {
     local next_poll=2
     local next_takeover=2
     local db="/var/lib/onionpress/onionheaven/registry.db"
+    local poll_flush_idx=0
 
     while true; do
         sleep 30
 
+        # ── Rolling poll container restart ────────────────────────────
+        # Arti caches HS descriptors in memory with no configurable TTL.
+        # When a taken-over site recovers silently (no /online), the poll
+        # containers' stale caches prevent the poller from detecting it.
+        #
+        # Fix: restart ONE poll container per monitor cycle (every 30s),
+        # rotating through them. The freshly restarted container has no
+        # cache and will fetch fresh descriptors, while others keep their
+        # circuits warm for normal polling. With 2 poll containers, each
+        # gets restarted every 60s — fast enough to detect recovery,
+        # cheap enough to not disrupt normal operation.
+        local poll_containers
+        poll_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep '^onionheaven-poll-' | sort)
+        if [ -n "$poll_containers" ]; then
+            local poll_count
+            poll_count=$(echo "$poll_containers" | wc -l | tr -d ' ')
+            local target_idx=$((poll_flush_idx % poll_count))
+            local target_ctr
+            target_ctr=$(echo "$poll_containers" | sed -n "$((target_idx + 1))p")
+            if [ -n "$target_ctr" ]; then
+                docker restart "$target_ctr" >> "$LOG_FILE" 2>&1 || true
+            fi
+            poll_flush_idx=$((poll_flush_idx + 1))
+        fi
+
+        # ── Scale-up requests ─────────────────────────────────────────
         # Check for unfulfilled scale-up requests
         local requests
         requests=$(docker exec onionheaven sqlite3 "$db" \
