@@ -28,7 +28,7 @@ TOR_MANAGER = "/onionheaven-tor-manager.sh"
 
 # How long to wait after the last successful healthcheck before considering
 # a node stale enough for Arti takeover. Override via env for testing.
-PROPAGATION_DELAY = int(os.environ.get("TOR_PROPAGATION_DELAY", "600"))
+PROPAGATION_DELAY = int(os.environ.get("TOR_PROPAGATION_DELAY", "180"))
 
 # How many consecutive failed polls before considering takeover.
 # Combined with PROPAGATION_DELAY — BOTH must be satisfied.
