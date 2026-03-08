@@ -356,7 +356,7 @@ def get_poll_socks_addrs(conn):
 # Entries per poll worker before requesting scale-up
 POLL_SCALE_THRESHOLD = int(os.environ.get("ONIONHEAVEN_POLL_SCALE_THRESHOLD", "50"))
 # Max services per takeover worker before requesting scale-up
-TAKEOVER_SCALE_THRESHOLD = int(os.environ.get("ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD", "50"))
+TAKEOVER_SCALE_THRESHOLD = int(os.environ.get("ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD", "8"))
 
 
 def check_farm_scaling(conn, active_entries):
