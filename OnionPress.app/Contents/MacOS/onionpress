@@ -353,6 +353,7 @@ _start_takeover_worker() {
         -e TZ="${TZ:-UTC}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
+        -e MAX_TAKEOVER_SERVICES=3 \
         -v "${vol}:/var/lib/arti/" \
         -v "onionpress-persistent-data:/var/lib/onionpress" \
         --restart unless-stopped \

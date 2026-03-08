@@ -276,10 +276,11 @@ preflight() {
             onionheaven:/onionheaven-tor-manager.sh
         docker_cmd exec onionheaven chmod +x /onionheaven-tor-manager.sh
 
-        # Inject fast-polling onionheaven-poller.py for faster stress test cycles.
-        # Reduces poll interval (15→5s), consecutive fails (3→2), curl timeout (8→5s).
-        # Poller-detected takeovers still require PROPAGATION_DELAY (180s) staleness.
-        log "  Injecting fast-poll onionheaven-poller.py..."
+        # Inject latest poller code with production settings.
+        # Uses defaults (interval=15s, consecutive_fails=3, curl_timeout=8s)
+        # to avoid false-positive takeovers at scale. Only override max_workers
+        # to handle larger worker counts.
+        log "  Injecting onionheaven-poller.py (production settings)..."
         docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven_common.py" \
             onionheaven:/onionheaven_common.py
         docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-poller.py" \
@@ -296,13 +297,9 @@ preflight() {
         '
         sleep 1
         docker_cmd exec -d onionheaven env \
-            ONIONHEAVEN_POLL_INTERVAL=5 \
-            ONIONHEAVEN_CONSECUTIVE_FAILS=2 \
-            ONIONHEAVEN_CURL_TIMEOUT=5 \
-            ONIONHEAVEN_RETRY_DELAY=2 \
-            ONIONHEAVEN_MAX_POLL_WORKERS=50 \
+            ONIONHEAVEN_MAX_POLL_WORKERS=10 \
             python3 /onionheaven-poller.py
-        log "  Fast-poll poller started (interval=5s, fails=2, timeout=5s, 50 workers)"
+        log "  Poller started (production: interval=15s, fails=3, timeout=8s, 50 workers)"
     else
         log "  Skipping file injections (not OnionHeaven host)"
         log "  Using production poller timing and existing container scripts"
@@ -1877,6 +1874,95 @@ run_worker() {
         echo ""
     fi
 
+    # ══════════════════════════════════════════════════════════════
+    # Scenario C: Takeover capacity — all workers taken over, sustained 302 checks
+    # ══════════════════════════════════════════════════════════════
+
+    phase_start "C" "TAKEOVER CAPACITY (all ${TOTAL} workers taken over, sustained 302 checks)"
+
+    # C.1: Take over all workers
+    phase_start "C.1" "Take over all ${TOTAL} workers via /offline (est. 5m)"
+    scenario_ts=$(date +%s)
+    log "Phase C.1: Sending /offline + disabling all ${TOTAL} workers..."
+    notify_offline 0 "$TOTAL"
+    disable_workers 0 "$TOTAL"
+    flush_client_descriptor_cache
+    log "Phase C.1: Waiting for all ${TOTAL} takeovers..."
+    if ! wait_for_takeover "$TOTAL" 900; then
+        log "WARNING: Not all workers were taken over"
+    fi
+    takeover_elapsed=$(( $(date +%s) - scenario_ts ))
+    r_c1="$WAIT_RESULT ($(fmt_duration $takeover_elapsed) e2e)"
+    phase_result "C.1" "Takeover all: $r_c1"
+    echo ""
+
+    # Report takeover container distribution
+    log "Phase C.1: Takeover container distribution:"
+    docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
+        "SELECT takeover_container, COUNT(*) FROM registry WHERE status='taken-over' GROUP BY 1 ORDER BY 1;" 2>/dev/null \
+        | while IFS='|' read -r ctr cnt; do
+            local toml_count
+            toml_count=$(docker_cmd exec "$ctr" grep -c '\[onion_services' /etc/arti/arti-onionheaven.toml 2>/dev/null || echo "?")
+            log "  ${ctr}: ${cnt} DB entries, ${toml_count} Arti services"
+        done
+
+    # C.2: Sustained 302 verification — check every 60s for 5 rounds
+    local c2_rounds=5
+    local c2_interval=60
+    local c2_passed_total=0
+    local c2_failed_total=0
+    local c2_checks=0
+    local c2_start_ts
+    c2_start_ts=$(date +%s)
+
+    phase_start "C.2" "Sustained 302 checks: ${c2_rounds} rounds, ${c2_interval}s apart, sample of 20 per round"
+
+    for round in $(seq 1 $c2_rounds); do
+        log "Phase C.2: Round ${round}/${c2_rounds}..."
+        verify_redirects "C.2-r${round}" 20
+
+        # Parse WAIT_RESULT for pass/fail counts
+        local round_passed round_failed
+        round_passed=$(echo "$WAIT_RESULT" | sed 's|/.*||')
+        round_failed=$(echo "$WAIT_RESULT" | grep -o '[0-9]* failed' | awk '{print $1}')
+        c2_passed_total=$((c2_passed_total + round_passed))
+        c2_failed_total=$((c2_failed_total + ${round_failed:-0}))
+        c2_checks=$((c2_checks + 1))
+
+        log "Phase C.2: Round ${round} result: ${WAIT_RESULT}"
+
+        if [ "$round" -lt "$c2_rounds" ]; then
+            log "Phase C.2: Waiting ${c2_interval}s before next round..."
+            sleep "$c2_interval"
+        fi
+    done
+
+    local c2_elapsed=$(( $(date +%s) - c2_start_ts ))
+    local c2_total_samples=$((c2_passed_total + c2_failed_total))
+    r_c2="${c2_passed_total}/${c2_total_samples} passed across ${c2_checks} rounds in $(fmt_duration $c2_elapsed)"
+    phase_result "C.2" "Sustained 302s: $r_c2"
+    echo ""
+
+    # C.3: Recovery — bring all workers back
+    phase_start "C.3" "Recovery: re-enable + /online all ${TOTAL} workers (est. 5m)"
+    scenario_ts=$(date +%s)
+    log "Phase C.3: Re-enabling all workers..."
+    enable_workers 0 "$TOTAL"
+    notify_online 0 "$TOTAL"
+    flush_client_descriptor_cache
+    log "Phase C.3: Waiting for all ${TOTAL} to recover..."
+    if ! wait_for_recovery "$TOTAL" 900; then
+        log "WARNING: Not all workers recovered"
+    fi
+    recovery_elapsed=$(( $(date +%s) - scenario_ts ))
+    r_c3="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
+    phase_result "C.3" "Recovery all: $r_c3"
+    echo ""
+
+    r_c_sum="takeover $(fmt_duration $takeover_elapsed), sustained ${c2_passed_total}/${c2_total_samples} 302s, recovery $(fmt_duration $recovery_elapsed)"
+    phase_result "C" "Capacity: $r_c_sum"
+    echo ""
+
     # Summary table in phase log
     if [ -n "$PHASE_LOG" ]; then
         local total_elapsed=$(( $(date +%s) - RUN_START_TS ))
@@ -1904,6 +1990,14 @@ SUMMARY
      => ${r_b_sum:-(incomplete)}
 SUMMARY
         fi
+        cat >> "$PHASE_LOG" << SUMMARY
+  ---
+  C. Takeover capacity (all ${TOTAL} workers):
+     C.1  Takeover all:   ${r_c1:-(not run)}
+     C.2  Sustained 302s: ${r_c2:-(not run)}
+     C.3  Recovery all:   ${r_c3:-(not run)}
+     => ${r_c_sum:-(incomplete)}
+SUMMARY
         echo "====================================================================" >> "$PHASE_LOG"
     fi
 
