@@ -1016,7 +1016,7 @@ except:
 privkey = base64.b64decode(w.get('privkey_b64', ''))
 pubkey = base64.b64decode(w.get('pubkey_b64', ''))
 timestamp = make_timestamp()
-signature = sign_payload(privkey, pubkey, '/register', w['content_address'], w['healthcheck_address'], timestamp)
+signature = sign_payload(privkey, pubkey, 'register', w['content_address'], w['healthcheck_address'], timestamp)
 payload = json.dumps({
     'content_address': w['content_address'],
     'healthcheck_address': w['healthcheck_address'],
@@ -1286,7 +1286,7 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
                     privkey = base64.b64decode(pk)
                     pubkey = base64.b64decode(pub)
                     ts = make_timestamp()
-                    sig = sign_payload(privkey, pubkey, '/offline', ca, ha, ts)
+                    sig = sign_payload(privkey, pubkey, 'offline', ca, ha, ts)
                     payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
     except: pass
 for p in payloads:
@@ -1343,7 +1343,7 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
                     privkey = base64.b64decode(pk)
                     pubkey = base64.b64decode(pub)
                     ts = make_timestamp()
-                    sig = sign_payload(privkey, pubkey, '/online', ca, ha, ts)
+                    sig = sign_payload(privkey, pubkey, 'online', ca, ha, ts)
                     payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
     except: pass
 for p in payloads:
@@ -1552,7 +1552,7 @@ for idx in range(${NUM_CONTAINERS}):
                 privkey = base64.b64decode(pk)
                 pubkey = base64.b64decode(pub)
                 ts = make_timestamp()
-                sig = sign_payload(privkey, pubkey, '/unregister', ca, ha, ts)
+                sig = sign_payload(privkey, pubkey, 'unregister', ca, ha, ts)
                 print(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
     except: pass
 " 2>/dev/null) || true
@@ -1993,7 +1993,7 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
                 privkey = base64.b64decode(pk)
                 pubkey = base64.b64decode(pub)
                 ts = make_timestamp()
-                sig = sign_payload(privkey, pubkey, '/unregister', ca, ha, ts)
+                sig = sign_payload(privkey, pubkey, 'unregister', ca, ha, ts)
                 print(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
     except: pass
 " 2>/dev/null) || true
