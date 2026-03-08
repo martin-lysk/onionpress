@@ -13,9 +13,11 @@ Usage:
 import base64
 import json
 import os
+import random
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 ONIONHEAVEN_ADDR = sys.argv[1]
@@ -265,8 +267,99 @@ def main():
     with open("/worker-info.json", "w") as f:
         json.dump(workers, f, indent=2)
 
-    registered = sum(1 for w in workers if w.get("registered"))
-    print(f"Bootstrap complete: {registered}/{len(workers)} registered", flush=True)
+    registered_workers = [w for w in workers if w.get("registered")]
+    print(f"Bootstrap complete: {len(registered_workers)}/{len(workers)} registered", flush=True)
+
+    # Start heartbeat loop — sends /online for each registered worker every 60s
+    if registered_workers:
+        heartbeat_loop(registered_workers)
+
+
+def send_heartbeat(worker):
+    """Send a single /online heartbeat for a worker."""
+    from onion_auth import sign_payload, make_timestamp
+
+    privkey = base64.b64decode(worker["privkey_b64"])
+    pubkey = base64.b64decode(worker["pubkey_b64"])
+    ca = worker["content_address"]
+    ha = worker["healthcheck_address"]
+
+    timestamp = make_timestamp()
+    signature = sign_payload(privkey, pubkey, "online", ca, ha, timestamp)
+    payload = json.dumps({
+        "content_address": ca,
+        "healthcheck_address": ha,
+        "timestamp": timestamp,
+        "signature": signature,
+        "wordpress_healthy": True,
+    })
+
+    try:
+        result = subprocess.run(
+            [
+                "curl", "-s", "-X", "POST",
+                "--socks5-hostname", "127.0.0.1:9050",
+                "-H", "Content-Type: application/json",
+                "-d", payload,
+                "--max-time", "30",
+                f"http://{ONIONHEAVEN_ADDR}:8083/online",
+            ],
+            capture_output=True, text=True, timeout=45,
+        )
+        return result.stdout
+    except Exception as e:
+        return f'{{"error": "{e}"}}'
+
+
+def is_worker_enabled(worker):
+    """Check if this worker's HTTP responder is still enabled (not disabled by stress test)."""
+    cp = worker["content_port"]
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--max-time", "2", f"http://127.0.0.1:{cp}/"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # If we get a response, the worker is enabled
+        return result.returncode == 0 and result.stdout.strip() != ""
+    except Exception:
+        return False
+
+
+def heartbeat_loop(registered_workers):
+    """Send periodic /online heartbeats for all enabled registered workers."""
+    HEARTBEAT_INTERVAL = 60
+
+    # Initial jitter to avoid thundering herd
+    jitter = random.uniform(0, 15)
+    print(f"Heartbeat loop starting for {len(registered_workers)} workers (first beat in {jitter:.0f}s)...", flush=True)
+    time.sleep(jitter)
+
+    while True:
+        enabled = 0
+        skipped = 0
+        errors = 0
+
+        for w in registered_workers:
+            if not is_worker_enabled(w):
+                skipped += 1
+                continue
+
+            result = send_heartbeat(w)
+            try:
+                resp = json.loads(result)
+                if resp.get("online"):
+                    enabled += 1
+                else:
+                    errors += 1
+                    print(f"  heartbeat rejected for worker {w['local_index']}: {result[:100]}", flush=True)
+            except Exception:
+                errors += 1
+
+            # Small stagger between workers
+            time.sleep(0.5)
+
+        print(f"Heartbeat: {enabled} sent, {skipped} disabled, {errors} errors", flush=True)
+        time.sleep(HEARTBEAT_INTERVAL)
 
 
 if __name__ == "__main__":
