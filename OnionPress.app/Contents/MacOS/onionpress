@@ -287,56 +287,12 @@ ONIONHEAVEN_DOCKERFILE
     return 1
 }
 
-# OnionHeaven farm — poll and takeover worker containers
+# OnionHeaven farm — takeover worker containers
 # Each gets its own Arti instance (own guard pool) to prevent circuit exhaustion.
-# Starts with 2+2, scales up by 2 when a type hits its threshold.
+# Starts with 2, scales up by 2 when threshold is hit.
+# Poll workers are no longer needed — heartbeat-based monitoring scans DB timestamps.
 # ONIONHEAVEN_IMAGE is set by detect_onionheaven_mode() to the locally-built tag
 ONIONHEAVEN_FARM_MONITOR_PID=""
-
-# Start a single poll worker container
-_start_poll_worker() {
-    local idx="$1"
-    local name="onionheaven-poll-${idx}"
-    local vol="onionpress-arti-state-poll-${idx}"
-
-    docker rm -f "$name" >> "$LOG_FILE" 2>&1 || true
-
-    if docker run -d \
-        --name "$name" \
-        --network onionpress-network \
-        --ulimit nofile=10000:10000 \
-        -e TZ="${TZ:-UTC}" \
-        -e POLLING_ONLY=1 \
-        -v "${vol}:/var/lib/arti/" \
-        --restart unless-stopped \
-        "$ONIONHEAVEN_IMAGE" >> "$LOG_FILE" 2>&1; then
-        log "OnionHeaven farm: started poll worker $name"
-    else
-        log "WARNING: Failed to start poll worker $name"
-        return 1
-    fi
-
-    # Register in DB (retry a few times — container/schema may need a moment)
-    local socks_addr="${name}:9050"
-    local now
-    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    local db="/var/lib/onionpress/onionheaven/registry.db"
-    local attempt=0
-    while [ $attempt -lt 5 ]; do
-        if docker exec onionheaven sqlite3 "$db" \
-            "CREATE TABLE IF NOT EXISTS poll_containers (container_name TEXT PRIMARY KEY, socks_addr TEXT NOT NULL, last_heartbeat TEXT, status TEXT DEFAULT 'active'); \
-             INSERT INTO poll_containers (container_name, socks_addr, last_heartbeat, status) \
-             VALUES ('${name}', '${socks_addr}', '${now}', 'active') \
-             ON CONFLICT(container_name) DO UPDATE SET \
-             socks_addr=excluded.socks_addr, last_heartbeat=excluded.last_heartbeat, status='active'" \
-            >> "$LOG_FILE" 2>&1; then
-            return 0
-        fi
-        sleep 2
-        attempt=$((attempt + 1))
-    done
-    log "WARNING: Failed to register poll worker $name in DB"
-}
 
 # Start a single takeover worker container
 _start_takeover_worker() {
@@ -369,14 +325,12 @@ start_onionheaven_farm() {
     if [ "$ONIONHEAVEN" != "1" ]; then
         return
     fi
-    log "OnionHeaven farm: starting initial 2 poll + 2 takeover workers..."
+    log "OnionHeaven farm: starting initial 2 takeover workers..."
 
-    _start_poll_worker 0
-    _start_poll_worker 1
     _start_takeover_worker 0
     _start_takeover_worker 1
 
-    # Give containers a moment to register before poller's first cycle
+    # Give containers a moment to register
     sleep 3
 
     log "OnionHeaven farm: initial workers started — launching scaling monitor"
@@ -387,41 +341,13 @@ start_onionheaven_farm() {
 }
 
 _onionheaven_farm_monitor() {
-    # Tracks the next index to use for each worker type
-    local next_poll=2
+    # Tracks the next index to use for takeover workers
     local next_takeover=2
     local db="/var/lib/onionpress/onionheaven/registry.db"
-    local poll_flush_idx=0
 
     while true; do
         sleep 30
 
-        # ── Rolling poll container restart ────────────────────────────
-        # Arti caches HS descriptors in memory with no configurable TTL.
-        # When a taken-over site recovers silently (no /online), the poll
-        # containers' stale caches prevent the poller from detecting it.
-        #
-        # Fix: restart ONE poll container per monitor cycle (every 30s),
-        # rotating through them. The freshly restarted container has no
-        # cache and will fetch fresh descriptors, while others keep their
-        # circuits warm for normal polling. With 2 poll containers, each
-        # gets restarted every 60s — fast enough to detect recovery,
-        # cheap enough to not disrupt normal operation.
-        local poll_containers
-        poll_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep '^onionheaven-poll-' | sort)
-        if [ -n "$poll_containers" ]; then
-            local poll_count
-            poll_count=$(echo "$poll_containers" | wc -l | tr -d ' ')
-            local target_idx=$((poll_flush_idx % poll_count))
-            local target_ctr
-            target_ctr=$(echo "$poll_containers" | sed -n "$((target_idx + 1))p")
-            if [ -n "$target_ctr" ]; then
-                docker restart "$target_ctr" >> "$LOG_FILE" 2>&1 || true
-            fi
-            poll_flush_idx=$((poll_flush_idx + 1))
-        fi
-
-        # ── Scale-up requests ─────────────────────────────────────────
         # Check for unfulfilled scale-up requests
         local requests
         requests=$(docker exec onionheaven sqlite3 "$db" \
@@ -435,12 +361,6 @@ _onionheaven_farm_monitor() {
         # Use here-string (<<<) to avoid subshell — variable updates persist
         while IFS='|' read -r req_id req_type; do
             case "$req_type" in
-                poll)
-                    log "OnionHeaven farm: scaling up — adding 2 poll workers (starting at index $next_poll)"
-                    _start_poll_worker "$next_poll"
-                    _start_poll_worker "$((next_poll + 1))"
-                    next_poll=$((next_poll + 2))
-                    ;;
                 takeover)
                     log "OnionHeaven farm: scaling up — adding 2 takeover workers (starting at index $next_takeover)"
                     _start_takeover_worker "$next_takeover"

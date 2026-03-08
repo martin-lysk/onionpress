@@ -74,8 +74,8 @@ fi
 # Polling-only mode
 if [ "${POLLING_ONLY}" = "1" ]; then
     if [ "${ONIONHEAVEN}" = "1" ]; then
-        # OnionHeaven polling mode: Arti with keystore (for takeover) + onionheaven-server + onionheaven-poller + redirect
-        echo "OnionHeaven polling mode: starting Arti (SOCKS + keystore), registration server, redirect service, and poller..."
+        # OnionHeaven mode: Arti with keystore (for takeover) + onionheaven-server + onionheaven-heartbeat + redirect
+        echo "OnionHeaven mode: starting Arti (SOCKS + keystore), registration server, redirect service, and heartbeat monitor..."
 
         # Start OnionHeaven redirect service in background (port 8082)
         /onionheaven-redirect.sh &
@@ -101,12 +101,12 @@ if [ "${POLLING_ONLY}" = "1" ]; then
             echo "ERROR: Arti failed to start — check config at /etc/arti/arti-onionheaven.toml"
         fi
 
-        # Start onionheaven poller in background (log to shared volume)
-        python3 /onionheaven-poller.py 2>/var/lib/onionpress/onionheaven/poller.log &
-        POLLER_PID=$!
+        # Start onionheaven heartbeat monitor in background (log to shared volume)
+        python3 /onionheaven-heartbeat.py 2>/var/lib/onionpress/onionheaven/heartbeat.log &
+        HEARTBEAT_PID=$!
         sleep 1
-        if ! kill -0 $POLLER_PID 2>/dev/null; then
-            echo "ERROR: onionheaven-poller.py failed to start"
+        if ! kill -0 $HEARTBEAT_PID 2>/dev/null; then
+            echo "ERROR: onionheaven-heartbeat.py failed to start"
         fi
 
         # Wait on Arti (main process)
@@ -145,6 +145,8 @@ if [ "${ONIONHEAVEN}" = "1" ]; then
     fi
     # Add port 8083 to the wordpress onion service proxy_ports
     sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
+    # OnionHeaven receives all heartbeats on this address — use max intro points (10)
+    sed -i 's/num_intro_points = 3/num_intro_points = 10/' /etc/arti/arti.toml
 fi
 
 # Start healthcheck HTTP server in background (port 8081)

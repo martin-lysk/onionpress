@@ -1,10 +1,10 @@
 """
 OnionHeaven shared module — constants, DB schema, takeover/release functions.
 
-Imported by both onionheaven-server.py and onionheaven-poller.py to ensure
+Imported by both onionheaven-server.py and onionheaven-heartbeat.py to ensure
 consistent schema and decision logic.
 
-Farm mode: when takeover_containers/poll_containers are registered in the DB,
+Farm mode: when takeover_containers are registered in the DB,
 takeover/release operations are delegated to farm containers via DB flags
 instead of executing locally. This distributes Arti guard pool usage across
 multiple containers to prevent circuit exhaustion under load.
@@ -30,8 +30,8 @@ TOR_MANAGER = "/onionheaven-tor-manager.sh"
 # a node stale enough for Arti takeover. Override via env for testing.
 PROPAGATION_DELAY = int(os.environ.get("TOR_PROPAGATION_DELAY", "180"))
 
-# How many consecutive failed polls before considering takeover.
-# Combined with PROPAGATION_DELAY — BOTH must be satisfied.
+# How many missed heartbeats before considering takeover.
+# With 60s heartbeat interval and 180s PROPAGATION_DELAY, this is ~3 missed beats.
 CONSECUTIVE_FAILS_THRESHOLD = int(os.environ.get("ONIONHEAVEN_CONSECUTIVE_FAILS", "3"))
 
 # Minimum interval between SIGHUPs to Arti (seconds)
@@ -132,7 +132,8 @@ def db_ensure_schema(conn):
     except sqlite3.Error:
         pass
 
-    if cols and ("fail_count" in cols or "takeover_active" in cols or "last_contact" in cols):
+    if cols and ("fail_count" in cols or "takeover_active" in cols or "last_contact" in cols
+                 or "last_polled" in cols):
         # Old schema detected — drop and recreate
         log("Old schema detected — dropping and recreating registry table")
         conn.execute("DROP TABLE registry")
@@ -148,7 +149,7 @@ def db_ensure_schema(conn):
             unregistered_reason TEXT,
             version             TEXT DEFAULT 'unknown',
             status              TEXT DEFAULT 'online',
-            last_polled         TEXT,
+            last_checked        TEXT,
             last_healthy        TEXT,
             last_released       TEXT,
             last_taken_over     TEXT,
@@ -157,42 +158,38 @@ def db_ensure_schema(conn):
             takeover_pending    TEXT,
             release_pending     TEXT,
             consecutive_fails   INTEGER DEFAULT 0,
+            wordpress_healthy   INTEGER,
+            wordpress_checked_at TEXT,
+            audit_result        TEXT,
+            audit_at            TEXT,
             PRIMARY KEY (content_address, healthcheck_address)
         )""")
         conn.commit()
     else:
-        # Table exists with new schema — add any missing columns
-        for col, default in [
-            ("unregistered_at", None),
-            ("unregistered_reason", None),
-            ("last_polled", None),
-            ("last_healthy", None),
-            ("last_released", None),
-            ("last_taken_over", None),
-            ("last_redirect", None),
-            ("takeover_container", None),
-            ("takeover_pending", None),
-            ("release_pending", None),
-            ("consecutive_fails", None),
+        # Table exists — add any missing columns
+        for col in [
+            "unregistered_at", "unregistered_reason",
+            "last_checked", "last_healthy", "last_released",
+            "last_taken_over", "last_redirect",
+            "takeover_container", "takeover_pending", "release_pending",
+            "wordpress_checked_at", "audit_result", "audit_at",
         ]:
             if col not in cols:
-                if col == "consecutive_fails":
-                    conn.execute("ALTER TABLE registry ADD COLUMN consecutive_fails INTEGER DEFAULT 0")
-                else:
-                    conn.execute(f"ALTER TABLE registry ADD COLUMN {col} TEXT")
+                conn.execute(f"ALTER TABLE registry ADD COLUMN {col} TEXT")
+        if "consecutive_fails" not in cols:
+            conn.execute("ALTER TABLE registry ADD COLUMN consecutive_fails INTEGER DEFAULT 0")
+        if "wordpress_healthy" not in cols:
+            conn.execute("ALTER TABLE registry ADD COLUMN wordpress_healthy INTEGER")
         conn.commit()
+
+    # Drop old poll_containers table if it exists (no longer needed — heartbeat-based)
+    conn.execute("DROP TABLE IF EXISTS poll_containers")
 
     # Farm coordination tables (always created, idempotent)
     conn.execute("""CREATE TABLE IF NOT EXISTS takeover_containers (
         container_name  TEXT PRIMARY KEY,
         max_services    INTEGER DEFAULT 50,
         active_services INTEGER DEFAULT 0,
-        last_heartbeat  TEXT,
-        status          TEXT DEFAULT 'active'
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS poll_containers (
-        container_name  TEXT PRIMARY KEY,
-        socks_addr      TEXT NOT NULL,
         last_heartbeat  TEXT,
         status          TEXT DEFAULT 'active'
     )""")
@@ -269,7 +266,7 @@ def get_takeover_containers(conn):
         return []
 
 
-# Round-robin state for takeover assignment within a poll pass
+# Round-robin state for takeover assignment within a heartbeat pass
 _takeover_rr_cycle = None
 _takeover_rr_containers = None
 
@@ -295,101 +292,19 @@ def assign_takeover_container(conn):
     return next(_takeover_rr_cycle)
 
 
-def _discover_poll_containers(conn):
-    """Discover running poll containers and register any missing from DB.
-
-    The launcher creates poll-0 and poll-1 after the onionheaven container
-    starts, so they may not be in the DB yet when the poller first runs.
-    Uses DNS resolution (Docker network) since docker CLI isn't in the container.
-    """
-    import socket as _sock
-    for idx in range(20):  # check up to 20 poll containers
-        name = f"onionheaven-poll-{idx}"
-        try:
-            _sock.getaddrinfo(name, 9050, proto=_sock.IPPROTO_TCP)
-        except _sock.gaierror:
-            continue  # doesn't exist, try next index
-        try:
-            existing = conn.execute(
-                "SELECT 1 FROM poll_containers WHERE container_name = ?",
-                (name,)
-            ).fetchone()
-            if not existing:
-                socks_addr = f"{name}:9050"
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                conn.execute(
-                    "INSERT INTO poll_containers (container_name, socks_addr, last_heartbeat, status) "
-                    "VALUES (?, ?, ?, 'active')",
-                    (name, socks_addr, now)
-                )
-                conn.commit()
-                log(f"Discovered running poll container not in DB: {name}")
-        except Exception as e:
-            log(f"Warning: poll container discovery failed for {name}: {e}")
-
-
-def get_poll_socks_addrs(conn):
-    """Get list of SOCKS proxy addresses from active poll containers.
-
-    Always includes the default SOCKS_ADDR as a fallback.
-    Returns list of "host:port" strings.
-    """
-    # Auto-discover running containers not yet in DB
-    _discover_poll_containers(conn)
-    _discover_takeover_containers(conn)
-
-    default = os.environ.get("ONIONHEAVEN_SOCKS_ADDR", "onionpress-tor-client:9050")
-    addrs = [default]
-    try:
-        rows = conn.execute(
-            "SELECT socks_addr FROM poll_containers WHERE status = 'active'"
-        ).fetchall()
-        for row in rows:
-            addr = row["socks_addr"]
-            if addr and addr not in addrs:
-                addrs.append(addr)
-    except sqlite3.OperationalError:
-        pass
-    return addrs
-
-
-# Entries per poll worker before requesting scale-up
-POLL_SCALE_THRESHOLD = int(os.environ.get("ONIONHEAVEN_POLL_SCALE_THRESHOLD", "50"))
 # Max services per takeover worker before requesting scale-up
 TAKEOVER_SCALE_THRESHOLD = int(os.environ.get("ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD", "8"))
 
 
 def check_farm_scaling(conn, active_entries):
-    """Check if farm needs more workers and write scale requests.
+    """Check if farm needs more takeover workers and write scale requests.
 
-    Called by the poller each cycle. Writes unfulfilled requests to
+    Called by the heartbeat monitor each cycle. Writes unfulfilled requests to
     farm_scale_requests for the host-side monitor to pick up.
 
-    active_entries: number of registry entries being polled this cycle.
+    active_entries: number of active registry entries this cycle.
     """
     try:
-        # --- Poll worker scaling ---
-        poll_count = conn.execute(
-            "SELECT COUNT(*) FROM poll_containers WHERE status = 'active'"
-        ).fetchone()[0]
-        # +1 for the default tor-client SOCKS proxy (always present)
-        total_poll_capacity = (poll_count + 1) * POLL_SCALE_THRESHOLD
-        if active_entries > total_poll_capacity:
-            # Check no unfulfilled request already pending
-            pending = conn.execute(
-                "SELECT COUNT(*) FROM farm_scale_requests "
-                "WHERE worker_type = 'poll' AND fulfilled_at IS NULL"
-            ).fetchone()[0]
-            if pending == 0:
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                conn.execute(
-                    "INSERT INTO farm_scale_requests (worker_type, requested_at) VALUES ('poll', ?)",
-                    (now,)
-                )
-                conn.commit()
-                log(f"Farm scale-up requested: poll (entries={active_entries}, capacity={total_poll_capacity})")
-
-        # --- Takeover worker scaling ---
         takeover_rows = conn.execute(
             "SELECT container_name, max_services, active_services FROM takeover_containers "
             "WHERE status = 'active'"

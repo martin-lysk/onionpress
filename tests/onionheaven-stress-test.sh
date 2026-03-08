@@ -269,40 +269,37 @@ preflight() {
         docker_cmd exec -d onionheaven sh /onionheaven-redirect.sh
         log "  Debug redirect service started"
 
-        # Inject onionheaven-tor-manager.sh (with pidof fix)
-        # Must go into onionheaven — that's where onionheaven-poller.py calls it
+        # Inject onionheaven-tor-manager.sh
+        # Must go into onionheaven — that's where onionheaven-heartbeat.py calls it
         log "  Injecting onionheaven-tor-manager.sh..."
         docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-tor-manager.sh" \
             onionheaven:/onionheaven-tor-manager.sh
         docker_cmd exec onionheaven chmod +x /onionheaven-tor-manager.sh
 
-        # Inject latest poller code with production settings.
-        # Uses defaults (interval=15s, consecutive_fails=3, curl_timeout=8s)
-        # to avoid false-positive takeovers at scale. Only override max_workers
-        # to handle larger worker counts.
-        log "  Injecting onionheaven-poller.py (production settings)..."
+        # Inject latest heartbeat monitor code with production settings.
+        # Uses defaults (interval=15s, propagation_delay=180s, curl_timeout=8s)
+        log "  Injecting onionheaven-heartbeat.py (production settings)..."
         docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven_common.py" \
             onionheaven:/onionheaven_common.py
-        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-poller.py" \
-            onionheaven:/onionheaven-poller.py
-        # Kill ALL running pollers — there may be stale ones from previous runs.
-        # entrypoint.sh will NOT restart them, so we restart ourselves with env overrides.
+        docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-heartbeat.py" \
+            onionheaven:/onionheaven-heartbeat.py
+        # Kill ALL running heartbeat monitors — there may be stale ones from previous runs.
+        # entrypoint.sh will NOT restart them, so we restart ourselves.
         # Use pidof+kill since pkill may not be available in the container.
         docker_cmd exec onionheaven sh -c '
             for pid in $(pidof python3 2>/dev/null); do
-                if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "onionheaven-poller"; then
+                if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "onionheaven-heartbeat"; then
                     kill "$pid" 2>/dev/null
                 fi
             done
         '
         sleep 1
-        docker_cmd exec -d onionheaven env \
-            ONIONHEAVEN_MAX_POLL_WORKERS=10 \
-            python3 /onionheaven-poller.py
-        log "  Poller started (production: interval=15s, fails=3, timeout=8s, 50 workers)"
+        docker_cmd exec -d onionheaven \
+            python3 /onionheaven-heartbeat.py
+        log "  Heartbeat monitor started (production: interval=15s, propagation_delay=180s)"
     else
         log "  Skipping file injections (not OnionHeaven host)"
-        log "  Using production poller timing and existing container scripts"
+        log "  Using production heartbeat timing and existing container scripts"
     fi
 
     log "Preflight OK"
@@ -603,12 +600,12 @@ get_healthy_count() {
     _onionheaven_field "online"
 }
 
-get_polled_healthy_count() {
-    _onionheaven_field "polled_healthy"
+get_heartbeat_healthy_count() {
+    _onionheaven_field "heartbeat_healthy"
 }
 
-get_polled_unhealthy_count() {
-    _onionheaven_field "polled_unhealthy"
+get_wordpress_unhealthy_count() {
+    _onionheaven_field "wordpress_unhealthy"
 }
 
 get_stress_fail_count() {
@@ -622,10 +619,6 @@ get_stress_fail_count() {
 
 get_takeover_count() {
     _onionheaven_field "taken_over"
-}
-
-get_poll_container_count() {
-    _onionheaven_field "poll_containers"
 }
 
 get_takeover_container_count() {
@@ -664,9 +657,9 @@ get_container_mem_mb() {
     fi
 }
 
-get_last_poll_duration() {
+get_last_pass_duration() {
     if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-        docker_cmd exec onionheaven sh -c 'grep "poll pass complete" /var/lib/onionpress/onionheaven/poller.log 2>/dev/null | tail -1 | sed "s/.*in //;s/s$//"' | tr -d ' \n\r' || echo "-"
+        docker_cmd exec onionheaven sh -c 'grep "heartbeat pass complete" /var/lib/onionpress/onionheaven/heartbeat.log 2>/dev/null | tail -1 | sed "s/.*in //;s/s$//"' | tr -d ' \n\r' || echo "-"
     else
         echo "-"
     fi
@@ -685,26 +678,25 @@ get_system_mem_pct() {
 }
 
 print_dashboard() {
-    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct poll_dur poll_ctrs takeover_ctrs stress_ctrs polled_ok polled_bad
+    local reg_count tor_mem wp_mem fail_count takeover_count healthy_count mem_pct pass_dur takeover_ctrs stress_ctrs hb_ok wp_bad
     reg_count=$(get_registry_count)
     tor_mem=$(get_container_mem_mb onionpress-tor)
     wp_mem=$(get_container_mem_mb onionpress-wordpress)
     fail_count=$(get_stress_fail_count)
     takeover_count=$(get_takeover_count)
     healthy_count=$(get_healthy_count)
-    polled_ok=$(get_polled_healthy_count)
-    polled_bad=$(get_polled_unhealthy_count)
+    hb_ok=$(get_heartbeat_healthy_count)
+    wp_bad=$(get_wordpress_unhealthy_count)
     mem_pct=$(get_system_mem_pct)
-    poll_dur=$(get_last_poll_duration)
-    poll_ctrs=$(get_poll_container_count)
+    pass_dur=$(get_last_pass_duration)
     takeover_ctrs=$(get_takeover_container_count)
     stress_ctrs=$(docker_cmd ps --filter "name=stress-worker-" --format "{{.Names}}" 2>/dev/null | wc -l | tr -d ' ')
 
     log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
-    echo "           Online: ${healthy_count} | Taken over: ${takeover_count} | Polled: ${polled_ok:-0} ok / ${polled_bad:-0} bad | VM mem: ${mem_pct}%"
-    echo "           Farm: ${poll_ctrs:-0} poll + ${takeover_ctrs:-0} takeover + ${stress_ctrs:-0} stress containers | Last poll: ${poll_dur:-?}s"
+    echo "           Online: ${healthy_count} | Taken over: ${takeover_count} | Heartbeat: ${hb_ok:-0} ok / WP unhealthy: ${wp_bad:-0} | VM mem: ${mem_pct}%"
+    echo "           Farm: ${takeover_ctrs:-0} takeover + ${stress_ctrs:-0} stress containers | Last pass: ${pass_dur:-?}s"
 
-    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"polled_healthy\":${polled_ok:-0},\"polled_unhealthy\":${polled_bad:-0},\"vm_mem_pct\":${mem_pct:-0},\"poll_duration\":\"${poll_dur}\",\"poll_containers\":${poll_ctrs:-0},\"takeover_containers\":${takeover_ctrs:-0},\"stress_containers\":${stress_ctrs:-0}"
+    log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"heartbeat_healthy\":${hb_ok:-0},\"wordpress_unhealthy\":${wp_bad:-0},\"vm_mem_pct\":${mem_pct:-0},\"pass_duration\":\"${pass_dur}\",\"takeover_containers\":${takeover_ctrs:-0},\"stress_containers\":${stress_ctrs:-0}"
 }
 
 # ── Helper: get worker addresses from local info files ──────────────────────
@@ -1051,7 +1043,7 @@ print(f'Re-registered {w[\"content_address\"]}')
 }
 
 # Re-enable workers WITHOUT re-registering or sending /online.
-# Tests pure poller-based recovery: OnionHeaven must discover the service
+# Tests pure heartbeat-based recovery: OnionHeaven must discover the service
 # is healthy again by polling the healthcheck address.
 enable_workers_silent() {
     local start="$1"
@@ -1111,15 +1103,9 @@ enable_workers_silent() {
 # Restart Tor/Arti SOCKS proxies to flush HSDir descriptor caches.
 # Without this, clients keep connecting using old (stale) descriptors
 # even after takeover/release, making transitions appear much slower.
-# Flushes BOTH the test client AND the poller's poll containers.
+# Flushes the test client descriptor cache.
 flush_client_descriptor_cache() {
-    log "Flushing descriptor caches (tor-client + poll containers)..."
-
-    # Restart all poll containers so the poller gets fresh descriptors
-    for poll_ctr in $(docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep '^onionheaven-poll-' || true); do
-        docker_cmd restart "$poll_ctr" >/dev/null 2>&1 || true
-        log "  restarted $poll_ctr"
-    done
+    log "Flushing descriptor caches (tor-client)..."
 
     # Restart the test client
     docker_cmd restart onionpress-tor-client >/dev/null 2>&1 || true
@@ -1674,18 +1660,10 @@ check_previous_artifacts() {
                         "DELETE FROM registry;" 2>/dev/null || true
                     log "  Cleared ${registry_count} registry entries"
                 fi
-                # Remove extra poll containers (beyond the initial 0 and 1)
-                docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep '^onionheaven-poll-' | while read -r ctr; do
-                    local idx="${ctr#onionheaven-poll-}"
-                    if [ "$idx" -ge 2 ] 2>/dev/null; then
-                        docker_cmd rm -f "$ctr" 2>/dev/null || true
-                        log "  Removed scaled poll container: $ctr"
-                    fi
-                done || true
-                # Clean farm DB tables (keep only initial containers)
+                # Clean farm DB tables
                 if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
                     docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
-                        "DELETE FROM poll_containers; DELETE FROM takeover_containers; DELETE FROM farm_scale_requests;" 2>/dev/null || true
+                        "DELETE FROM takeover_containers; DELETE FROM farm_scale_requests;" 2>/dev/null || true
                 fi
                 echo ""
                 ;;
@@ -1760,8 +1738,8 @@ run_worker() {
     log "Sent SIGHUP to Arti in all worker containers (descriptor re-publish)"
     echo ""
 
-    # Phase 3: Wait for onionheaven poller to confirm workers are healthy
-    phase_start "3" "Waiting for poller to confirm all ${TOTAL} workers are healthy (est. 1m)"
+    # Phase 3: Wait for onionheaven heartbeat monitor to confirm workers are healthy
+    phase_start "3" "Waiting for heartbeat monitor to confirm all ${TOTAL} workers are healthy (est. 1m)"
     if ! wait_for_healthy "$TOTAL" "Phase 3" 600; then
         log "WARNING: Not all workers became healthy, continuing anyway..."
     fi
@@ -1823,18 +1801,18 @@ run_worker() {
         echo ""
 
         # ══════════════════════════════════════════════════════════════
-        # Scenario B: Silent crash + silent recovery (poller-only)
+        # Scenario B: Silent crash + silent recovery (heartbeat-only)
         # ══════════════════════════════════════════════════════════════
 
-        phase_start "B" "SILENT CRASH/RECOVERY (no notifications, poller-only detection)"
+        phase_start "B" "SILENT CRASH/RECOVERY (no notifications, heartbeat-only detection)"
 
-        # B1: Takeover — disable only (no /offline), wait for poller to detect
-        phase_start "B.1" "Silent crash: disable ${FAILING} workers (no /offline), wait for poller takeover (est. 9m)"
+        # B1: Takeover — disable only (no /offline), wait for heartbeat monitor to detect
+        phase_start "B.1" "Silent crash: disable ${FAILING} workers (no /offline), wait for heartbeat monitor takeover (est. 9m)"
         scenario_ts=$(date +%s)
         log "Phase B.1: Silent crash — disabling responders for ${FAILING} workers (no /offline)..."
         disable_workers "$fail_start" "$FAILING"
         flush_client_descriptor_cache
-        log "Phase B.1: Waiting for poller-detected takeovers..."
+        log "Phase B.1: Waiting for heartbeat-detected takeovers..."
         if ! wait_for_takeover "$FAILING" 600; then
             log "WARNING: Not all expected takeovers happened"
         fi
@@ -1850,15 +1828,15 @@ run_worker() {
         phase_result "B.1v" "$r_b1v"
         echo ""
 
-        # B2: Recovery — re-enable only (no /online, no /register), wait for poller
-        phase_start "B.2" "Silent recovery: re-enable ${FAILING} workers (no /online), wait for poller recovery (est. 1m)"
+        # B2: Recovery — re-enable only (no /online, no /register), wait for heartbeat monitor
+        phase_start "B.2" "Silent recovery: re-enable ${FAILING} workers (no /online), wait for heartbeat monitor recovery (est. 1m)"
         scenario_ts=$(date +%s)
         log "Phase B.2: Silent recovery — re-enabling responders (no /online, no /register)..."
         enable_workers_silent "$fail_start" "$FAILING"
         flush_client_descriptor_cache
-        log "Phase B.2: Waiting for poller-detected recovery..."
+        log "Phase B.2: Waiting for heartbeat-detected recovery..."
         if ! wait_for_recovery "$TOTAL" 900; then
-            log "WARNING: Not all workers recovered via poller detection"
+            log "WARNING: Not all workers recovered via heartbeat detection"
         fi
         recovery_elapsed=$(( $(date +%s) - scenario_ts ))
         r_b2="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
@@ -1983,7 +1961,7 @@ SUMMARY
      A.2  Recovery:       ${r_a2:-(not run)}
      => ${r_a_sum:-(incomplete)}
   ---
-  B. Silent (poller-only, no notifications):
+  B. Silent (heartbeat-only, no notifications):
      B.1  Takeover:       ${r_b1:-(not run)}
      B.1v Verify 302s:    ${r_b1v:-(not run)}
      B.2  Recovery:       ${r_b2:-(not run)}

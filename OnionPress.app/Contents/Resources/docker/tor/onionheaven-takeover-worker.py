@@ -58,8 +58,8 @@ def startup_reconciliation(conn):
     """Release stale assignments from previous container run.
 
     Container restart wipes Arti config (takeover service entries lost)
-    but the DB still has rows assigned to us. Release them so the poller
-    re-evaluates from scratch.
+    but the DB still has rows assigned to us. Release them so the heartbeat
+    monitor re-evaluates from scratch.
 
     Also cleans orphaned services from the Arti toml — services added
     by tor-manager that are no longer in the DB (e.g., stress test

@@ -15,7 +15,7 @@ Endpoints:
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
-ONIONHEAVEN_SERVER_VERSION = "2.4.26"
+ONIONHEAVEN_SERVER_VERSION = "2.4.27"
 
 import base64
 import hashlib
@@ -216,24 +216,20 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             unregistered = conn.execute(
                 "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NOT NULL"
             ).fetchone()[0]
-            # Polled = has been healthchecked at least once by the poller
-            polled_healthy = conn.execute(
-                "SELECT COUNT(*) FROM registry WHERE status='online' AND last_polled IS NOT NULL"
+            # Entries with a recent heartbeat
+            heartbeat_healthy = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE status='online' AND last_healthy IS NOT NULL"
             ).fetchone()[0]
-            polled_unhealthy = conn.execute(
-                "SELECT COUNT(*) FROM registry WHERE status='online' AND last_polled IS NOT NULL "
-                "AND (last_healthy IS NULL OR last_healthy < last_polled)"
+            # Entries where WordPress reported unhealthy in last heartbeat
+            wp_unhealthy = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE status='online' AND wordpress_healthy = 0"
             ).fetchone()[0]
             # Farm container counts
             try:
-                poll_containers = conn.execute(
-                    "SELECT COUNT(*) FROM poll_containers WHERE status='active'"
-                ).fetchone()[0]
                 takeover_containers = conn.execute(
                     "SELECT COUNT(*) FROM takeover_containers WHERE status='active'"
                 ).fetchone()[0]
             except Exception:
-                poll_containers = 0
                 takeover_containers = 0
             conn.close()
             self._send_json(200, {
@@ -242,9 +238,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "online": online,
                 "taken_over": taken_over,
                 "unregistered": unregistered,
-                "polled_healthy": polled_healthy,
-                "polled_unhealthy": polled_unhealthy,
-                "poll_containers": poll_containers,
+                "heartbeat_healthy": heartbeat_healthy,
+                "wordpress_unhealthy": wp_unhealthy,
                 "takeover_containers": takeover_containers,
             })
         except Exception as e:
@@ -292,23 +287,22 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     "unregistered_at": row["unregistered_at"],
                     "unregistered_reason": row["unregistered_reason"],
                     "version": row["version"],
-                    "last_polled": row["last_polled"],
+                    "last_checked": row["last_checked"],
                     "last_healthy": row["last_healthy"],
                     "last_released": row["last_released"],
                     "last_taken_over": row["last_taken_over"],
                     "last_redirect": row["last_redirect"],
+                    "wordpress_healthy": row["wordpress_healthy"],
+                    "audit_result": row["audit_result"],
                 }
 
                 # Add computed debugging fields
-                entry["seconds_since_last_polled"] = self._seconds_since(row["last_polled"], now)
+                entry["seconds_since_last_checked"] = self._seconds_since(row["last_checked"], now)
                 entry["seconds_since_last_healthy"] = self._seconds_since(row["last_healthy"], now)
                 entry["seconds_since_last_taken_over"] = self._seconds_since(row["last_taken_over"], now)
                 entry["seconds_since_last_released"] = self._seconds_since(row["last_released"], now)
 
-                # Was the last poll successful? (last_healthy >= last_polled)
-                entry["last_poll_healthy"] = self._ts_gte(row["last_healthy"], row["last_polled"])
-
-                # Would the poller take over right now?
+                # Would the heartbeat monitor take over right now?
                 # Conditions: status == 'online', last_healthy is stale (> PROPAGATION_DELAY)
                 stale = True
                 if row["last_healthy"]:
@@ -625,14 +619,29 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Update: set last_healthy, clear unregistered fields
+        # Accept optional wordpress_healthy from heartbeat
+        wordpress_healthy = data.get("wordpress_healthy")
+
+        # Update: set last_healthy, clear unregistered fields, store wordpress health
         if healthcheck_address:
-            conn.execute(
-                "UPDATE registry SET last_healthy = ?, status = 'online', "
-                "unregistered_at = NULL, unregistered_reason = NULL "
-                "WHERE content_address = ? AND healthcheck_address = ?",
-                (now, content_address, healthcheck_address)
-            )
+            if wordpress_healthy is not None:
+                conn.execute(
+                    "UPDATE registry SET last_healthy = ?, status = 'online', "
+                    "unregistered_at = NULL, unregistered_reason = NULL, "
+                    "wordpress_healthy = ?, wordpress_checked_at = ?, "
+                    "audit_result = NULL, audit_at = NULL "
+                    "WHERE content_address = ? AND healthcheck_address = ?",
+                    (now, 1 if wordpress_healthy else 0, now,
+                     content_address, healthcheck_address)
+                )
+            else:
+                conn.execute(
+                    "UPDATE registry SET last_healthy = ?, status = 'online', "
+                    "unregistered_at = NULL, unregistered_reason = NULL, "
+                    "audit_result = NULL, audit_at = NULL "
+                    "WHERE content_address = ? AND healthcheck_address = ?",
+                    (now, content_address, healthcheck_address)
+                )
             conn.commit()
             release_function(conn, content_address, healthcheck_address, force=True)
         else:
@@ -643,7 +652,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             ).fetchall()
             conn.execute(
                 "UPDATE registry SET last_healthy = ?, status = 'online', "
-                "unregistered_at = NULL, unregistered_reason = NULL "
+                "unregistered_at = NULL, unregistered_reason = NULL, "
+                "audit_result = NULL, audit_at = NULL "
                 "WHERE content_address = ?",
                 (now, content_address)
             )

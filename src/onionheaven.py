@@ -5,16 +5,18 @@ OnionHeaven — failover system for OnionPress
 When an OnionPress instance's .onion address goes offline, OnionHeaven takes over
 the address and serves 302 redirects to the Internet Archive Wayback Machine.
 
-This module handles the registration client (normal instances send keys to OnionHeaven)
-and onionheaven mode detection for the menubar UI.
+This module handles the registration client, periodic heartbeat (keeps OnionHeaven
+informed that this instance is alive), and onionheaven mode detection for the
+menubar UI.
 
-The onionheaven poller (healthcheck monitoring, takeover, release) runs inside the
-onionheaven container as onionheaven-poller.py — not in this module.
+The heartbeat monitor (takeover decisions, post-takeover auditing) runs inside the
+onionheaven container as onionheaven-heartbeat.py — not in this module.
 """
 
 import base64
 import json
 import os
+import random
 import subprocess
 import threading
 import time
@@ -232,10 +234,130 @@ def register_with_onionheaven(app):
 
 
 def start_registration_thread(app):
-    """Start the registration background thread."""
-    thread = threading.Thread(target=register_with_onionheaven, args=(app,), daemon=True)
+    """Start the registration background thread.
+
+    On success, also starts the periodic heartbeat loop.
+    """
+    def register_then_heartbeat():
+        register_with_onionheaven(app)
+        if app._onionheaven_registration_succeeded:
+            _heartbeat_loop(app)
+
+    thread = threading.Thread(target=register_then_heartbeat, daemon=True)
     thread.start()
     return thread
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat loop (runs on normal OnionPress instances after registration)
+# ---------------------------------------------------------------------------
+
+# Heartbeat interval in seconds
+HEARTBEAT_INTERVAL = 60
+
+def _heartbeat_loop(app):
+    """Send periodic /online heartbeats to OnionHeaven every 60s.
+
+    Runs in the registration thread after successful registration.
+    Sends the same /online payload but adds wordpress_healthy status.
+    Keeps running until the app quits (daemon thread).
+    """
+    # Random jitter on first heartbeat to prevent thundering herd
+    # after OnionHeaven restart
+    jitter = random.uniform(0, 15)
+    app.log(f"OnionHeaven: heartbeat loop starting (first beat in {jitter:.0f}s)")
+    time.sleep(jitter)
+
+    while True:
+        try:
+            # Check WordPress health locally before sending heartbeat
+            wp_healthy = _check_wordpress_healthy(app)
+
+            _send_heartbeat(app, wp_healthy)
+        except Exception as e:
+            app.log(f"OnionHeaven: heartbeat error: {e}")
+
+        time.sleep(HEARTBEAT_INTERVAL)
+
+
+def _check_wordpress_healthy(app):
+    """Quick local check if WordPress is responding."""
+    try:
+        ok, output = _run_docker(app, [
+            "exec", "onionpress-wordpress",
+            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+            "--max-time", "5",
+            "http://localhost:80/"
+        ], timeout=10)
+        if ok and output.strip() in ("200", "301", "302"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _send_heartbeat(app, wordpress_healthy=True):
+    """Send a single /online heartbeat to OnionHeaven.
+
+    Similar to _send_onionheaven_notification but adds wordpress_healthy field
+    and uses a single attempt with short timeout.
+    """
+    if getattr(app, 'is_onionheaven', False):
+        return
+
+    status = _load_registration_status(app)
+    if not status.get("registered"):
+        return
+
+    content_addr = getattr(app, 'onion_address', None)
+    hc_addr = getattr(app, 'healthcheck_address', None)
+
+    if not content_addr or not content_addr.endswith('.onion'):
+        return
+    if not hc_addr or not hc_addr.endswith('.onion'):
+        return
+
+    try:
+        import key_manager
+        import onion_auth
+        secret_key_bytes, public_key_raw = key_manager.extract_keys()
+        timestamp = onion_auth.make_timestamp()
+        signature = onion_auth.sign_payload(
+            secret_key_bytes, public_key_raw,
+            "online", content_addr, hc_addr, timestamp
+        )
+    except Exception as e:
+        app.log(f"OnionHeaven: heartbeat sign error: {e}")
+        return
+
+    payload = json.dumps({
+        "content_address": content_addr,
+        "healthcheck_address": hc_addr,
+        "wordpress_healthy": wordpress_healthy,
+        "timestamp": timestamp,
+        "signature": signature,
+    })
+
+    ok, output = _run_docker(app, [
+        "exec", "onionpress-wordpress",
+        "curl", "-s", "-X", "POST",
+        "--socks5-hostname", "onionpress-tor-client:9050",
+        "-H", "Content-Type: application/json",
+        "-d", payload,
+        "--max-time", "30",
+        f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/online"
+    ], timeout=45)
+
+    if ok and output:
+        try:
+            resp = json.loads(output)
+            if resp.get("online"):
+                return  # success, silent
+            app.log(f"OnionHeaven: heartbeat rejected: {resp.get('error', 'unknown')}")
+        except json.JSONDecodeError:
+            pass
+    else:
+        app.log(f"OnionHeaven: heartbeat failed (will retry next cycle)")
 
 
 def unregister_from_onionheaven(app, content_address=None):
@@ -465,7 +587,7 @@ def start_online_notification_thread(app):
 
 
 # ---------------------------------------------------------------------------
-# OnionHeaven mode detection and UI helpers (poller runs in onionheaven container)
+# OnionHeaven mode detection and UI helpers (heartbeat monitor runs in onionheaven container)
 # ---------------------------------------------------------------------------
 
 def is_onionheaven_instance(onion_address):

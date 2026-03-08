@@ -8,8 +8,8 @@ the address and serves 302 redirects to the Internet Archive Wayback Machine.
 This module handles the registration client (normal instances send keys to OnionHeaven)
 and onionheaven mode detection for the menubar UI.
 
-The onionheaven poller (healthcheck monitoring, takeover, release) runs inside the
-onionheaven container as onionheaven-poller.py — not in this module.
+The heartbeat monitor (takeover decisions, post-takeover auditing) runs inside the
+onionheaven container as onionheaven-heartbeat.py — not in this module.
 """
 
 import hashlib
@@ -430,7 +430,7 @@ def start_online_notification_thread(app):
 
 
 # ---------------------------------------------------------------------------
-# OnionHeaven mode detection and UI helpers (poller runs in onionheaven container)
+# OnionHeaven mode detection and UI helpers (heartbeat monitor runs in onionheaven container)
 # ---------------------------------------------------------------------------
 
 def is_onionheaven_instance(onion_address):

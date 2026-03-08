@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.25"
+        self.version = "2.4.26"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1890,7 +1890,7 @@ class OnionPressApp(rumps.App):
                     self._onionheaven_checked = True
                     if onionheaven.is_onionheaven_instance(self.onion_address):
                         self.is_onionheaven = True
-                        self.log("OnionHeaven mode activated (poller runs in onionheaven container)")
+                        self.log("OnionHeaven mode activated (heartbeat monitor runs in onionheaven container)")
                         # One-shot: auto-set PREVENT_SLEEP=never on first OnionHeaven detection
                         # Uses a marker file so we never override the user's later choice
                         sleep_marker = os.path.join(self.app_support, ".onionheaven_sleep_set")
@@ -4426,7 +4426,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.25 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.26 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 
