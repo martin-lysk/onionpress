@@ -19,6 +19,7 @@ COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck-server.sh /healthcheck-server.sh
 COPY onionheaven-redirect.sh /onionheaven-redirect.sh
 COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
+COPY onion_auth.py /onion_auth.py
 COPY onionheaven_common.py /onionheaven_common.py
 COPY onionheaven-poller.py /onionheaven-poller.py
 COPY onionheaven-server.py /onionheaven-server.py

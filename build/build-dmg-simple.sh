@@ -304,6 +304,7 @@ SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(sit
 cp "$SCRIPTS_DIR/key_manager.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/backup_manager.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/setup_window.py" "$SITE_PACKAGES/"
+cp "$SCRIPTS_DIR/onion_auth.py" "$SITE_PACKAGES/"
 
 # Run py2app build using the root setup.py
 cd "$PROJECT_DIR"

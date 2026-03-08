@@ -12,7 +12,7 @@ The onionheaven poller (healthcheck monitoring, takeover, release) runs inside t
 onionheaven container as onionheaven-poller.py — not in this module.
 """
 
-import hashlib
+import base64
 import json
 import os
 import subprocess
@@ -118,9 +118,10 @@ def _save_registration_status(app, status):
 def register_with_onionheaven(app):
     """
     Register this instance with OnionHeaven.
-    Sends content address, healthcheck address, and secret key to OnionHeaven.
-    Called from a background thread. Sets app._onionheaven_registration_succeeded
-    on success; clears app._onionheaven_registration_in_flight when done.
+    Sends signed registration with content address, healthcheck address,
+    and Arti key PEM. Called from a background thread.
+    Sets app._onionheaven_registration_succeeded on success;
+    clears app._onionheaven_registration_in_flight when done.
     """
     # Check if registration is disabled
     if app.read_config_value("REGISTER_WITH_ONIONHEAVEN", "yes").lower() == "no":
@@ -148,33 +149,32 @@ def register_with_onionheaven(app):
     app.log("Registering with OnionHeaven...")
 
     try:
-        # Extract the secret key (raw bytes)
+        # Extract both keys in one docker exec call
         try:
             import key_manager
-            secret_key_bytes = key_manager.extract_private_key()
+            import onion_auth
+            secret_key_bytes, public_key_raw = key_manager.extract_keys()
         except Exception as e:
-            app.log(f"OnionHeaven: failed to extract key: {e}")
+            app.log(f"OnionHeaven: failed to extract keys: {e}")
             return
 
-        # Also get the public key (from same Arti keystore file)
-        try:
-            public_key_raw = key_manager.extract_public_key()
-        except Exception as e:
-            app.log(f"OnionHeaven: failed to read public key: {e}")
-            return
-
-        # Build Arti OpenSSH PEM for OnionHeaven storage
+        # Build Arti OpenSSH PEM for OnionHeaven storage (for takeover)
         arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
 
-        # Build registration payload (keys as base64-encoded strings)
-        import base64
+        # Sign the registration payload
+        timestamp = onion_auth.make_timestamp()
+        signature = onion_auth.sign_payload(
+            secret_key_bytes, public_key_raw,
+            "register", content_addr, hc_addr, timestamp
+        )
+
         payload = json.dumps({
             "content_address": content_addr,
             "healthcheck_address": hc_addr,
-            "secret_key": base64.b64encode(secret_key_bytes).decode('ascii'),
-            "public_key": base64.b64encode(public_key_raw).decode('ascii'),
             "arti_key_pem": base64.b64encode(arti_pem).decode('ascii'),
             "version": getattr(app, 'version', 'unknown'),
+            "timestamp": timestamp,
+            "signature": signature,
         })
 
         # Send via wordpress container's curl through tor SOCKS proxy
@@ -264,22 +264,31 @@ def unregister_from_onionheaven(app, content_address=None):
 
     app.log(f"Unregistering {addr} from OnionHeaven...")
 
-    # Compute proof = sha256(secret_key_bytes) to authenticate the request
+    # Sign the unregister request with ed25519
     try:
         import key_manager
-        secret_key_bytes = key_manager.extract_private_key()
-        proof = hashlib.sha256(secret_key_bytes).hexdigest()
+        import onion_auth
+        secret_key_bytes, public_key_raw = key_manager.extract_keys()
     except Exception as e:
-        app.log(f"OnionHeaven: failed to extract key for unregister proof: {e}")
+        app.log(f"OnionHeaven: failed to extract keys for unregister: {e}")
         return
 
     hc_addr = getattr(app, 'healthcheck_address', None)
+    hc_addr_val = hc_addr if (hc_addr and hc_addr.endswith('.onion')) else ""
+
+    timestamp = onion_auth.make_timestamp()
+    signature = onion_auth.sign_payload(
+        secret_key_bytes, public_key_raw,
+        "unregister", addr, hc_addr_val, timestamp
+    )
+
     payload_dict = {
         "content_address": addr,
-        "proof": proof,
+        "timestamp": timestamp,
+        "signature": signature,
     }
-    if hc_addr and hc_addr.endswith('.onion'):
-        payload_dict["healthcheck_address"] = hc_addr
+    if hc_addr_val:
+        payload_dict["healthcheck_address"] = hc_addr_val
     payload = json.dumps(payload_dict)
 
     # Retry with backoff — uninstall/address-change are one-shot, reliability > speed
@@ -334,7 +343,7 @@ def unregister_from_onionheaven(app, content_address=None):
 def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max_time=10):
     """Send a lifecycle notification (/online or /offline) to OnionHeaven.
 
-    Builds payload with content_address, healthcheck_address, and proof.
+    Builds payload with content_address, healthcheck_address, and ed25519 signature.
     Uses docker exec curl through the Tor SOCKS proxy.
 
     Returns True on success, False on failure.
@@ -355,19 +364,25 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     if not hc_addr or not hc_addr.endswith('.onion'):
         return False
 
-    # Compute proof = sha256(secret_key_bytes)
+    # Sign with ed25519
     try:
         import key_manager
-        secret_key_bytes = key_manager.extract_private_key()
-        proof = hashlib.sha256(secret_key_bytes).hexdigest()
+        import onion_auth
+        secret_key_bytes, public_key_raw = key_manager.extract_keys()
+        timestamp = onion_auth.make_timestamp()
+        signature = onion_auth.sign_payload(
+            secret_key_bytes, public_key_raw,
+            endpoint, content_addr, hc_addr, timestamp
+        )
     except Exception as e:
-        app.log(f"OnionHeaven: failed to extract key for /{endpoint} proof: {e}")
+        app.log(f"OnionHeaven: failed to sign /{endpoint} request: {e}")
         return False
 
     payload = json.dumps({
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
-        "proof": proof,
+        "timestamp": timestamp,
+        "signature": signature,
     })
 
     backoff = [10, 30]

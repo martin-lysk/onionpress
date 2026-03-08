@@ -34,8 +34,8 @@ OPTIONS = {
         'CFBundleName': 'OnionPress',
         'CFBundleDisplayName': 'OnionPress',
         'CFBundleIdentifier': 'press.onion.app',
-        'CFBundleVersion': '2.4.24',
-        'CFBundleShortVersionString': '2.4.24',
+        'CFBundleVersion': '2.4.25',
+        'CFBundleShortVersionString': '2.4.25',
         'LSUIElement': True,  # Run as menu bar app (no dock icon)
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
@@ -48,7 +48,7 @@ OPTIONS = {
     # will appear to succeed but the app will crash at launch with
     # "ModuleNotFoundError".
     'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'backup_manager',
-                 'onion_proxy', 'install_native_messaging', 'onionheaven'],
+                 'onion_proxy', 'install_native_messaging', 'onionheaven', 'onion_auth'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size

@@ -33,6 +33,7 @@
   - `src/backup_manager.py` — backup/restore
   - `src/setup_window.py` — native setup window
   - `src/onionheaven.py` — OnionHeaven integration
+  - `src/onion_auth.py` — ed25519 signatures for OnionHeaven API auth (also copied to `docker/tor/`)
   - `src/install_native_messaging.py` — browser extension support
   - `setup.py` — py2app config (if you add a new local module, add it to `includes` AND the build script's `cp` lines)
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.

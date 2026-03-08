@@ -15,7 +15,7 @@ Endpoints:
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
-ONIONHEAVEN_SERVER_VERSION = "2.4.24"
+ONIONHEAVEN_SERVER_VERSION = "2.4.25"
 
 import base64
 import hashlib
@@ -27,6 +27,7 @@ import sys
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+from onion_auth import verify_payload
 from onionheaven_common import (
     db_connect, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_arti,
@@ -129,6 +130,8 @@ def derive_onion_address(public_key_32):
 
 def is_local_request(handler):
     """Check if request is from localhost or Docker network (skip auth)."""
+    if os.environ.get("ONIONHEAVEN_ENFORCE_AUTH") == "1":
+        return False
     addr = handler.client_address[0]
     return (
         addr == "127.0.0.1"
@@ -138,12 +141,23 @@ def is_local_request(handler):
     )
 
 
-def verify_proof(stored_hash, proof):
-    """Constant-time comparison of proof against stored key_hash."""
-    if not stored_hash or not proof:
-        return False
-    import hmac
-    return hmac.compare_digest(stored_hash, proof)
+def _verify_signature(handler, data, endpoint):
+    """Verify ed25519 signature on a request.
+
+    Returns (ok, error_message). Skips verification for local requests.
+    """
+    if is_local_request(handler):
+        return True, ""
+
+    content_address = data.get("content_address", "")
+    healthcheck_address = data.get("healthcheck_address", "")
+    timestamp = data.get("timestamp", "")
+    signature = data.get("signature", "")
+
+    return verify_payload(
+        content_address, endpoint, healthcheck_address,
+        timestamp, signature
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +382,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             return
 
         # Validate required fields
-        for field in ("content_address", "healthcheck_address", "secret_key", "public_key"):
+        for field in ("content_address", "healthcheck_address", "arti_key_pem"):
             if not data.get(field):
                 self._send_json(400, {"error": f"Missing required field: {field}"})
                 return
@@ -385,52 +399,21 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
-        # Decode and validate keys
+        # Verify ed25519 signature (proves ownership of content_address)
+        ok, err = _verify_signature(self, data, "register")
+        if not ok:
+            self._send_json(403, {"error": err})
+            return
+
+        # Validate Arti PEM
         try:
-            secret_key = base64.b64decode(data["secret_key"])
-            public_key = base64.b64decode(data["public_key"])
+            arti_pem = base64.b64decode(data["arti_key_pem"])
         except Exception:
-            self._send_json(400, {"error": "Invalid base64 key encoding"})
+            self._send_json(400, {"error": "Invalid arti_key_pem base64"})
             return
-
-        if len(secret_key) != 64:
-            self._send_json(400, {
-                "error": f"Invalid secret_key length: expected 64 bytes, got {len(secret_key)}"
-            })
+        if not arti_pem.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
+            self._send_json(400, {"error": "Invalid arti_key_pem format"})
             return
-
-        # Handle 32 or 64-byte public key (64 = 32-byte Tor header + 32-byte key)
-        if len(public_key) == 64:
-            raw_pubkey = public_key[32:]
-        elif len(public_key) == 32:
-            raw_pubkey = public_key
-        else:
-            self._send_json(400, {
-                "error": f"Invalid public_key length: expected 32 or 64 bytes, got {len(public_key)}"
-            })
-            return
-
-        # Verify content_address matches public_key
-        derived_address = derive_onion_address(raw_pubkey)
-        if derived_address != content_address:
-            self._send_json(400, {
-                "error": "content_address does not match public_key",
-                "expected": derived_address,
-            })
-            return
-
-        # Build or validate Arti PEM
-        if data.get("arti_key_pem"):
-            try:
-                arti_pem = base64.b64decode(data["arti_key_pem"])
-            except Exception:
-                self._send_json(400, {"error": "Invalid arti_key_pem base64"})
-                return
-            if not arti_pem.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
-                self._send_json(400, {"error": "Invalid arti_key_pem format"})
-                return
-        else:
-            arti_pem = build_openssh_key(secret_key, raw_pubkey)
 
         # Store plaintext PEM key
         keys_dir = os.path.join(KEYS_DIR, content_address)
@@ -457,10 +440,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 pass
 
-        # Compute key_hash for auth
-        key_hash = hashlib.sha256(secret_key).hexdigest()
-
-        # Upsert into registry
+        # Upsert into registry (no key_hash — auth is via ed25519 signatures)
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         conn = db_connect()
         db_ensure_schema(conn)
@@ -471,18 +451,17 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         ).fetchone()
 
         conn.execute("""INSERT INTO registry
-            (content_address, healthcheck_address, registered_at, version, key_hash,
+            (content_address, healthcheck_address, registered_at, version,
              last_healthy, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'online')
+            VALUES (?, ?, ?, ?, ?, 'online')
             ON CONFLICT(content_address, healthcheck_address) DO UPDATE SET
                 registered_at = excluded.registered_at,
                 version = excluded.version,
-                key_hash = excluded.key_hash,
                 last_healthy = excluded.last_healthy,
                 status = 'online',
                 unregistered_at = NULL,
                 unregistered_reason = NULL""",
-            (content_address, healthcheck_address, now, version, key_hash, now))
+            (content_address, healthcheck_address, now, version, now))
         conn.commit()
 
         # Release any active takeover for this content_address
@@ -517,10 +496,16 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
+        # Verify ed25519 signature
+        ok, err = _verify_signature(self, data, "unregister")
+        if not ok:
+            self._send_json(403, {"error": err})
+            return
+
         conn = db_connect()
         db_ensure_schema(conn)
 
-        # Find entry for auth check
+        # Find entry
         entry = conn.execute(
             "SELECT * FROM registry WHERE content_address = ? LIMIT 1",
             (content_address,)
@@ -530,21 +515,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             conn.close()
             self._send_json(404, {"error": "Entry not found"})
             return
-
-        # Auth check
-        if not is_local_request(self):
-            proof = data.get("proof", "")
-            stored_hash = entry["key_hash"] or ""
-            if not stored_hash:
-                conn.close()
-                self._send_json(403, {
-                    "error": "No key_hash on file — re-register first to enable remote unregister"
-                })
-                return
-            if not verify_proof(stored_hash, proof):
-                conn.close()
-                self._send_json(403, {"error": "Invalid proof"})
-                return
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -627,10 +597,16 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
+        # Verify ed25519 signature
+        ok, err = _verify_signature(self, data, "online")
+        if not ok:
+            self._send_json(403, {"error": err})
+            return
+
         conn = db_connect()
         db_ensure_schema(conn)
 
-        # Find entry for auth check
+        # Find entry
         if healthcheck_address:
             entry = conn.execute(
                 "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
@@ -646,19 +622,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             conn.close()
             self._send_json(404, {"error": "Entry not found"})
             return
-
-        # Auth check
-        if not is_local_request(self):
-            proof = data.get("proof", "")
-            stored_hash = entry["key_hash"] or ""
-            if not stored_hash:
-                conn.close()
-                self._send_json(403, {"error": "No key_hash on file — re-register first"})
-                return
-            if not verify_proof(stored_hash, proof):
-                conn.close()
-                self._send_json(403, {"error": "Invalid proof"})
-                return
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -718,38 +681,14 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
-        conn = db_connect()
-        db_ensure_schema(conn)
-
-        # Find entry for auth check
-        if healthcheck_address:
-            entry = conn.execute(
-                "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
-                (content_address, healthcheck_address)
-            ).fetchone()
-        else:
-            entry = conn.execute(
-                "SELECT * FROM registry WHERE content_address = ? LIMIT 1",
-                (content_address,)
-            ).fetchone()
-
-        if not entry:
-            conn.close()
-            self._send_json(404, {"error": "Entry not found"})
+        # Verify ed25519 signature
+        ok, err = _verify_signature(self, data, "offline")
+        if not ok:
+            self._send_json(403, {"error": err})
             return
 
-        # Auth check
-        if not is_local_request(self):
-            proof = data.get("proof", "")
-            stored_hash = entry["key_hash"] or ""
-            if not stored_hash:
-                conn.close()
-                self._send_json(403, {"error": "No key_hash on file — re-register first"})
-                return
-            if not verify_proof(stored_hash, proof):
-                conn.close()
-                self._send_json(403, {"error": "Invalid proof"})
-                return
+        conn = db_connect()
+        db_ensure_schema(conn)
 
         # Takeover via the shared function (force=True since we know it's offline)
         if healthcheck_address:

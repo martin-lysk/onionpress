@@ -158,10 +158,10 @@ def build_openssh_key(private_key, public_key):
     return pem.encode("utf-8")
 
 
-def extract_private_key():
+def extract_keys():
     """
-    Extract the Ed25519 expanded private key from the Arti keystore.
-    Returns the raw 64-byte private key.
+    Extract both Ed25519 keys from the Arti keystore in one docker exec.
+    Returns (private_key_64bytes, public_key_32bytes).
     """
     try:
         result = subprocess.run(
@@ -172,11 +172,19 @@ def extract_private_key():
         if result.returncode != 0:
             raise Exception(f"Could not read key file: {result.stderr.decode().strip()}")
 
-        private_key, _public_key = parse_openssh_key(result.stdout)
-        return private_key
+        return parse_openssh_key(result.stdout)
 
     except Exception as e:
-        raise Exception(f"Failed to extract private key: {e}")
+        raise Exception(f"Failed to extract keys: {e}")
+
+
+def extract_private_key():
+    """
+    Extract the Ed25519 expanded private key from the Arti keystore.
+    Returns the raw 64-byte private key.
+    """
+    private_key, _public_key = extract_keys()
+    return private_key
 
 
 def extract_public_key():
@@ -184,20 +192,8 @@ def extract_public_key():
     Extract the Ed25519 public key from the Arti keystore.
     Returns the raw 32-byte public key.
     """
-    try:
-        result = subprocess.run(
-            ["docker", "exec", CONTAINER, "cat", ARTI_KEYSTORE_PATH],
-            capture_output=True,
-            timeout=10
-        )
-        if result.returncode != 0:
-            raise Exception(f"Could not read key file: {result.stderr.decode().strip()}")
-
-        _private_key, public_key = parse_openssh_key(result.stdout)
-        return public_key
-
-    except Exception as e:
-        raise Exception(f"Failed to extract public key: {e}")
+    _private_key, public_key = extract_keys()
+    return public_key
 
 
 def write_private_key(private_key, public_key):
