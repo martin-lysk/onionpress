@@ -220,14 +220,6 @@ def main():
                 ca = entry["content_address"]
                 ha = entry["healthcheck_address"]
 
-                # Update last_checked (commit immediately to minimize lock hold time)
-                conn.execute(
-                    "UPDATE registry SET last_checked = ? "
-                    "WHERE content_address = ? AND healthcheck_address = ?",
-                    (now_str, ca, ha)
-                )
-                conn.commit()
-
                 if entry["status"] == "online":
                     # Check if heartbeat is stale
                     last_healthy_stale = True
