@@ -28,8 +28,12 @@
 #   # Monitor dashboard
 #   ./onionheaven-stress-test.sh --mode coordinator
 #
-#   # Clean up
+#   # Clean up (all stress test artifacts)
 #   ./onionheaven-stress-test.sh --cleanup
+#
+#   # Clean up only stale stress tests (no activity in 2+ hours)
+#   ./onionheaven-stress-test.sh --cleanup-stale
+#   ./onionheaven-stress-test.sh --cleanup-stale --stale-hours 1
 
 set -euo pipefail
 
@@ -41,6 +45,8 @@ FAILING=""        # auto: half of total
 ONIONHEAVEN_ADDR=""    # auto-detect from local tor container
 OUTPUT_DIR="./onionheaven-stress-results"
 CLEANUP=false
+CLEANUP_STALE=false
+STALE_HOURS=2
 PER_CTR=50        # workers per container
 BATCH_SIZE=0      # 0 = start all containers at once
 STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
@@ -66,6 +72,8 @@ while [ $# -gt 0 ]; do
         --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
         --batch-size)  BATCH_SIZE="$2"; shift 2 ;;
         --cleanup)     CLEANUP=true; shift ;;
+        --cleanup-stale) CLEANUP_STALE=true; shift ;;
+        --stale-hours)   STALE_HOURS="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
             exit 0
@@ -410,7 +418,7 @@ su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
 ARTI_PID=\$!
 
 # Wait for Arti keys, then self-register with OnionHeaven over Tor
-STRESS_VERSION="${STRESS_VERSION}" python3 /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} &
+STRESS_VERSION="${STRESS_VERSION}" python3 -u /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} > /bootstrap.log 2>&1 &
 
 wait \$ARTI_PID
 STARTEOF
@@ -2133,7 +2141,114 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
     log "Cleanup complete: ${count} stress-test entries removed"
 }
 
+# ── Stale cleanup (only removes tests with no activity in N hours) ───────────
+run_cleanup_stale() {
+    log "=== OnionHeaven Stale Stress Test Cleanup (>${STALE_HOURS}h inactive) ==="
+
+    if ! docker_cmd info >/dev/null 2>&1; then
+        echo "ERROR: Cannot reach Docker"
+        exit 1
+    fi
+
+    # Must be running on the OnionHeaven host (need DB access)
+    # NOTE: Stale stress-test entries are also auto-cleaned by the heartbeat
+    # monitor after 2 hours taken-over. This command is for manual/immediate cleanup.
+    local content_addr
+    content_addr=$(docker_cmd exec onionpress-tor \
+        su -s /bin/sh arti -c "arti hss --nickname wordpress onion-address -c /etc/arti/arti.toml" 2>/dev/null) || true
+    if [ "$content_addr" != "$KNOWN_ONIONHEAVEN_ADDR" ]; then
+        echo "ERROR: --cleanup-stale must run on the OnionHeaven host (need DB access)"
+        echo "NOTE:  Stale stress-test entries are auto-cleaned by the heartbeat monitor after 2h."
+        echo "       No manual cleanup needed from remote machines."
+        exit 1
+    fi
+    IS_ONIONHEAVEN_HOST=true
+    detect_onionheaven_addr
+
+    # Find stress test versions with no activity in STALE_HOURS
+    local stale_versions
+    stale_versions=$(docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
+        "SELECT version, COUNT(*), MAX(last_healthy) FROM registry
+         WHERE unregistered_at IS NULL
+           AND version LIKE 'stress-test%'
+           AND last_healthy < datetime('now', '-${STALE_HOURS} hours')
+         GROUP BY version;" 2>/dev/null) || true
+
+    if [ -z "$stale_versions" ]; then
+        log "No stale stress tests found (all have activity within ${STALE_HOURS}h)"
+
+        # Show active stress tests for info
+        local active
+        active=$(docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
+            "SELECT version, COUNT(*), MAX(last_healthy) FROM registry
+             WHERE unregistered_at IS NULL AND version LIKE 'stress-test%'
+             GROUP BY version;" 2>/dev/null) || true
+        if [ -n "$active" ]; then
+            log "Active stress tests:"
+            echo "$active" | while IFS='|' read -r ver cnt last; do
+                log "  ${ver}: ${cnt} entries, last activity ${last}"
+            done
+        fi
+        return
+    fi
+
+    log "Stale stress tests to clean up:"
+    echo "$stale_versions" | while IFS='|' read -r ver cnt last; do
+        log "  ${ver}: ${cnt} entries, last activity ${last}"
+    done
+
+    # Mark stale entries as unregistered directly in DB
+    local total_cleaned=0
+    while IFS='|' read -r ver cnt last; do
+        [ -z "$ver" ] && continue
+        local now
+        now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
+            "UPDATE registry SET unregistered_at = '${now}',
+                                 unregistered_reason = 'stale-cleanup',
+                                 status = 'unregistered'
+             WHERE version = '${ver}'
+               AND unregistered_at IS NULL
+               AND last_healthy < datetime('now', '-${STALE_HOURS} hours');" 2>/dev/null || true
+        log "  Cleaned up ${cnt} entries from ${ver}"
+        total_cleaned=$((total_cleaned + cnt))
+    done <<< "$stale_versions"
+
+    # Also remove any local stress-worker containers that aren't running a test
+    local stale_containers
+    stale_containers=$(docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' || true)
+    if [ -n "$stale_containers" ]; then
+        # Check if any container has had recent bootstrap activity
+        local removed=0
+        while read -r ctr; do
+            [ -z "$ctr" ] && continue
+            # If worker-info.json exists and bootstrap isn't running, container is done
+            local has_info
+            has_info=$(docker_cmd exec "$ctr" sh -c 'test -f /worker-info.json && echo yes || echo no' 2>/dev/null) || has_info="unknown"
+            local has_bootstrap
+            has_bootstrap=$(docker_cmd exec "$ctr" sh -c 'ps aux 2>/dev/null | grep -c "[w]orker-bootstrap"' 2>/dev/null) || has_bootstrap="0"
+            local has_heartbeat
+            has_heartbeat=$(docker_cmd exec "$ctr" sh -c 'ps aux 2>/dev/null | grep -c "[h]eartbeat_loop"' 2>/dev/null) || has_heartbeat="0"
+
+            if [ "$has_info" = "yes" ] && [ "$has_bootstrap" = "0" ] && [ "$has_heartbeat" = "0" ]; then
+                docker_cmd rm -f "$ctr" 2>/dev/null || true
+                removed=$((removed + 1))
+                log "  Removed idle container: ${ctr}"
+            else
+                log "  Keeping active container: ${ctr} (info=${has_info} bootstrap=${has_bootstrap} heartbeat=${has_heartbeat})"
+            fi
+        done <<< "$stale_containers"
+        [ "$removed" -gt 0 ] && log "Removed ${removed} idle containers"
+    fi
+
+    log "Stale cleanup complete: ${total_cleaned} entries cleaned"
+}
+
 # ── Main dispatch ─────────────────────────────────────────────────────────────
+if [ "$CLEANUP_STALE" = true ]; then
+    run_cleanup_stale
+    exit 0
+fi
 if [ "$CLEANUP" = true ]; then
     run_cleanup
     exit 0
