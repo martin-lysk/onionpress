@@ -101,29 +101,29 @@ docker exec --user root "$CLI" apk add --quiet curl > /dev/null 2>&1
 
 # ── Bootstrap ───────────────────────────────────────────────────────────────
 
-log "Waiting for publisher to bootstrap..."
-for i in $(seq 1 120); do
+log "Waiting for publisher to bootstrap (may take a few minutes)..."
+for i in $(seq 1 60); do
     addr=$(docker exec "$PUB" \
         arti hss --nickname svc0 onion-address -c /home/arti/arti.toml \
         2>/dev/null | tr -d '[:space:]') || true
     if [ -n "$addr" ] && echo "$addr" | grep -q ".onion"; then
-        log "  Publisher ready (${i}s)"
+        log "  Publisher ready ($((i * 5))s)"
         break
     fi
-    [ "$i" -eq 120 ] && { log "ERROR: Publisher did not bootstrap"; exit 1; }
-    sleep 2
+    [ "$i" -eq 60 ] && { log "ERROR: Publisher did not bootstrap after 300s"; exit 1; }
+    sleep 5
 done
 
 log "Waiting for client to bootstrap..."
-for i in $(seq 1 120); do
+for i in $(seq 1 60); do
     if docker exec "$CLI" curl -sf -o /dev/null \
         --socks5-hostname 127.0.0.1:9050 --max-time 8 \
         http://example.com/ 2>/dev/null; then
-        log "  Client ready (${i}s)"
+        log "  Client ready ($((i * 5))s)"
         break
     fi
-    [ "$i" -eq 120 ] && log "WARNING: Client may not be ready"
-    sleep 2
+    [ "$i" -eq 60 ] && log "WARNING: Client may not be ready"
+    sleep 5
 done
 
 # ── Collect .onion addresses ────────────────────────────────────────────────
