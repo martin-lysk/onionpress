@@ -26,7 +26,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from onionheaven_common import (
-    db_connect, db_ensure_schema, log,
+    db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_arti,
     is_farm_mode, check_farm_scaling,
     PROPAGATION_DELAY, TOR_MANAGER,
@@ -137,7 +137,7 @@ def startup_reconciliation(conn):
         "WHERE status = 'online' AND unregistered_at IS NULL",
         (now,)
     )
-    conn.commit()
+    db_commit_with_retry(conn)
 
     online_count = conn.execute(
         "SELECT COUNT(*) FROM registry WHERE status = 'online' AND unregistered_at IS NULL"
@@ -161,7 +161,7 @@ def startup_reconciliation(conn):
                         f"DELETE FROM {table} WHERE container_name = ?", (name,)
                     )
                     log(f"  removed stale {table} entry: {name}")
-            conn.commit()
+            db_commit_with_retry(conn)
         except Exception as e:
             log(f"  warning: could not clean {table}: {e}")
 
@@ -274,7 +274,7 @@ def main():
                             "WHERE content_address = ? AND healthcheck_address = ?",
                             (now_str, ca, ha)
                         )
-                        conn.commit()
+                        db_commit_with_retry(conn)
                         continue
 
                     audit_count += 1
@@ -286,7 +286,7 @@ def main():
                             "WHERE content_address = ? AND healthcheck_address = ?",
                             (now_str, ca, ha)
                         )
-                        conn.commit()
+                        db_commit_with_retry(conn)
                         release_function(conn, ca, ha, force=True)
 
                     # Auto-cleanup: unregister stress-test entries taken-over for >2 hours
@@ -302,9 +302,9 @@ def main():
                             "WHERE content_address = ? AND healthcheck_address = ?",
                             (now_str, ca, ha)
                         )
-                        conn.commit()
+                        db_commit_with_retry(conn)
 
-                conn.commit()
+                db_commit_with_retry(conn)
 
             # Flush pending SIGHUPs
             if not is_farm_mode(conn):

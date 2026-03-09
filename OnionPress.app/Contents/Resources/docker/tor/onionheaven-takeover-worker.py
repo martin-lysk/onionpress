@@ -28,7 +28,7 @@ import time
 from datetime import datetime, timezone
 
 from onionheaven_common import (
-    db_connect, db_ensure_schema, log,
+    db_connect, db_commit_with_retry, db_ensure_schema, log,
     _takeover_local, _release_local, flush_sighup_arti,
     TOR_MANAGER, ONIONHEAVEN_DATA_DIR,
 )
@@ -50,7 +50,7 @@ def register_self(conn):
         "last_heartbeat = excluded.last_heartbeat, status = 'active'",
         (CONTAINER_NAME, MAX_SERVICES, now)
     )
-    conn.commit()
+    db_commit_with_retry(conn)
     log(f"takeover-worker: registered as {CONTAINER_NAME} (max {MAX_SERVICES} services)")
 
 
@@ -86,7 +86,7 @@ def startup_reconciliation(conn):
             "WHERE takeover_container = ? AND status = 'taken-over'",
             (CONTAINER_NAME,)
         )
-        conn.commit()
+        db_commit_with_retry(conn)
 
     # Clean orphaned services from Arti toml — entries not backed by DB rows
     _clean_orphaned_services(conn)
@@ -190,7 +190,7 @@ def process_takeovers(conn):
             "WHERE content_address = ? AND healthcheck_address = ?",
             (ca, ha)
         )
-        conn.commit()
+        db_commit_with_retry(conn)
         count += 1
 
     if count > 0:
@@ -223,7 +223,7 @@ def process_releases(conn):
             "WHERE content_address = ? AND healthcheck_address = ?",
             (ca, ha)
         )
-        conn.commit()
+        db_commit_with_retry(conn)
         count += 1
 
     if count > 0:
@@ -243,7 +243,7 @@ def update_active_count(conn):
         "UPDATE takeover_containers SET active_services = ? WHERE container_name = ?",
         (count, CONTAINER_NAME)
     )
-    conn.commit()
+    db_commit_with_retry(conn)
 
 
 def heartbeat(conn):
@@ -253,7 +253,7 @@ def heartbeat(conn):
         "UPDATE takeover_containers SET last_heartbeat = ? WHERE container_name = ?",
         (now, CONTAINER_NAME)
     )
-    conn.commit()
+    db_commit_with_retry(conn)
 
 
 def wait_for_db():

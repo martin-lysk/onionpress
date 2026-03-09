@@ -15,6 +15,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -112,11 +113,30 @@ def _do_sighup():
 def db_connect():
     """Open OnionHeaven SQLite database with WAL mode."""
     os.makedirs(ONIONHEAVEN_DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+def db_commit_with_retry(conn, max_retries=5, base_delay=0.5):
+    """Commit with retry on 'database is locked' errors.
+
+    The busy_timeout PRAGMA handles most contention, but under extreme load
+    (800+ concurrent heartbeats) the timeout can still be exceeded.
+    """
+    for attempt in range(max_retries):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                log(f"DB locked on commit, retry {attempt + 1}/{max_retries} in {delay:.1f}s")
+                time.sleep(delay)
+            else:
+                raise
 
 
 def db_ensure_schema(conn):
@@ -164,7 +184,7 @@ def db_ensure_schema(conn):
             audit_at            TEXT,
             PRIMARY KEY (content_address, healthcheck_address)
         )""")
-        conn.commit()
+        db_commit_with_retry(conn)
     else:
         # Table exists — add any missing columns
         for col in [
@@ -180,7 +200,7 @@ def db_ensure_schema(conn):
             conn.execute("ALTER TABLE registry ADD COLUMN consecutive_fails INTEGER DEFAULT 0")
         if "wordpress_healthy" not in cols:
             conn.execute("ALTER TABLE registry ADD COLUMN wordpress_healthy INTEGER")
-        conn.commit()
+        db_commit_with_retry(conn)
 
     # Drop old poll_containers table if it exists (no longer needed — heartbeat-based)
     conn.execute("DROP TABLE IF EXISTS poll_containers")
@@ -199,7 +219,7 @@ def db_ensure_schema(conn):
         requested_at    TEXT NOT NULL,
         fulfilled_at    TEXT
     )""")
-    conn.commit()
+    db_commit_with_retry(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +267,7 @@ def _discover_takeover_containers(conn):
                     "VALUES (?, 50, 0, ?, 'active')",
                     (name, now)
                 )
-                conn.commit()
+                db_commit_with_retry(conn)
                 log(f"Discovered running takeover container not in DB: {name}")
         except Exception as e:
             log(f"Warning: takeover container discovery failed for {name}: {e}")
@@ -325,7 +345,7 @@ def check_farm_scaling(conn, active_entries):
                         "INSERT INTO farm_scale_requests (worker_type, requested_at) VALUES ('takeover', ?)",
                         (now,)
                     )
-                    conn.commit()
+                    db_commit_with_retry(conn)
                     log(f"Farm scale-up requested: takeover (active={total_active}, capacity={total_capacity})")
     except sqlite3.OperationalError:
         pass
@@ -369,7 +389,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
         "WHERE content_address = ? AND healthcheck_address = ?",
         (now, content_address, healthcheck_address)
     )
-    conn.commit()
+    db_commit_with_retry(conn)
     log(f"Marked {healthcheck_address} as taken-over for {content_address}")
 
     # Arti guards: should we actually start serving the onion service?
@@ -417,7 +437,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
                 "WHERE content_address = ? AND healthcheck_address = ?",
                 (container, now, content_address, healthcheck_address)
             )
-            conn.commit()
+            db_commit_with_retry(conn)
             log(f"Queued takeover of {content_address} → farm worker {container}")
             return
         log(f"WARNING: farm mode but no active containers — falling back to local takeover")
@@ -477,7 +497,7 @@ def release_function(conn, content_address, healthcheck_address, force=False):
         "WHERE content_address = ? AND healthcheck_address = ?",
         (now, content_address, healthcheck_address)
     )
-    conn.commit()
+    db_commit_with_retry(conn)
     log(f"Marked {healthcheck_address} as online for {content_address}")
 
     # Route to farm worker or execute locally
@@ -488,7 +508,7 @@ def release_function(conn, content_address, healthcheck_address, force=False):
             "WHERE content_address = ? AND healthcheck_address = ?",
             (now, content_address, healthcheck_address)
         )
-        conn.commit()
+        db_commit_with_retry(conn)
         log(f"Queued release of {content_address} → farm worker {takeover_container}")
         return
 

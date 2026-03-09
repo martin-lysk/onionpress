@@ -29,7 +29,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from onion_auth import verify_payload
 from onionheaven_common import (
-    db_connect, db_ensure_schema, log,
+    db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_arti,
     KEYS_DIR, PROPAGATION_DELAY,
 )
@@ -42,6 +42,7 @@ LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 8083
 
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
+
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +457,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 unregistered_at = NULL,
                 unregistered_reason = NULL""",
             (content_address, healthcheck_address, now, version, now))
-        conn.commit()
+        db_commit_with_retry(conn)
 
         # Release any active takeover for this content_address
         release_function(conn, content_address, healthcheck_address, force=True)
@@ -544,7 +545,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     "WHERE content_address = ?",
                     (now, content_address)
                 )
-        conn.commit()
+        db_commit_with_retry(conn)
 
         # Check if no healthy rows remain for this content-address — trigger takeover
         healthy_remaining = conn.execute(
@@ -642,7 +643,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     "WHERE content_address = ? AND healthcheck_address = ?",
                     (now, content_address, healthcheck_address)
                 )
-            conn.commit()
+            db_commit_with_retry(conn)
             release_function(conn, content_address, healthcheck_address, force=True)
         else:
             # Update all rows for this content_address
@@ -657,7 +658,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "WHERE content_address = ?",
                 (now, content_address)
             )
-            conn.commit()
+            db_commit_with_retry(conn)
             # Release for each row
             for row in rows:
                 release_function(conn, content_address, row["healthcheck_address"], force=True)
