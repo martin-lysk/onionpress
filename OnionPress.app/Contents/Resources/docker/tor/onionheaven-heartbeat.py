@@ -214,6 +214,7 @@ def main():
             stale_count = 0
             audit_count = 0
             false_positive_count = 0
+            stale_cleanup_count = 0
 
             for entry in entries:
                 ca = entry["content_address"]
@@ -288,6 +289,21 @@ def main():
                         conn.commit()
                         release_function(conn, ca, ha, force=True)
 
+                    # Auto-cleanup: unregister stress-test entries taken-over for >2 hours
+                    # Real users will re-register when they come back online; stress tests won't.
+                    version = entry.get("version", "")
+                    if version and version.startswith("stress-test") and since_takeover > 7200:
+                        stale_cleanup_count += 1
+                        log(f"Auto-cleanup stale stress-test entry: {ca} (taken-over {since_takeover/3600:.1f}h ago)")
+                        release_function(conn, ca, ha, force=True)
+                        conn.execute(
+                            "UPDATE registry SET unregistered_at = ?, "
+                            "unregistered_reason = 'stale-stress-test-cleanup', status = 'unregistered' "
+                            "WHERE content_address = ? AND healthcheck_address = ?",
+                            (now_str, ca, ha)
+                        )
+                        conn.commit()
+
                 conn.commit()
 
             # Flush pending SIGHUPs
@@ -305,6 +321,8 @@ def main():
                 parts.append(f"{audit_count} audits")
             if false_positive_count:
                 parts.append(f"{false_positive_count} false positives")
+            if stale_cleanup_count:
+                parts.append(f"{stale_cleanup_count} stress-test cleanups")
             log(f"heartbeat pass complete — {', '.join(parts)} in {elapsed:.1f}s")
 
             conn.close()
