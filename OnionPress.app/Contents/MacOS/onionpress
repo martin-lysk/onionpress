@@ -261,12 +261,12 @@ FROM ghcr.io/brewsterkahle/onionpress-tor:latest
 COPY entrypoint.sh /entrypoint.sh
 COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
 COPY onionheaven_common.py /onionheaven_common.py
-COPY onionheaven-poller.py /onionheaven-poller.py
+COPY onionheaven-heartbeat.py /onionheaven-heartbeat.py
 COPY onionheaven-server.py /onionheaven-server.py
 COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
 COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
 COPY onionheaven-redirect.sh /onionheaven-redirect.sh
-RUN chmod +x /entrypoint.sh /onionheaven-poller.py /onionheaven-server.py /onionheaven-tor-manager.sh /onionheaven-takeover-worker.py /onionheaven-redirect.sh
+RUN chmod +x /entrypoint.sh /onionheaven-heartbeat.py /onionheaven-server.py /onionheaven-tor-manager.sh /onionheaven-takeover-worker.py /onionheaven-redirect.sh
 ONIONHEAVEN_DOCKERFILE
         # Remove old tor-polling container if it exists (renamed to onionheaven)
         if docker inspect onionpress-tor-polling >/dev/null 2>&1; then
