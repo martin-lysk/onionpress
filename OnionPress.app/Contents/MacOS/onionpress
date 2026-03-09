@@ -357,6 +357,23 @@ _onionheaven_farm_monitor() {
             continue
         fi
 
+        # Memory guard: skip scale-up if VM memory usage is too high (>85%)
+        local vm_mem_pct
+        vm_mem_pct=$(docker exec onionheaven sh -c \
+            "awk '/MemTotal/{t=\$2} /MemAvailable/{a=\$2} END{printf \"%d\", (1-a/t)*100}' /proc/meminfo" 2>/dev/null) || vm_mem_pct=0
+        if [ "$vm_mem_pct" -gt 85 ] 2>/dev/null; then
+            log "OnionHeaven farm: skipping scale-up — VM memory at ${vm_mem_pct}% (>85%)"
+            # Mark requests as fulfilled so they don't pile up
+            while IFS='|' read -r req_id req_type; do
+                local now
+                now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                docker exec onionheaven sqlite3 "$db" \
+                    "UPDATE farm_scale_requests SET fulfilled_at = '${now}' WHERE id = ${req_id}" \
+                    >> "$LOG_FILE" 2>&1 || true
+            done <<< "$requests"
+            continue
+        fi
+
         # Process each request (format: "id|worker_type" per line)
         # Use here-string (<<<) to avoid subshell — variable updates persist
         while IFS='|' read -r req_id req_type; do

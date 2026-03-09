@@ -292,8 +292,10 @@ def assign_takeover_container(conn):
     return next(_takeover_rr_cycle)
 
 
-# Max services per takeover worker before requesting scale-up
-TAKEOVER_SCALE_THRESHOLD = int(os.environ.get("ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD", "8"))
+# Max services per takeover worker before requesting scale-up.
+# Each Arti instance can handle many onion services — keep this high to avoid
+# spawning too many containers (each runs a full Arti at ~60MB RAM).
+TAKEOVER_SCALE_THRESHOLD = int(os.environ.get("ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD", "50"))
 
 
 def check_farm_scaling(conn, active_entries):
