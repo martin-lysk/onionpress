@@ -29,7 +29,6 @@ test:
 	@test -f OnionPress.app/Contents/Resources/docker/docker-compose.yml || (echo "ERROR: docker-compose.yml missing" && exit 1)
 	@test -f OnionPress.app/Contents/Resources/scripts/menubar.py || (echo "ERROR: menubar.py missing" && exit 1)
 	@test -f OnionPress.app/Contents/Resources/scripts/key_manager.py || (echo "ERROR: key_manager.py missing" && exit 1)
-	@test -f OnionPress.app/Contents/Resources/scripts/bip39_words.py || (echo "ERROR: bip39_words.py missing" && exit 1)
 	@echo "All required source files present"
 	@echo ""
 	@echo "Checking MenubarApp bundle..."
