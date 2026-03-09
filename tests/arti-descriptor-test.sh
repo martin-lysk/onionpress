@@ -84,6 +84,7 @@ start_arti() {
         chown arti:arti /home/arti/arti.toml
         mkdir -p /home/arti/.local/share/arti/cache /home/arti/.local/share/arti/state
         chown -R arti:arti /home/arti/.local
+        chmod 700 /home/arti/.local/share/arti/state /home/arti/.local/share/arti/cache
     '
     docker exec -d "$name" arti proxy -c /home/arti/arti.toml
 }
