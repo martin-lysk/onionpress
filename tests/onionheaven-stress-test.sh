@@ -1127,6 +1127,8 @@ flush_client_descriptor_cache() {
 wait_for_takeover() {
     local expected="$1"
     local timeout_secs="${2:-600}"
+    local poll_start="${3:-$((TOTAL - FAILING))}"
+    local poll_count="${4:-$FAILING}"
 
     log "Waiting for ${expected} takeovers — polling disabled workers' .onion addresses for 302 redirects (timeout: ${timeout_secs}s)..."
 
@@ -1138,9 +1140,8 @@ wait_for_takeover() {
     local prev_taken=0
 
     # Get content addresses of the workers we disabled
-    local fail_start=$((TOTAL - FAILING))
     local content_addrs
-    content_addrs=$(get_worker_content_addrs "$fail_start" "$FAILING")
+    content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         parallel_check_addrs "$content_addrs" "302"
@@ -1185,6 +1186,8 @@ wait_for_takeover() {
 wait_for_recovery() {
     local expected_healthy="$1"
     local timeout_secs="${2:-600}"
+    local poll_start="${3:-$((TOTAL - FAILING))}"
+    local poll_count="${4:-$FAILING}"
 
     log "Waiting for recovery — polling previously-failed workers for 200 OK (timeout: ${timeout_secs}s)..."
 
@@ -1197,9 +1200,8 @@ wait_for_recovery() {
     local prev_recovered=0
 
     # Get content addresses of the workers that were disabled
-    local fail_start=$((TOTAL - FAILING))
     local content_addrs
-    content_addrs=$(get_worker_content_addrs "$fail_start" "$FAILING")
+    content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         parallel_check_addrs "$content_addrs" "200 302"
@@ -1790,7 +1792,7 @@ run_worker() {
         notify_online "$fail_start" "$FAILING"
         flush_client_descriptor_cache
         log "Phase A.2: Waiting for recovery..."
-        if ! wait_for_recovery "$TOTAL" 600; then
+        if ! wait_for_recovery "$FAILING" 600; then
             log "WARNING: Not all workers recovered from graceful offline"
         fi
         local recovery_elapsed=$(( $(date +%s) - scenario_ts ))
@@ -1837,7 +1839,7 @@ run_worker() {
         enable_workers_silent "$fail_start" "$FAILING"
         flush_client_descriptor_cache
         log "Phase B.2: Waiting for heartbeat-detected recovery..."
-        if ! wait_for_recovery "$TOTAL" 900; then
+        if ! wait_for_recovery "$FAILING" 900; then
             log "WARNING: Not all workers recovered via heartbeat detection"
         fi
         recovery_elapsed=$(( $(date +%s) - scenario_ts ))
@@ -1868,7 +1870,7 @@ run_worker() {
     disable_workers 0 "$TOTAL"
     flush_client_descriptor_cache
     log "Phase C.1: Waiting for all ${TOTAL} takeovers..."
-    if ! wait_for_takeover "$TOTAL" 900; then
+    if ! wait_for_takeover "$TOTAL" 900 0 "$TOTAL"; then
         log "WARNING: Not all workers were taken over"
     fi
     takeover_elapsed=$(( $(date +%s) - scenario_ts ))
@@ -1931,7 +1933,7 @@ run_worker() {
     notify_online 0 "$TOTAL"
     flush_client_descriptor_cache
     log "Phase C.3: Waiting for all ${TOTAL} to recover..."
-    if ! wait_for_recovery "$TOTAL" 900; then
+    if ! wait_for_recovery "$TOTAL" 900 0 "$TOTAL"; then
         log "WARNING: Not all workers recovered"
     fi
     recovery_elapsed=$(( $(date +%s) - scenario_ts ))
