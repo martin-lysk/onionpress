@@ -163,7 +163,7 @@ write_phase_header() {
   $(date '+%Y-%m-%d %H:%M:%S')
 --------------------------------------------------------------------
   Workers: ${TOTAL} total (${HEALTHY} healthy, ${FAILING} failing)
-  Containers: ${NUM_CONTAINERS} x ${PER_CTR}/container
+  Stress-worker containers: ${NUM_CONTAINERS} x ${PER_CTR}/container
   OnionHeaven: ${ONIONHEAVEN_ADDR}
   OnionHeaven server version: ${oh_version:-unknown}
   Stress test version: ${STRESS_VERSION}
@@ -1697,7 +1697,7 @@ run_worker() {
     log "=== OnionHeaven Stress Test (Arti) ==="
     log "OnionHeaven: ${ONIONHEAVEN_ADDR}"
     log "Workers: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
-    log "Containers: ${NUM_CONTAINERS} × ${PER_CTR} workers/container"
+    log "Stress-worker containers: ${NUM_CONTAINERS} × ${PER_CTR} workers/container"
     if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
         log "Container batch size: ${BATCH_SIZE}"
     fi

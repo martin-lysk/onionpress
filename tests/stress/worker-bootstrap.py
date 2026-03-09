@@ -167,105 +167,96 @@ def wait_for_socks():
     return False
 
 
+def bootstrap_one_worker(i):
+    """Bootstrap a single worker: wait for address, read keys, register over Tor."""
+    content_nick = f"w{CONTAINER_IDX}_{i}_content"
+    hc_nick = f"w{CONTAINER_IDX}_{i}_hc"
+    global_idx = CONTAINER_IDX * NUM_WORKERS + i
+
+    print(f"[worker {i}] Waiting for Arti addresses...", flush=True)
+    content_addr = get_onion_address(content_nick)
+    hc_addr = get_onion_address(hc_nick)
+
+    if not content_addr or not hc_addr:
+        print(f"[worker {i}] ERROR: timed out waiting for addresses", flush=True)
+        return {
+            "global_index": global_idx, "local_index": i,
+            "container": CONTAINER_IDX, "registered": False,
+            "error": "address_timeout",
+        }
+
+    print(f"[worker {i}] content={content_addr} hc={hc_addr}", flush=True)
+
+    pem_path = f"{KEYSTORE_BASE}/{content_nick}/ks_hs_id.ed25519_expanded_private"
+    for _ in range(30):
+        if os.path.exists(pem_path):
+            break
+        time.sleep(1)
+
+    if not os.path.exists(pem_path):
+        print(f"[worker {i}] ERROR: PEM not found at {pem_path}", flush=True)
+        return {
+            "global_index": global_idx, "local_index": i,
+            "container": CONTAINER_IDX,
+            "content_address": content_addr, "healthcheck_address": hc_addr,
+            "registered": False, "error": "pem_not_found",
+        }
+
+    try:
+        pubkey, privkey = parse_openssh_pem(pem_path)
+    except Exception as e:
+        print(f"[worker {i}] ERROR: failed to parse PEM: {e}", flush=True)
+        return {
+            "global_index": global_idx, "local_index": i,
+            "container": CONTAINER_IDX,
+            "content_address": content_addr, "healthcheck_address": hc_addr,
+            "registered": False, "error": f"pem_parse: {e}",
+        }
+
+    with open(pem_path, "rb") as f:
+        pem_data = f.read()
+    pem_b64 = base64.b64encode(pem_data).decode()
+
+    print(f"[worker {i}] Registering with OnionHeaven over Tor...", flush=True)
+    result = register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, worker_id=global_idx)
+    ok = False
+    try:
+        resp = json.loads(result)
+        ok = resp.get("registered", False)
+    except Exception:
+        pass
+
+    status = "OK" if ok else f"FAILED: {result[:200]}"
+    print(f"[worker {i}] Registration: {status}", flush=True)
+
+    return {
+        "global_index": global_idx, "local_index": i,
+        "container": CONTAINER_IDX,
+        "content_address": content_addr, "healthcheck_address": hc_addr,
+        "content_port": BASE_PORT + i * 2,
+        "hc_port": BASE_PORT + i * 2 + 1,
+        "registered": ok,
+        "privkey_b64": base64.b64encode(privkey).decode(),
+        "pubkey_b64": base64.b64encode(pubkey).decode(),
+    }
+
+
 def main():
-    workers = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # Wait for Arti SOCKS to be functional before registering any workers
     wait_for_socks()
 
-    for i in range(NUM_WORKERS):
-        content_nick = f"w{CONTAINER_IDX}_{i}_content"
-        hc_nick = f"w{CONTAINER_IDX}_{i}_hc"
+    # Bootstrap all workers in parallel (10 concurrent to avoid overwhelming SOCKS)
+    max_parallel = min(10, NUM_WORKERS)
+    print(f"Bootstrapping {NUM_WORKERS} workers ({max_parallel} parallel)...", flush=True)
 
-        print(f"[worker {i}] Waiting for Arti addresses...", flush=True)
-        content_addr = get_onion_address(content_nick)
-        hc_addr = get_onion_address(hc_nick)
-
-        if not content_addr or not hc_addr:
-            print(f"[worker {i}] ERROR: timed out waiting for addresses", flush=True)
-            workers.append({
-                "global_index": CONTAINER_IDX * NUM_WORKERS + i,
-                "local_index": i,
-                "container": CONTAINER_IDX,
-                "registered": False,
-                "error": "address_timeout",
-            })
-            continue
-
-        print(f"[worker {i}] content={content_addr} hc={hc_addr}", flush=True)
-
-        # Read PEM and extract raw keys
-        pem_path = f"{KEYSTORE_BASE}/{content_nick}/ks_hs_id.ed25519_expanded_private"
-
-        # Wait for keystore file (Arti creates it slightly after address is available)
-        for _ in range(30):
-            if os.path.exists(pem_path):
-                break
-            time.sleep(1)
-
-        if not os.path.exists(pem_path):
-            print(f"[worker {i}] ERROR: PEM not found at {pem_path}", flush=True)
-            workers.append({
-                "global_index": CONTAINER_IDX * NUM_WORKERS + i,
-                "local_index": i,
-                "container": CONTAINER_IDX,
-                "content_address": content_addr,
-                "healthcheck_address": hc_addr,
-                "registered": False,
-                "error": "pem_not_found",
-            })
-            continue
-
-        try:
-            pubkey, privkey = parse_openssh_pem(pem_path)
-        except Exception as e:
-            print(f"[worker {i}] ERROR: failed to parse PEM: {e}", flush=True)
-            workers.append({
-                "global_index": CONTAINER_IDX * NUM_WORKERS + i,
-                "local_index": i,
-                "container": CONTAINER_IDX,
-                "content_address": content_addr,
-                "healthcheck_address": hc_addr,
-                "registered": False,
-                "error": f"pem_parse: {e}",
-            })
-            continue
-
-        with open(pem_path, "rb") as f:
-            pem_data = f.read()
-
-        pem_b64 = base64.b64encode(pem_data).decode()
-
-        # Self-register with OnionHeaven over Tor (retries with backoff inside)
-        print(f"[worker {i}] Registering with OnionHeaven over Tor...", flush=True)
-        global_idx = CONTAINER_IDX * NUM_WORKERS + i
-        result = register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, worker_id=global_idx)
-        ok = False
-        try:
-            resp = json.loads(result)
-            ok = resp.get("registered", False)
-        except Exception:
-            pass
-
-        status = "OK" if ok else f"FAILED: {result[:200]}"
-        print(f"[worker {i}] Registration: {status}", flush=True)
-
-        # Stagger between workers to avoid overwhelming Tor circuits
-        if i < NUM_WORKERS - 1:
-            time.sleep(2)
-
-        workers.append({
-            "global_index": CONTAINER_IDX * NUM_WORKERS + i,
-            "local_index": i,
-            "container": CONTAINER_IDX,
-            "content_address": content_addr,
-            "healthcheck_address": hc_addr,
-            "content_port": BASE_PORT + i * 2,
-            "hc_port": BASE_PORT + i * 2 + 1,
-            "registered": ok,
-            "privkey_b64": base64.b64encode(privkey).decode(),
-            "pubkey_b64": base64.b64encode(pubkey).decode(),
-        })
+    workers = [None] * NUM_WORKERS
+    with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        futures = {pool.submit(bootstrap_one_worker, i): i for i in range(NUM_WORKERS)}
+        for future in as_completed(futures):
+            i = futures[future]
+            workers[i] = future.result()
 
     # Write info for stress test script to read
     with open("/worker-info.json", "w") as f:
