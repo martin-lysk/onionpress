@@ -7,11 +7,12 @@
 # Usage:  ./arti-descriptor-test.sh [NUM_SERVICES]  (default: 20)
 #
 # Requires: Docker (or Podman with `alias docker=podman`)
+# Image:    containers.torproject.org/tpo/onion-services/onimages/arti:alpine
 
 set -euo pipefail
 
 NUM_SERVICES="${1:-20}"
-ARTI_IMAGE="thetorproject/arti:latest"
+ARTI_IMAGE="containers.torproject.org/tpo/onion-services/onimages/arti:alpine"
 NETWORK="arti-test-net"
 PUB="arti-test-pub"
 CLI="arti-test-cli"
@@ -39,14 +40,14 @@ cat > "$WORK/pub.toml" << 'EOF'
 [proxy]
 socks_listen = "127.0.0.1:9050"
 [storage]
-cache_dir = "/var/lib/arti/cache"
-state_dir = "/var/lib/arti/state"
+cache_dir = "/home/arti/.local/share/arti/cache"
+state_dir = "/home/arti/.local/share/arti/state"
 [storage.keystore]
 enabled = true
 [logging]
 console = "info,tor_hsservice=debug"
 [[logging.files]]
-path = "/var/lib/arti/arti.log"
+path = "/home/arti/arti.log"
 filter = "info,tor_hsservice=debug,tor_circmgr=debug"
 EOF
 
@@ -62,8 +63,8 @@ cat > "$WORK/cli.toml" << 'EOF'
 [proxy]
 socks_listen = "0.0.0.0:9050"
 [storage]
-cache_dir = "/var/lib/arti/cache"
-state_dir = "/var/lib/arti/state"
+cache_dir = "/home/arti/.local/share/arti/cache"
+state_dir = "/home/arti/.local/share/arti/state"
 [logging]
 console = "info"
 EOF
@@ -77,15 +78,14 @@ start_arti() {
     local name="$1" conf="$2"
     docker run -d --name "$name" --network "$NETWORK" \
         --entrypoint sleep "$ARTI_IMAGE" infinity > /dev/null
-    docker cp "$conf" "$name:/etc/arti/arti.toml"
-    docker exec "$name" sh -c '
-        chown root:root /etc/arti/arti.toml && chmod 644 /etc/arti/arti.toml
-        mkdir -p /var/lib/arti/cache /var/lib/arti/state
-        chown -R arti:arti /var/lib/arti
-        chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
+    docker cp "$conf" "$name:/tmp/arti.toml"
+    docker exec --user root "$name" sh -c '
+        mv /tmp/arti.toml /home/arti/arti.toml
+        chown arti:arti /home/arti/arti.toml
+        mkdir -p /home/arti/.local/share/arti/cache /home/arti/.local/share/arti/state
+        chown -R arti:arti /home/arti/.local
     '
-    docker exec -d "$name" su -s /bin/sh arti -c \
-        "arti proxy -c /etc/arti/arti.toml"
+    docker exec -d "$name" arti proxy -c /home/arti/arti.toml
 }
 
 log "Starting publisher ($NUM_SERVICES services)..."
@@ -94,16 +94,16 @@ start_arti "$PUB" "$WORK/pub.toml"
 log "Starting client..."
 start_arti "$CLI" "$WORK/cli.toml"
 
-# Install curl in client (for SOCKS probing)
-log "Installing curl in client container..."
-docker exec "$CLI" sh -c 'apt-get update -qq && apt-get install -y -qq curl' > /dev/null 2>&1
+# Install curl in client (for SOCKS probing — Alpine base has wget but no SOCKS support)
+log "Installing curl in client..."
+docker exec --user root "$CLI" apk add --quiet curl > /dev/null 2>&1
 
 # ── Bootstrap ───────────────────────────────────────────────────────────────
 
 log "Waiting for publisher to bootstrap..."
 for i in $(seq 1 120); do
-    addr=$(docker exec "$PUB" su -s /bin/sh arti -c \
-        "arti hss --nickname svc0 onion-address -c /etc/arti/arti.toml" \
+    addr=$(docker exec "$PUB" \
+        arti hss --nickname svc0 onion-address -c /home/arti/arti.toml \
         2>/dev/null | tr -d '[:space:]') || true
     if [ -n "$addr" ] && echo "$addr" | grep -q ".onion"; then
         log "  Publisher ready (${i}s)"
@@ -131,8 +131,8 @@ log "Collecting addresses..."
 declare -a ADDRS
 for i in $(seq 0 $((NUM_SERVICES - 1))); do
     for try in $(seq 1 30); do
-        a=$(docker exec "$PUB" su -s /bin/sh arti -c \
-            "arti hss --nickname svc${i} onion-address -c /etc/arti/arti.toml" \
+        a=$(docker exec "$PUB" \
+            arti hss --nickname svc${i} onion-address -c /home/arti/arti.toml \
             2>/dev/null | tr -d '[:space:]') || true
         if [ -n "$a" ] && echo "$a" | grep -q ".onion"; then
             ADDRS[$i]="$a"
@@ -215,7 +215,7 @@ if [ "$unreachable" -gt 0 ]; then
     done
     echo ""
     log "Publisher Arti log (last 50 lines):"
-    docker exec "$PUB" tail -50 /var/lib/arti/arti.log 2>/dev/null || true
+    docker exec "$PUB" cat /home/arti/arti.log 2>/dev/null | tail -50 || true
 fi
 
 echo ""
