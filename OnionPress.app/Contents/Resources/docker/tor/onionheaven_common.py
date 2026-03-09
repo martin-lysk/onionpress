@@ -112,10 +112,10 @@ def _do_sighup():
 def db_connect():
     """Open OnionHeaven SQLite database with WAL mode."""
     os.makedirs(ONIONHEAVEN_DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
