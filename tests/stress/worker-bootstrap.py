@@ -84,13 +84,16 @@ def parse_openssh_pem(path):
     return pubkey, privkey
 
 
-def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64):
+def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, worker_id=0):
     """Register with OnionHeaven over Tor (via this container's SOCKS proxy).
 
     Uses exponential backoff: retries up to 6 times with delays of
     5s, 15s, 30s, 60s, 60s between attempts. Total worst-case ~8 minutes
     per worker, but this trades speed for reliability when Tor circuits
     are flaky.
+
+    Each worker uses unique SOCKS auth credentials to force Arti to build
+    a separate circuit (stream isolation).
     """
     from onion_auth import sign_payload, make_timestamp
     timestamp = make_timestamp()
@@ -112,7 +115,7 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64):
             result = subprocess.run(
                 [
                     "curl", "-s", "-X", "POST",
-                    "--socks5-hostname", "127.0.0.1:9050",
+                    "--socks5-hostname", f"w{worker_id}:x@127.0.0.1:9050",
                     "-H", "Content-Type: application/json",
                     "-d", payload,
                     "--max-time", "90",
@@ -235,7 +238,8 @@ def main():
 
         # Self-register with OnionHeaven over Tor (retries with backoff inside)
         print(f"[worker {i}] Registering with OnionHeaven over Tor...", flush=True)
-        result = register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64)
+        global_idx = CONTAINER_IDX * NUM_WORKERS + i
+        result = register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, worker_id=global_idx)
         ok = False
         try:
             resp = json.loads(result)
@@ -294,11 +298,13 @@ def send_heartbeat(worker):
         "wordpress_healthy": True,
     })
 
+    # Use unique SOCKS credentials per worker for circuit isolation
+    worker_id = worker.get("global_index", worker.get("local_index", 0))
     try:
         result = subprocess.run(
             [
                 "curl", "-s", "-X", "POST",
-                "--socks5-hostname", "127.0.0.1:9050",
+                "--socks5-hostname", f"w{worker_id}:x@127.0.0.1:9050",
                 "-H", "Content-Type: application/json",
                 "-d", payload,
                 "--max-time", "30",

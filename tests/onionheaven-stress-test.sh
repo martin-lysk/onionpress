@@ -573,7 +573,7 @@ query_onionheaven_status() {
         result=$(docker_cmd exec onionheaven curl -s --max-time 5 http://localhost:8083/status 2>/dev/null) || result=""
     else
         result=$(docker_cmd exec onionpress-tor-client \
-            curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+            curl -s --socks5-hostname "status:x@127.0.0.1:9050" --max-time 30 \
             "http://${ONIONHEAVEN_ADDR}:8083/status" 2>/dev/null) || result=""
     fi
 
@@ -771,7 +771,7 @@ parallel_check_addrs() {
 
         (
             code=$(docker_cmd exec onionpress-tor-client \
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time "$max_time" \
+                curl -s --socks5-hostname "reach${idx}:x@127.0.0.1:9050" --max-time "$max_time" \
                 -o /dev/null -w "%{http_code}" \
                 "http://${addr}/" 2>/dev/null) || code="000"
             echo "$code" > "${tmpdir}/${idx}"
@@ -1012,7 +1012,7 @@ payload = json.dumps({
 })
 subprocess.run([
     'curl', '-s', '-X', 'POST',
-    '--socks5-hostname', '127.0.0.1:9050',
+    '--socks5-hostname', 'w${ctr_idx}_${local_idx}:x@127.0.0.1:9050',
     '-H', 'Content-Type: application/json',
     '-d', payload,
     '--max-time', '60',
@@ -1307,11 +1307,12 @@ for p in payloads:
         ')
     else
         # Remote: send over Tor with parallelism (up to 10 concurrent)
+        # Each request uses unique SOCKS auth for circuit isolation
         notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
             n=0; tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                (curl -s --socks5-hostname "off${i}:x@127.0.0.1:9050" --max-time 30 \
                     -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
                     -H "Content-Type: application/json" \
                     -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
@@ -1390,11 +1391,12 @@ for p in payloads:
         ')
     else
         # Remote: send over Tor with parallelism (up to 10 concurrent)
+        # Each request uses unique SOCKS auth for circuit isolation
         notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
             n=0; tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                (curl -s --socks5-hostname "on${i}:x@127.0.0.1:9050" --max-time 30 \
                     -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
                     -H "Content-Type: application/json" \
                     -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
@@ -1602,7 +1604,7 @@ for idx in range(${NUM_CONTAINERS}):
         while IFS= read -r payload; do
             [ -z "$payload" ] && continue
             docker_cmd exec onionpress-tor-client \
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                curl -s --socks5-hostname "unreg${count}:x@127.0.0.1:9050" --max-time 30 \
                 -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
                 -H "Content-Type: application/json" \
                 -d "$payload" 2>/dev/null || true
@@ -2103,7 +2105,7 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
 
         (
             docker_cmd exec onionpress-tor-client \
-                curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                curl -s --socks5-hostname "cleanup${job_count}:x@127.0.0.1:9050" --max-time 30 \
                 -X POST "http://${ONIONHEAVEN_ADDR}:8083/unregister" \
                 -H "Content-Type: application/json" \
                 -d "$payload" 2>/dev/null || true
