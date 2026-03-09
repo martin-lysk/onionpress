@@ -2005,6 +2005,7 @@ SUMMARY
 
     log "=== Stress test complete ==="
     log "Results saved to: ${OUTPUT_DIR}/metrics.jsonl"
+    exit 0
 }
 
 # ── Coordinator mode ──────────────────────────────────────────────────────────
