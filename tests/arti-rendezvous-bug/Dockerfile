@@ -1,5 +1,6 @@
-# Minimal Arti image built from source (multi-arch)
+# Minimal Arti image built from source (multi-arch: x86_64 + ARM64)
 # Usage: docker build -t arti-test .
+# Note: Arti 2.1.0 requires Rust >= 1.89. Adjust the base image if needed.
 FROM rust:1.89-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

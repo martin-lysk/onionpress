@@ -4,10 +4,12 @@
 # Tests whether a single Arti instance can reliably publish and serve
 # multiple onion services simultaneously.
 #
-# Observations with Arti 2.1.0:
+# Observations with Arti 2.1.0 (tested on macOS ARM64, should work on
+# Linux x86_64 — the Dockerfile builds natively on both):
 #
 # - Descriptor upload to HSDirs works reliably (8/8 per time period),
-#   though with 20 services the second time-period uploads sometimes stall.
+#   though with 20+ services the second time-period uploads sometimes
+#   stall (e.g. 16/40 or 28/40 after 3 minutes).
 #
 # - With 10 services: consistently 10/10 reachable.
 #
@@ -17,14 +19,17 @@
 #   persistent — we observed one run at 4/20 with 16 services unreachable
 #   even after 5 minutes of retries.
 #
+# - With 50 services: 44/50 on first pass, all recovered on retry.
+#   Publisher resource usage was modest (121MB RAM, <4% CPU).
+#   The ~12% first-pass failure rate is consistent across 20 and 50,
+#   suggesting per-connection flakiness rather than aggregate overload.
+#
 # - Publisher-side errors when failures occur:
 #     "Problem while accepting rendezvous request: Could not connect
 #      rendezvous circuit: Circuit took too long to build"
 #
 # - Client-side errors:
 #     "Rendezvous at <relay> using introduction point #N took too long"
-#
-# Tested with Arti 2.1.0 on macOS (ARM64) and Linux (x86_64).
 #
 # Usage:
 #   docker build -t arti-test .
