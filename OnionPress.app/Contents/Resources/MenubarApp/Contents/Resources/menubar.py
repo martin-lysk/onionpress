@@ -4225,10 +4225,10 @@ Run your own website from your Mac. Just Works. Free, forever.
 WordPress + Tor Onion Service
 
 Features:
-• Tor Onion Service with an address you own, forever
-• Requires visitors to use Tor or Brave browsers
 • Full WordPress that you own and run
 • Internet Archive's Wayback Machine integration
+• Tor Onion Service with an address you own, forever
+• Requires visitors to use Tor or Brave browsers
 • Privacy-first design
 • Free and open source
 
