@@ -50,7 +50,7 @@ UPDATE_ON_LAUNCH=yes
 # The app will appear in your menu bar and your WordPress site will start automatically.
 #
 # Set to "no" to disable auto-start on login.
-# Note: You can also manage this in System Settings → General → Login Items
+# This installs/removes a LaunchAgent plist automatically.
 #
 LAUNCH_ON_LOGIN=yes
 

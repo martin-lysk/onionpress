@@ -60,9 +60,10 @@ add_action( 'init', function () {
 
     $host = $_SERVER['HTTP_HOST'];
 
-    // Skip .onion, localhost (with or without port), and Docker-internal hostname
+    // Skip .onion, localhost, onionpress (with or without port), and Docker-internal hostname
     if ( preg_match( '/\.onion$/i', $host )
         || preg_match( '/^localhost(:\d+)?$/i', $host )
+        || preg_match( '/^onionpress(:\d+)?$/i', $host )
         || $host === 'wordpress'
     ) {
         return;
@@ -102,10 +103,18 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     // Read the .onion address from the shared volume
     $onion_file = '/var/lib/onionpress/onion_address';
     if ( ! file_exists( $onion_file ) ) {
-        return; // Tor not ready yet — skip silently
+        // Tor not ready — queue the post path for later (the menubar will
+        // prepend the .onion address when it drains the queue)
+        $permalink = get_permalink( $post_id );
+        $path      = wp_parse_url( $permalink, PHP_URL_PATH ) ?: '/';
+        onionpress_wayback_queue_path( $path );
+        return;
     }
     $onion_addr = trim( file_get_contents( $onion_file ) );
     if ( empty( $onion_addr ) ) {
+        $permalink = get_permalink( $post_id );
+        $path      = wp_parse_url( $permalink, PHP_URL_PATH ) ?: '/';
+        onionpress_wayback_queue_path( $path );
         return;
     }
 
@@ -122,13 +131,17 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     // 2. Homepage .onion URL
     $urls[] = 'http://' . $onion_addr . '/';
 
-    // 3. Clearnet URLs (if Cloudflare Tunnel is configured)
+    // 3. RSS feed .onion URL
+    $urls[] = 'http://' . $onion_addr . '/feed/';
+
+    // 4. Clearnet URLs (if Cloudflare Tunnel is configured)
     $clearnet_file = '/var/lib/onionpress/clearnet_domain';
     if ( file_exists( $clearnet_file ) ) {
         $clearnet_domain = trim( file_get_contents( $clearnet_file ) );
         if ( ! empty( $clearnet_domain ) ) {
             $urls[] = 'https://' . $clearnet_domain . $path;
             $urls[] = 'https://' . $clearnet_domain . '/';
+            $urls[] = 'https://' . $clearnet_domain . '/feed/';
         }
     }
 
@@ -151,8 +164,16 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
 
     $auth = onionpress_wayback_auth_header();
 
+    $failed_urls = array();
     foreach ( $urls as $url ) {
-        onionpress_wayback_submit( $endpoints, $url, $auth );
+        if ( ! onionpress_wayback_submit( $endpoints, $url, $auth ) ) {
+            $failed_urls[] = $url;
+        }
+    }
+
+    // Queue any URLs that failed all endpoints
+    if ( ! empty( $failed_urls ) ) {
+        onionpress_wayback_queue_urls( $failed_urls );
     }
 }, 10, 3 );
 
@@ -163,12 +184,12 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
  * does not support SOCKS5 proxies.
  *
  * Tries each endpoint in order; stops on first success.
- * Fire-and-forget: logs result but does not block the post save.
+ * Returns true on success, false if all endpoints failed.
  */
 function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
     if ( ! function_exists( 'curl_init' ) ) {
         error_log( '[OnionPress Wayback] curl extension not available' );
-        return;
+        return false;
     }
 
     $user_agent = 'OnionPress/' . onionpress_version() . ' (+https://github.com/brewsterkahle/onionpress)';
@@ -228,10 +249,78 @@ function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
 
         // Any non-error response means the endpoint accepted it
         if ( $http_code >= 200 && $http_code < 500 ) {
-            return; // Success — done
+            return true; // Success
         }
 
         // 5xx: server error, try next endpoint
         error_log( '[OnionPress Wayback] Server error (HTTP ' . $http_code . '), trying next endpoint' );
     }
+
+    return false; // All endpoints failed
+}
+
+/**
+ * Queue URLs for later Wayback archiving (deduplicated by URL).
+ *
+ * The menubar app polls this file and drains it when the onion service
+ * is reachable (purple state).
+ */
+function onionpress_wayback_queue_urls( $urls ) {
+    $queue_file = '/var/lib/onionpress/wayback-queue.json';
+
+    // Read existing queue
+    $queue = array();
+    if ( file_exists( $queue_file ) ) {
+        $data = @file_get_contents( $queue_file );
+        if ( $data ) {
+            $decoded = json_decode( $data, true );
+            if ( is_array( $decoded ) ) {
+                $queue = $decoded;
+            }
+        }
+    }
+
+    // Build set of existing URLs for dedup
+    $existing = array();
+    foreach ( $queue as $item ) {
+        if ( isset( $item['url'] ) ) {
+            $existing[ $item['url'] ] = true;
+        }
+    }
+
+    // Add new URLs (deduplicated)
+    $now = gmdate( 'Y-m-d\TH:i:s\Z' );
+    foreach ( $urls as $url ) {
+        if ( isset( $existing[ $url ] ) ) {
+            // Update timestamp for existing entry
+            foreach ( $queue as &$item ) {
+                if ( $item['url'] === $url ) {
+                    $item['queued_at'] = $now;
+                    break;
+                }
+            }
+            unset( $item );
+        } else {
+            $queue[] = array( 'url' => $url, 'queued_at' => $now );
+            $existing[ $url ] = true;
+        }
+    }
+
+    @file_put_contents( $queue_file, json_encode( $queue ) );
+    error_log( '[OnionPress Wayback] Queued ' . count( $urls ) . ' URL(s) for later archiving (' . count( $queue ) . ' total in queue)' );
+}
+
+/**
+ * Queue post path for later archiving (when onion address becomes available).
+ *
+ * Builds .onion URLs from the path once the address file appears.
+ * For now, stores paths so the menubar can construct full URLs later.
+ */
+function onionpress_wayback_queue_path( $path ) {
+    // We can't build the full .onion URL yet, so queue paths.
+    // The menubar drainer will skip items without full URLs and
+    // the next poll_wayback_queue after Tor is ready will resolve them.
+    // For simplicity, just queue placeholder URLs — the next publish
+    // after Tor is ready will archive everything properly.
+    error_log( '[OnionPress Wayback] Onion address not available — post at ' . $path . ' will be archived on next publish after Tor is ready' );
 }

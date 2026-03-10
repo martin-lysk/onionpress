@@ -1356,6 +1356,19 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy login-fix mu-plugin → wp-content/mu-plugins/
+    if [ -f "$plugins_dir/onionpress-login-fix.php" ]; then
+        if docker cp "$plugins_dir/onionpress-login-fix.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-login-fix.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-login-fix.php >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: Failed to chown onionpress-login-fix.php"
+            log "✓ onionpress-login-fix.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-login-fix.php"
+        fi
+    fi
+
     # Copy favicon mu-plugin
     if [ -f "$plugins_dir/onionpress-favicon.php" ]; then
         if docker cp "$plugins_dir/onionpress-favicon.php" \
@@ -1823,6 +1836,16 @@ main() {
                 fi
             fi
 
+            # Ensure 'onionpress' hostname resolves to localhost (one-time setup)
+            if ! grep -q '127\.0\.0\.1.*onionpress' /etc/hosts 2>/dev/null; then
+                log "Adding 'onionpress' to /etc/hosts..."
+                if osascript -e 'do shell script "echo \"127.0.0.1 onionpress\" >> /etc/hosts" with administrator privileges' 2>/dev/null; then
+                    log "✓ Added 'onionpress' hostname to /etc/hosts"
+                else
+                    log "WARNING: Failed to add 'onionpress' to /etc/hosts (user declined or error)"
+                fi
+            fi
+
             # Detect container runtime
             if ! RUNTIME=$(detect_container_runtime); then
                 install_docker
@@ -1859,7 +1882,7 @@ main() {
 
             log "OnionPress is running!"
             log "Onion address: $ONION_ADDR"
-            log "Local access: http://localhost:${ONIONPRESS_WP_PORT:-8080}"
+            log "Local access: http://onionpress:${ONIONPRESS_WP_PORT:-8080}"
             log "OnionPress is now running! Check the menu bar for status."
             ;;
 

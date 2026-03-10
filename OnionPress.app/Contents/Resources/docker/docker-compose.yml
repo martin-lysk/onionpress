@@ -38,7 +38,7 @@ services:
           define('WP_HOME', $$scheme . '://' . $$_SERVER['HTTP_HOST']);
           define('WP_SITEURL', $$scheme . '://' . $$_SERVER['HTTP_HOST']);
           define('FORCE_SSL_ADMIN', false);
-          define('COOKIE_DOMAIN', $$_SERVER['HTTP_HOST']);
+          define('COOKIE_DOMAIN', preg_replace('/:\d+$$/', '', $$_SERVER['HTTP_HOST']));
     volumes:
       - wordpress-data:/var/www/html
       - onionpress-data:/var/lib/onionpress
