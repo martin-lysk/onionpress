@@ -86,11 +86,16 @@ def sighup_arti():
         _sighup_pending = True
 
 
-def flush_sighup_arti():
-    """Send a final SIGHUP if one is pending. Call after a batch of changes."""
+def flush_sighup_arti(force=False):
+    """Send a final SIGHUP if one is pending or forced.
+
+    Call after a batch of changes. Use force=True when the batch used
+    no_sighup=True (which bypasses sighup_arti() entirely, so the
+    pending flag was never set).
+    """
     global _sighup_pending, _last_sighup_time
     import time as _time
-    if _sighup_pending:
+    if _sighup_pending or force:
         _do_sighup()
         _last_sighup_time = _time.monotonic()
         _sighup_pending = False

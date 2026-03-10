@@ -200,7 +200,7 @@ def process_takeovers(conn):
 
     if count > 0:
         log(f"takeover-worker: batch SIGHUP for {count} takeover(s)")
-        flush_sighup_arti()
+        flush_sighup_arti(force=True)
         update_active_count(conn)
     return count
 

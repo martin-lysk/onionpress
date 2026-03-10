@@ -305,6 +305,29 @@ preflight() {
         docker_cmd exec -d onionheaven \
             python3 /onionheaven-heartbeat.py
         log "  Heartbeat monitor started (production: interval=15s, propagation_delay=180s)"
+
+        # Inject updated code into takeover workers too — they run from the
+        # Docker image which may not have the latest fixes.
+        log "  Injecting code into takeover workers..."
+        for i in $(seq 0 9); do
+            ctr="onionheaven-takeover-$i"
+            docker_cmd inspect "$ctr" > /dev/null 2>&1 || continue
+            for f in onionheaven_common.py onionheaven-tor-manager.sh onionheaven-takeover-worker.py; do
+                docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/$f" "$ctr:/$f"
+            done
+            docker_cmd exec "$ctr" chmod +x /onionheaven-tor-manager.sh
+            # Restart the worker script
+            docker_cmd exec "$ctr" sh -c '
+                for pid in $(pidof python3 2>/dev/null); do
+                    if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "onionheaven-takeover-worker"; then
+                        kill "$pid" 2>/dev/null
+                    fi
+                done
+            '
+            sleep 1
+            docker_cmd exec -d "$ctr" python3 /onionheaven-takeover-worker.py
+            log "    Injected and restarted $ctr"
+        done
     else
         log "  Skipping file injections (not OnionHeaven host)"
         log "  Using production heartbeat timing and existing container scripts"
