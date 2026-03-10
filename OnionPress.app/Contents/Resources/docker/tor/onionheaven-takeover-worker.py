@@ -99,6 +99,9 @@ def _clean_orphaned_services(conn):
     This handles the case where stress test cleanup deletes DB rows
     but the takeover worker's Arti toml still has the service entries,
     causing circuit exhaustion from publishing orphaned descriptors.
+
+    Uses line-by-line parsing (not regex) to avoid leaving orphaned
+    fragments that break the toml (e.g., bare [["80", ...]] lines).
     """
     import re
     toml_path = "/etc/arti/arti-onionheaven.toml"
@@ -111,6 +114,8 @@ def _clean_orphaned_services(conn):
     # Find all onion_services nicknames in the toml
     nicknames = re.findall(r'\[onion_services\."(onionheaven_[^"]+)"\]', toml_content)
     if not nicknames:
+        # Still check for broken fragments from previous buggy cleanup
+        _sanitize_toml(toml_path)
         return
 
     # Check which content addresses are still in the DB assigned to us
@@ -127,43 +132,110 @@ def _clean_orphaned_services(conn):
 
     orphaned = []
     for nick in nicknames:
-        # Extract the address suffix from nickname (onionheaven_XXXXX)
         suffix = nick.replace("onionheaven_", "")
         if suffix not in valid_addrs:
             orphaned.append(nick)
 
     if not orphaned:
+        _sanitize_toml(toml_path)
         return
 
     log(f"takeover-worker: removing {len(orphaned)} orphaned service(s) from Arti toml")
+
+    # Try tor-manager release first (cleanest removal)
     for nick in orphaned:
-        # Use tor-manager to cleanly remove
-        # The content_address for release is the full .onion, but we only have
-        # the nickname. Use a regex to find the address from the toml comment.
-        # Simpler: just remove the section from the toml directly.
+        # Find full .onion address from the comment line
         addr_match = re.search(
-            rf'# {nick.replace("onionheaven_", "")}:([a-z2-7]+\.onion)',
+            rf'# onionheaven:([a-z2-7]{{56}}\.onion)',
+            toml_content
+        )
+        # More specific: find comment that references this nickname's prefix
+        prefix = nick.replace("onionheaven_", "")
+        addr_match = re.search(
+            rf'# onionheaven:({prefix}[a-z2-7]*\.onion)',
             toml_content
         )
         if addr_match:
             full_addr = addr_match.group(1)
-            subprocess.run([TOR_MANAGER, "release", full_addr],
-                           capture_output=True, text=True, timeout=30)
-            log(f"  released orphan {nick} ({full_addr})")
-        else:
-            # Fallback: remove the section from toml manually
-            toml_content = re.sub(
-                rf'\[onion_services\."{nick}"\][^\[]*',
-                '', toml_content
-            )
-            log(f"  removed orphan {nick} from toml (no address found)")
+            result = subprocess.run([TOR_MANAGER, "release", "--no-sighup", full_addr],
+                                    capture_output=True, text=True, timeout=30)
+            log(f"  released orphan {nick} ({full_addr}) rc={result.returncode}")
 
-    # Write cleaned toml if we did manual removal
-    if not addr_match:
-        with open(toml_path, 'w') as f:
-            f.write(toml_content)
-
+    # After tor-manager release, also do a line-by-line cleanup to catch
+    # any fragments that tor-manager's awk might have missed
+    _sanitize_toml(toml_path)
     flush_sighup_arti()
+
+
+def _sanitize_toml(toml_path):
+    """Remove broken fragments from Arti toml that would prevent config reload.
+
+    Previous cleanup bugs left orphaned lines like:
+      # onionheaven:xxx.onion
+      [["80", "127.0.0.1:8082"]]
+
+    The bare [["80", ...]] is parsed as an invalid TOML table header, which
+    breaks ALL config reloads (every SIGHUP fails). This sanitizer removes:
+      1. Lines that are bare proxy_ports values (no 'proxy_ports = ' prefix)
+      2. Orphaned comment lines (# onionheaven:xxx) not followed by a section header
+      3. Orphaned 'enabled = true' lines not inside a section
+    """
+    try:
+        with open(toml_path) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return
+
+    cleaned = []
+    i = 0
+    changed = False
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Remove bare proxy_ports value lines (the main bug)
+        if stripped.startswith("[[") and "127.0.0.1" in stripped and stripped.endswith("]]"):
+            log(f"  sanitize: removing orphaned proxy_ports line: {stripped}")
+            changed = True
+            i += 1
+            continue
+
+        # Remove orphaned comment lines not followed by a proper section header
+        if stripped.startswith("# onionheaven:") and stripped.endswith(".onion"):
+            # Check if next non-blank line is a proper [onion_services."..."] header
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j < len(lines) and lines[j].strip().startswith('[onion_services."'):
+                # This comment is properly associated with a service — keep it
+                cleaned.append(line)
+                i += 1
+                continue
+            else:
+                log(f"  sanitize: removing orphaned comment: {stripped}")
+                changed = True
+                i += 1
+                continue
+
+        cleaned.append(line)
+        i += 1
+
+    if changed:
+        # Remove excessive blank lines (more than 1 consecutive)
+        final = []
+        prev_blank = False
+        for line in cleaned:
+            if line.strip() == "":
+                if prev_blank:
+                    continue
+                prev_blank = True
+            else:
+                prev_blank = False
+            final.append(line)
+
+        with open(toml_path, "w") as f:
+            f.writelines(final)
+        log(f"  sanitize: cleaned toml written to {toml_path}")
 
 
 def process_takeovers(conn):

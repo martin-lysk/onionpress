@@ -380,6 +380,11 @@ state_dir = "/var/lib/arti/state"
 [storage.keystore]
 enabled = true
 
+[vanguards]
+# Disable vanguards on stress workers — reduces circuit exhaustion cascades
+# when hosting many onion services per Arti instance.
+mode = "disabled"
+
 [[logging.files]]
 path = "/var/lib/arti/arti.log"
 filter = "info,tor_hsservice=debug,tor_circmgr=debug,arti=debug"

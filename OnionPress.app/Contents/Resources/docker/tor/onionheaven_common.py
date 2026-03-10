@@ -102,7 +102,13 @@ def flush_sighup_arti(force=False):
 
 
 def _do_sighup():
-    """Send SIGHUP to Arti via tor-manager, then check for corrupted key errors."""
+    """Send SIGHUP to Arti via tor-manager, then check for corrupted key errors.
+
+    Sanitizes the toml BEFORE sending SIGHUP to prevent stale fragments
+    (e.g., bare [["80", ...]] lines from buggy cleanup) from blocking reload.
+    """
+    _sanitize_arti_toml()
+
     try:
         result = subprocess.run(
             [TOR_MANAGER, "sighup"],
@@ -117,6 +123,73 @@ def _do_sighup():
 
     # Check for corrupted key errors after SIGHUP and auto-clean
     _check_arti_key_errors()
+
+
+def _sanitize_arti_toml():
+    """Remove broken fragments from Arti toml before SIGHUP.
+
+    Previous cleanup bugs left orphaned lines like bare [["80", ...]] which
+    TOML parses as invalid table headers, blocking ALL config reloads.
+    """
+    if os.environ.get("POLLING_ONLY") == "1" or os.environ.get("TAKEOVER_WORKER") == "1":
+        toml_path = "/etc/arti/arti-onionheaven.toml"
+    else:
+        toml_path = "/etc/arti/arti.toml"
+
+    try:
+        with open(toml_path) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return
+
+    cleaned = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Remove bare proxy_ports value lines (orphaned from buggy cleanup)
+        # Matches [["80", "127.0.0.1:XXXX"]] but NOT proxy_ports = [["80"...]]
+        if stripped.startswith("[["  ) and "127.0.0.1" in stripped and stripped.endswith("]]"):
+            log(f"sanitize-toml: removing orphaned line: {stripped}")
+            changed = True
+            i += 1
+            continue
+
+        # Remove orphaned comment lines not followed by a proper section header
+        if stripped.startswith("# onionheaven:") and stripped.endswith(".onion"):
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j < len(lines) and lines[j].strip().startswith('[onion_services."'):
+                cleaned.append(line)
+                i += 1
+                continue
+            else:
+                log(f"sanitize-toml: removing orphaned comment: {stripped}")
+                changed = True
+                i += 1
+                continue
+
+        cleaned.append(line)
+        i += 1
+
+    if changed:
+        # Collapse excessive blank lines
+        final = []
+        prev_blank = False
+        for line in cleaned:
+            if line.strip() == "":
+                if prev_blank:
+                    continue
+                prev_blank = True
+            else:
+                prev_blank = False
+            final.append(line)
+        with open(toml_path, "w") as f:
+            f.writelines(final)
+        log(f"sanitize-toml: cleaned {toml_path}")
 
 
 def _check_arti_key_errors():

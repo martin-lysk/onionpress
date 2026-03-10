@@ -16,3 +16,9 @@ state_dir = "/var/lib/arti/state"
 
 [storage.keystore]
 enabled = true
+
+[vanguards]
+# Disable vanguards on takeover workers — they serve temporary 302 redirects,
+# not sensitive content. Vanguards constrain relay selection, causing circuit
+# exhaustion cascades when hosting many onion services (77%+ circuit death rate).
+mode = "disabled"
