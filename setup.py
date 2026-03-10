@@ -34,8 +34,8 @@ OPTIONS = {
         'CFBundleName': 'OnionPress',
         'CFBundleDisplayName': 'OnionPress',
         'CFBundleIdentifier': 'press.onion.app',
-        'CFBundleVersion': '2.4.27',
-        'CFBundleShortVersionString': '2.4.27',
+        'CFBundleVersion': '2.4.28',
+        'CFBundleShortVersionString': '2.4.28',
         'LSUIElement': True,  # Run as menu bar app (no dock icon)
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
