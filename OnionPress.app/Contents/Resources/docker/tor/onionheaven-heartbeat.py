@@ -28,7 +28,8 @@ from datetime import datetime, timedelta, timezone
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_arti,
-    is_farm_mode, check_farm_scaling,
+    is_farm_mode, check_farm_scaling, invalidate_farm_cache,
+    _check_arti_key_errors,
     PROPAGATION_DELAY, TOR_MANAGER,
 )
 
@@ -189,11 +190,18 @@ def main():
     startup_reconciliation(conn)
     conn.close()
 
+    # Scan Arti keystore for corrupted keys left over from previous runs
+    log("Scanning Arti keystore for corrupted keys...")
+    _check_arti_key_errors()
+
     log("heartbeat monitor started")
 
     while True:
         try:
             conn = db_connect()
+
+            # Invalidate per-pass caches (farm mode, container discovery)
+            invalidate_farm_cache()
 
             # Get active entries
             rows = conn.execute(

@@ -47,8 +47,13 @@ CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "")
 # ---------------------------------------------------------------------------
 
 def log(msg):
-    """Log to stderr with timestamp (captured by docker logs)."""
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    """Log to stderr with timestamp (captured by docker logs).
+
+    Uses local time (not UTC) so timestamps match the host-side stress test
+    logs and operator's clock. The container inherits /etc/localtime from
+    the Colima VM, which mirrors the Mac's timezone.
+    """
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sys.stderr.write(f"[{ts}] OnionHeaven: {msg}\n")
     sys.stderr.flush()
 
@@ -92,7 +97,7 @@ def flush_sighup_arti():
 
 
 def _do_sighup():
-    """Send SIGHUP to Arti via tor-manager."""
+    """Send SIGHUP to Arti via tor-manager, then check for corrupted key errors."""
     try:
         result = subprocess.run(
             [TOR_MANAGER, "sighup"],
@@ -104,6 +109,138 @@ def _do_sighup():
             log(f"SIGHUP failed: {result.stderr.strip()}")
     except Exception as e:
         log(f"SIGHUP error: {e}")
+
+    # Check for corrupted key errors after SIGHUP and auto-clean
+    _check_arti_key_errors()
+
+
+def _check_arti_key_errors():
+    """Scan recent Arti log output for corrupted key errors and auto-clean.
+
+    Arti logs errors like:
+      Unable to launch onion service onionheaven_XXXX: ... PEM preamble contains invalid data (NUL byte)
+      Unable to launch onion service onionheaven_XXXX: ... corrupted data in keystore
+
+    When found, remove the corrupted key from keystore and toml config so it
+    doesn't block other services on subsequent SIGHUPs.
+    """
+    import re
+    arti_keystore = "/var/lib/arti/state/keystore/hss"
+
+    # Read recent Arti stderr — check the container's process stderr via /proc
+    arti_pid = None
+    try:
+        result = subprocess.run(
+            ["pidof", "arti"], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            arti_pid = result.stdout.strip().split()[0]
+    except Exception:
+        pass
+    if not arti_pid:
+        try:
+            result = subprocess.run(
+                ["sh", "-c", "ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1"],
+                capture_output=True, text=True, timeout=5
+            )
+            arti_pid = result.stdout.strip()
+        except Exception:
+            pass
+
+    if not arti_pid:
+        return
+
+    # Read Arti's fd 2 (stderr) isn't possible after the fact, but we can check
+    # the keystore directly for corrupted keys
+    try:
+        if not os.path.isdir(arti_keystore):
+            return
+        for nickname in os.listdir(arti_keystore):
+            if not nickname.startswith("onionheaven_"):
+                continue
+            key_path = os.path.join(arti_keystore, nickname, "ks_hs_id.ed25519_expanded_private")
+            if not os.path.isfile(key_path):
+                continue
+            # Check for NUL bytes or other corruption
+            try:
+                with open(key_path, "rb") as f:
+                    data = f.read()
+                if b"\x00" in data:
+                    log(f"CORRUPTED KEY detected in Arti keystore: {nickname} — auto-cleaning")
+                    _clean_corrupted_service(nickname)
+                elif not data.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
+                    log(f"INVALID KEY detected in Arti keystore: {nickname} — auto-cleaning")
+                    _clean_corrupted_service(nickname)
+                elif not data.rstrip().endswith(b"-----END OPENSSH PRIVATE KEY-----"):
+                    log(f"TRUNCATED KEY detected in Arti keystore: {nickname} — auto-cleaning")
+                    _clean_corrupted_service(nickname)
+            except Exception as e:
+                log(f"Error checking key {nickname}: {e}")
+    except Exception as e:
+        log(f"Error scanning Arti keystore: {e}")
+
+
+def _clean_corrupted_service(nickname):
+    """Remove a corrupted onion service from Arti's keystore and config."""
+    import shutil
+    arti_keystore = "/var/lib/arti/state/keystore/hss"
+
+    # Detect config file
+    if os.environ.get("POLLING_ONLY") == "1" or os.environ.get("TAKEOVER_WORKER") == "1":
+        arti_toml = "/etc/arti/arti-onionheaven.toml"
+    else:
+        arti_toml = "/etc/arti/arti.toml"
+
+    # Remove keystore directory
+    ks_dir = os.path.join(arti_keystore, nickname)
+    if os.path.isdir(ks_dir):
+        shutil.rmtree(ks_dir, ignore_errors=True)
+        log(f"  Removed keystore dir: {ks_dir}")
+
+    # Remove from arti.toml config
+    try:
+        with open(arti_toml, "r") as f:
+            lines = f.readlines()
+        new_lines = []
+        skip = 0
+        for line in lines:
+            if skip > 0:
+                skip -= 1
+                continue
+            if f'[onion_services."{nickname}"]' in line:
+                # Remove this line + next 2 (enabled, proxy_ports)
+                skip = 2
+                # Also remove preceding comment line if it's the marker
+                if new_lines and new_lines[-1].startswith("# onionheaven:"):
+                    new_lines.pop()
+                # Remove preceding blank line too
+                if new_lines and new_lines[-1].strip() == "":
+                    new_lines.pop()
+                continue
+            new_lines.append(line)
+        with open(arti_toml, "w") as f:
+            f.writelines(new_lines)
+        log(f"  Removed config for {nickname} from {arti_toml}")
+    except Exception as e:
+        log(f"  Warning: could not clean config for {nickname}: {e}")
+
+    # Also clean the source key in OnionHeaven keys dir
+    # Extract content_address from nickname: onionheaven_XXXX -> find matching key dir
+    addr_prefix = nickname.replace("onionheaven_", "")
+    keys_base = "/var/lib/onionpress/onionheaven/keys"
+    if os.path.isdir(keys_base):
+        for entry in os.listdir(keys_base):
+            if entry.startswith(addr_prefix):
+                src_key = os.path.join(keys_base, entry, "ks_hs_id.ed25519_expanded_private")
+                if os.path.isfile(src_key):
+                    try:
+                        with open(src_key, "rb") as f:
+                            data = f.read()
+                        if b"\x00" in data or not data.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
+                            os.unlink(src_key)
+                            log(f"  Removed corrupted source key for {entry}")
+                    except Exception:
+                        pass
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +368,15 @@ def is_farm_mode(conn):
 
     Always True on the OnionHeaven server (ONIONHEAVEN=1 env var).
     On normal OnionPress instances, checks DB for active takeover containers.
+
+    Result is cached per heartbeat pass — call invalidate_farm_cache()
+    at the start of each pass to refresh.
     """
     if os.environ.get("ONIONHEAVEN") == "1":
         return True
+    # Check cache first
+    if _farm_mode_cache is not None:
+        return _farm_mode_cache
     # Normal OnionPress: check DB
     _discover_takeover_containers(conn)
     try:
@@ -245,9 +388,34 @@ def is_farm_mode(conn):
         return False
 
 
+# Cache for farm mode discovery — invalidated each heartbeat pass
+_farm_mode_cache = None
+_farm_containers_cache = None
+_farm_cache_time = 0.0
+FARM_CACHE_TTL = 10.0  # seconds
+
+
+def invalidate_farm_cache():
+    """Clear farm mode cache. Call at the start of each heartbeat pass."""
+    global _farm_mode_cache, _farm_containers_cache, _farm_cache_time
+    _farm_mode_cache = None
+    _farm_containers_cache = None
+    _farm_cache_time = 0.0
+
+
 def _discover_takeover_containers(conn):
-    """Discover running takeover containers and register any missing from DB."""
+    """Discover running takeover containers and register any missing from DB.
+
+    Results are cached for FARM_CACHE_TTL seconds to avoid repeated DNS
+    lookups (10 lookups per call × N calls per pass was a major bottleneck).
+    """
+    global _farm_containers_cache, _farm_cache_time
     import socket as _sock
+
+    now = time.monotonic()
+    if _farm_containers_cache is not None and (now - _farm_cache_time) < FARM_CACHE_TTL:
+        return
+
     for idx in range(10):  # check up to 10 takeover containers
         name = f"onionheaven-takeover-{idx}"
         try:
@@ -260,30 +428,34 @@ def _discover_takeover_containers(conn):
                 (name,)
             ).fetchone()
             if not existing:
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 conn.execute(
                     "INSERT INTO takeover_containers "
                     "(container_name, max_services, active_services, last_heartbeat, status) "
                     "VALUES (?, 50, 0, ?, 'active')",
-                    (name, now)
+                    (name, ts)
                 )
                 db_commit_with_retry(conn)
                 log(f"Discovered running takeover container not in DB: {name}")
         except Exception as e:
             log(f"Warning: takeover container discovery failed for {name}: {e}")
 
-
-def get_takeover_containers(conn):
-    """Get list of active takeover container names (sorted for consistency)."""
-    _discover_takeover_containers(conn)
+    _farm_cache_time = now
+    # Cache the container list
     try:
         rows = conn.execute(
             "SELECT container_name FROM takeover_containers "
             "WHERE status = 'active' ORDER BY container_name"
         ).fetchall()
-        return [row["container_name"] for row in rows]
+        _farm_containers_cache = [row["container_name"] for row in rows]
     except sqlite3.OperationalError:
-        return []
+        _farm_containers_cache = []
+
+
+def get_takeover_containers(conn):
+    """Get list of active takeover container names (sorted for consistency)."""
+    _discover_takeover_containers(conn)
+    return _farm_containers_cache if _farm_containers_cache else []
 
 
 # Round-robin state for takeover assignment within a heartbeat pass
@@ -445,8 +617,12 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
     _takeover_local(content_address)
 
 
-def _takeover_local(content_address):
-    """Execute takeover via local tor-manager (legacy/worker mode)."""
+def _takeover_local(content_address, no_sighup=False):
+    """Execute takeover via local tor-manager (legacy/worker mode).
+
+    If no_sighup=True, skips the SIGHUP — caller is responsible for
+    calling flush_sighup_arti() after a batch of takeovers.
+    """
     log(f"Taking over {content_address} via Arti (local)")
     try:
         result = subprocess.run(
@@ -460,7 +636,8 @@ def _takeover_local(content_address):
     except Exception as e:
         log(f"Arti takeover error for {content_address}: {e}")
 
-    sighup_arti()
+    if not no_sighup:
+        sighup_arti()
 
 
 # ---------------------------------------------------------------------------
@@ -515,8 +692,12 @@ def release_function(conn, content_address, healthcheck_address, force=False):
     _release_local(content_address)
 
 
-def _release_local(content_address):
-    """Execute release via local tor-manager (legacy/worker mode)."""
+def _release_local(content_address, no_sighup=False):
+    """Execute release via local tor-manager (legacy/worker mode).
+
+    If no_sighup=True, skips the SIGHUP — caller is responsible for
+    calling flush_sighup_arti() after a batch of releases.
+    """
     log(f"Releasing {content_address} via Arti (local)")
     try:
         result = subprocess.run(
@@ -530,4 +711,5 @@ def _release_local(content_address):
     except Exception as e:
         log(f"Arti release error for {content_address}: {e}")
 
-    sighup_arti()
+    if not no_sighup:
+        sighup_arti()

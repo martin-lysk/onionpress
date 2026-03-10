@@ -79,10 +79,36 @@ KEYSTORE_DIR="${ARTI_KEYSTORE}/${NICKNAME}"
 
 do_takeover() {
     local keys_src="${ONIONHEAVEN_KEYS_DIR}/${CONTENT_ADDRESS}"
+    local key_file="${keys_src}/ks_hs_id.ed25519_expanded_private"
 
     # Check for plaintext Arti PEM key
-    if [ ! -f "${keys_src}/ks_hs_id.ed25519_expanded_private" ]; then
+    if [ ! -f "$key_file" ]; then
         echo "ERROR: No Arti key found for ${CONTENT_ADDRESS}"
+        exit 1
+    fi
+
+    # Validate key integrity before copying to Arti keystore
+    # Check 1: file must not be empty
+    if [ ! -s "$key_file" ]; then
+        echo "ERROR: Empty key file for ${CONTENT_ADDRESS}"
+        exit 1
+    fi
+    # Check 2: must have proper PEM header
+    if ! head -1 "$key_file" | grep -q "BEGIN OPENSSH PRIVATE KEY"; then
+        echo "ERROR: Invalid PEM header in key for ${CONTENT_ADDRESS}"
+        exit 1
+    fi
+    # Check 3: must have proper PEM footer
+    if ! tail -1 "$key_file" | grep -q "END OPENSSH PRIVATE KEY"; then
+        echo "ERROR: Invalid PEM footer in key for ${CONTENT_ADDRESS}"
+        exit 1
+    fi
+    # Check 4: no NUL bytes (the specific Arti "PEM preamble contains invalid data" error)
+    if tr -d '\0' < "$key_file" | cmp -s - "$key_file"; then
+        : # no NUL bytes, good
+    else
+        echo "ERROR: Key contains NUL bytes for ${CONTENT_ADDRESS} — removing corrupted key"
+        rm -f "$key_file"
         exit 1
     fi
 
@@ -90,7 +116,7 @@ do_takeover() {
     mkdir -p "$KEYSTORE_DIR"
 
     # Copy the plaintext PEM key to the keystore
-    if ! cp "${keys_src}/ks_hs_id.ed25519_expanded_private" "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"; then
+    if ! cp "$key_file" "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"; then
         echo "ERROR: Failed to copy key for ${CONTENT_ADDRESS}"
         rm -rf "$KEYSTORE_DIR"
         exit 1

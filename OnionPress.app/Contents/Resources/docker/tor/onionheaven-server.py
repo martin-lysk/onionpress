@@ -53,6 +53,55 @@ OPENSSH_MAGIC = b"openssh-key-v1\x00"
 ARTI_KEY_TYPE = b"ed25519-expanded@spec.torproject.org"
 
 
+def validate_arti_pem(pem_bytes):
+    """Validate that an Arti PEM key is structurally sound.
+
+    Checks for:
+    - Proper PEM header/footer
+    - No NUL bytes in the PEM envelope (the error Arti reports)
+    - Base64 payload decodes successfully
+    - OpenSSH magic header present in decoded data
+    - Minimum size for ed25519-expanded key (64 bytes private + 32 bytes public)
+
+    Returns True if valid, False if corrupted.
+    """
+    try:
+        text = pem_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+
+    lines = text.strip().splitlines()
+    if len(lines) < 3:
+        return False
+    if not lines[0].startswith("-----BEGIN OPENSSH PRIVATE KEY-----"):
+        return False
+    if not lines[-1].startswith("-----END OPENSSH PRIVATE KEY-----"):
+        return False
+
+    # Extract base64 payload between header and footer
+    b64_payload = "".join(lines[1:-1])
+
+    # Check for NUL bytes in the PEM text (the specific Arti error)
+    if "\x00" in b64_payload:
+        return False
+
+    # Decode and verify OpenSSH structure
+    try:
+        decoded = base64.b64decode(b64_payload)
+    except Exception:
+        return False
+
+    if not decoded.startswith(OPENSSH_MAGIC):
+        return False
+
+    # Minimum size: magic(15) + ciphername(8) + kdfname(8) + kdfoptions(4)
+    # + nkeys(4) + pubkey(~50) + privkey(~120) = ~200+ bytes
+    if len(decoded) < 100:
+        return False
+
+    return True
+
+
 def _pack_string(data):
     """Pack bytes as uint32 big-endian length + data."""
     return struct.pack(">I", len(data)) + data
@@ -168,8 +217,8 @@ def _verify_signature(handler, data, endpoint):
 class OnionHeavenHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
-        """Override to add timestamp prefix."""
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        """Override to add timestamp prefix (local time to match host logs)."""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sys.stderr.write(f"[{ts}] onionheaven-server: {format % args}\n")
         sys.stderr.flush()
 
@@ -408,6 +457,10 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             return
         if not arti_pem.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
             self._send_json(400, {"error": "Invalid arti_key_pem format"})
+            return
+        # Validate PEM integrity — reject keys with NUL bytes or truncated data
+        if not validate_arti_pem(arti_pem):
+            self._send_json(400, {"error": "Corrupted arti_key_pem: key data failed integrity check"})
             return
 
         # Store plaintext PEM key
@@ -735,7 +788,7 @@ def main():
     conn.close()
 
     server = HTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] onionheaven-server: listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
     try:
         server.serve_forever()

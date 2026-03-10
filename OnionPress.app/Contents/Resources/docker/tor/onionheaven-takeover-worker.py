@@ -167,7 +167,12 @@ def _clean_orphaned_services(conn):
 
 
 def process_takeovers(conn):
-    """Process pending takeover requests assigned to this container."""
+    """Process ALL pending takeover requests in one batch with a single SIGHUP.
+
+    Instead of SIGHUP per takeover (5s rate limit each = minutes for large batches),
+    copies all keys and updates toml first, then sends one SIGHUP at the end.
+    This makes takeover time O(1) for SIGHUP regardless of batch size.
+    """
     rows = conn.execute(
         "SELECT content_address, healthcheck_address FROM registry "
         "WHERE takeover_container = ? AND takeover_pending IS NOT NULL",
@@ -182,7 +187,7 @@ def process_takeovers(conn):
         ca = row["content_address"]
         ha = row["healthcheck_address"]
         log(f"takeover-worker: executing takeover for {ca}")
-        _takeover_local(ca)
+        _takeover_local(ca, no_sighup=True)
 
         # Clear pending flag
         conn.execute(
@@ -194,13 +199,14 @@ def process_takeovers(conn):
         count += 1
 
     if count > 0:
+        log(f"takeover-worker: batch SIGHUP for {count} takeover(s)")
         flush_sighup_arti()
         update_active_count(conn)
     return count
 
 
 def process_releases(conn):
-    """Process pending release requests assigned to this container."""
+    """Process ALL pending release requests in one batch with a single SIGHUP."""
     rows = conn.execute(
         "SELECT content_address, healthcheck_address FROM registry "
         "WHERE takeover_container = ? AND release_pending IS NOT NULL",
@@ -215,7 +221,7 @@ def process_releases(conn):
         ca = row["content_address"]
         ha = row["healthcheck_address"]
         log(f"takeover-worker: executing release for {ca}")
-        _release_local(ca)
+        _release_local(ca, no_sighup=True)
 
         # Clear pending and assignment flags
         conn.execute(
@@ -227,6 +233,7 @@ def process_releases(conn):
         count += 1
 
     if count > 0:
+        log(f"takeover-worker: batch SIGHUP for {count} release(s)")
         flush_sighup_arti()
         update_active_count(conn)
     return count
