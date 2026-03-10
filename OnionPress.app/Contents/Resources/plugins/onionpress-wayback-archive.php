@@ -60,10 +60,9 @@ add_action( 'init', function () {
 
     $host = $_SERVER['HTTP_HOST'];
 
-    // Skip .onion, localhost, onionpress (with or without port), and Docker-internal hostname
+    // Skip .onion, localhost (with or without port), and Docker-internal hostname
     if ( preg_match( '/\.onion$/i', $host )
         || preg_match( '/^localhost(:\d+)?$/i', $host )
-        || preg_match( '/^onionpress(:\d+)?$/i', $host )
         || $host === 'wordpress'
     ) {
         return;

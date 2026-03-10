@@ -2488,8 +2488,8 @@ class OnionPressApp(rumps.App):
 
     @property
     def local_url(self):
-        """The local URL for accessing WordPress via the onionpress hostname."""
-        return f"http://onionpress:{self.wp_port}"
+        """The local URL for accessing WordPress."""
+        return f"http://localhost:{self.wp_port}"
 
     @rumps.clicked("Copy Onion Address")
     def copy_address(self, _):

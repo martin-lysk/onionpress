@@ -1836,16 +1836,6 @@ main() {
                 fi
             fi
 
-            # Ensure 'onionpress' hostname resolves to localhost (one-time setup)
-            if ! grep -q '127\.0\.0\.1.*onionpress' /etc/hosts 2>/dev/null; then
-                log "Adding 'onionpress' to /etc/hosts..."
-                if osascript -e 'do shell script "echo \"127.0.0.1 onionpress\" >> /etc/hosts" with administrator privileges' 2>/dev/null; then
-                    log "✓ Added 'onionpress' hostname to /etc/hosts"
-                else
-                    log "WARNING: Failed to add 'onionpress' to /etc/hosts (user declined or error)"
-                fi
-            fi
-
             # Detect container runtime
             if ! RUNTIME=$(detect_container_runtime); then
                 install_docker
@@ -1882,7 +1872,7 @@ main() {
 
             log "OnionPress is running!"
             log "Onion address: $ONION_ADDR"
-            log "Local access: http://onionpress:${ONIONPRESS_WP_PORT:-8080}"
+            log "Local access: http://localhost:${ONIONPRESS_WP_PORT:-8080}"
             log "OnionPress is now running! Check the menu bar for status."
             ;;
 
