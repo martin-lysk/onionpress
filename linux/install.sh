@@ -8,8 +8,17 @@
 set -e
 
 INSTALL_DIR="/opt/onionpress"
-DATA_DIR="$HOME/.onionpress"
 REPO_URL="https://github.com/brewsterkahle/onionpress"
+
+# Resolve the real user even when run with sudo
+if [ -n "$SUDO_USER" ]; then
+    REAL_USER="$SUDO_USER"
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_USER="$(whoami)"
+    REAL_HOME="$HOME"
+fi
+DATA_DIR="$REAL_HOME/.onionpress"
 
 echo ""
 echo "  OnionPress Installer for Linux"
@@ -54,13 +63,9 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 else
     echo "  Installing Docker..."
     curl -sSL https://get.docker.com | $SUDO sh
-    # Add current user to docker group
-    if [ -n "$SUDO_USER" ]; then
-        $SUDO usermod -aG docker "$SUDO_USER"
-    elif [ "$EUID" -ne 0 ]; then
-        $SUDO usermod -aG docker "$(whoami)"
-    fi
-    echo "  Docker installed"
+    # Add the real user to docker group
+    $SUDO usermod -aG docker "$REAL_USER"
+    echo "  Docker installed (added $REAL_USER to docker group)"
 fi
 
 # Check docker compose plugin
@@ -108,12 +113,20 @@ else
     REPO_DIR="$TMPDIR/onionpress"
 fi
 
+# Verify required source directories exist
+RESOURCES_DIR="$REPO_DIR/OnionPress.app/Contents/Resources"
+if [ ! -d "$RESOURCES_DIR/docker" ]; then
+    echo "  ERROR: $RESOURCES_DIR/docker not found."
+    echo "  If you cloned with sparse checkout or files are missing, try: git checkout -- OnionPress.app/"
+    exit 1
+fi
+
 # Copy files
 $SUDO cp "$REPO_DIR/linux/onionpress" "$INSTALL_DIR/onionpress"
 $SUDO chmod +x "$INSTALL_DIR/onionpress"
 
-$SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/docker" "$INSTALL_DIR/docker"
-$SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/plugins" "$INSTALL_DIR/plugins"
+$SUDO cp -r "$RESOURCES_DIR/docker" "$INSTALL_DIR/docker"
+$SUDO cp -r "$RESOURCES_DIR/plugins" "$INSTALL_DIR/plugins"
 
 if [ -d "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" ]; then
     $SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" "$INSTALL_DIR/scripts"
@@ -121,12 +134,14 @@ fi
 
 # Bind WordPress and SOCKS ports to 0.0.0.0 for LAN access (Pi is headless,
 # users access from another device). The main compose file uses 127.0.0.1.
+# Docker Compose override files don't reliably merge port bindings, so we patch directly.
 $SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
 $SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
 
 # Write version file
 VERSION="unknown"
-if [ -f "$REPO_DIR/OnionPress.app/Contents/Info.plist" ] && command -v python3 >/dev/null 2>&1; then
+PLIST="$REPO_DIR/OnionPress.app/Contents/Info.plist"
+if [ -f "$PLIST" ] && command -v python3 >/dev/null 2>&1; then
     VERSION=$(python3 -c "
 import xml.etree.ElementTree as ET, sys
 try:
@@ -134,11 +149,22 @@ try:
     keys = list(tree.iter())
     for i, el in enumerate(keys):
         if el.tag == 'key' and el.text == 'CFBundleShortVersionString':
-            print(keys[i+1].text)
-            break
-except:
-    print('unknown')
-" "$REPO_DIR/OnionPress.app/Contents/Info.plist" 2>/dev/null || echo "unknown")
+            print(keys[i+1].text); break
+except: print('unknown')
+" "$PLIST" 2>/dev/null || echo "unknown")
+elif [ -d "$REPO_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+    # Fall back to reading plist from git (file may not be checked out on Linux)
+    VERSION=$(git -C "$REPO_DIR" show HEAD:OnionPress.app/Contents/Info.plist 2>/dev/null \
+        | python3 -c "
+import xml.etree.ElementTree as ET, sys
+try:
+    tree = ET.parse(sys.stdin)
+    keys = list(tree.iter())
+    for i, el in enumerate(keys):
+        if el.tag == 'key' and el.text == 'CFBundleShortVersionString':
+            print(keys[i+1].text); break
+except: print('unknown')
+" 2>/dev/null || echo "unknown")
 fi
 echo "$VERSION" | $SUDO tee "$INSTALL_DIR/VERSION" > /dev/null
 
@@ -152,18 +178,17 @@ fi
 # ─── Create data directory & secrets ─────────────────────────────────
 
 echo ""
-echo "  Setting up data directory..."
+echo "  Setting up data directory at $DATA_DIR..."
 
-mkdir -p "$DATA_DIR"
-mkdir -p "$DATA_DIR/shared/vanity-keys"
+# Create data dirs owned by the real user (not root)
+install -d -o "$REAL_USER" -m 755 "$DATA_DIR"
+install -d -o "$REAL_USER" -m 755 "$DATA_DIR/shared/vanity-keys"
 
 # Generate secrets if they don't exist
 if [ ! -f "$DATA_DIR/secrets" ]; then
     WP_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
     ROOT_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
 
-    touch "$DATA_DIR/secrets"
-    chmod 600 "$DATA_DIR/secrets"
     cat > "$DATA_DIR/secrets" <<EOF
 # Database passwords - generated on $(date)
 # DO NOT SHARE THESE PASSWORDS
@@ -171,6 +196,8 @@ WORDPRESS_DB_PASSWORD='$WP_PASS'
 MYSQL_PASSWORD='$WP_PASS'
 MYSQL_ROOT_PASSWORD='$ROOT_PASS'
 EOF
+    chmod 600 "$DATA_DIR/secrets"
+    chown "$REAL_USER" "$DATA_DIR/secrets"
     echo "  Database passwords generated"
 else
     echo "  Existing secrets preserved"
@@ -184,6 +211,7 @@ INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
 EOF
+    chown "$REAL_USER" "$DATA_DIR/config"
     echo "  Default config created"
 fi
 
@@ -192,7 +220,28 @@ fi
 echo ""
 echo "  Installing systemd service..."
 
-$SUDO cp "$REPO_DIR/linux/onionpress.service" /etc/systemd/system/onionpress.service
+# Install systemd service configured for the real user
+cat > /tmp/onionpress.service.tmp <<SVCEOF
+[Unit]
+Description=OnionPress - WordPress over Tor Onion Service
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=$REAL_USER
+ExecStart=/opt/onionpress/onionpress start
+ExecStop=/opt/onionpress/onionpress stop
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+$SUDO cp /tmp/onionpress.service.tmp /etc/systemd/system/onionpress.service
+rm -f /tmp/onionpress.service.tmp
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable onionpress
 echo "  Systemd service installed and enabled (starts on boot)"

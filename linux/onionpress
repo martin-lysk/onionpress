@@ -789,50 +789,49 @@ start_containers() {
         rm -f "$DATA_DIR/.import-key-pending"
     fi
 
-    # First run: set up onion address key
+    # Set up onion address key
+    FIRST_RUN=false
     if ! docker volume ls | grep -q "onionpress-arti-state"; then
+        FIRST_RUN=true
         log "First run detected"
+    fi
 
-        # Read address prefix from config
-        ADDRESS_PREFIX="op2"
-        if [ -f "$DATA_DIR/config" ]; then
-            CUSTOM_PREFIX=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
-            if [ -z "$CUSTOM_PREFIX" ]; then
-                CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
-            fi
-            if [ ! -z "$CUSTOM_PREFIX" ]; then
-                ADDRESS_PREFIX="$CUSTOM_PREFIX"
-            fi
+    # Read address prefix from config
+    ADDRESS_PREFIX="op2"
+    if [ -f "$DATA_DIR/config" ]; then
+        CUSTOM_PREFIX=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+        if [ -z "$CUSTOM_PREFIX" ]; then
+            CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
         fi
-
-        # Check for pre-existing imported key
-        VANITY_DIR=""
-        if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-            VANITY_DIR=$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)
-            if [ -n "$VANITY_DIR" ]; then
-                log "Using pre-imported key: $(basename "$VANITY_DIR")"
-            fi
+        if [ ! -z "$CUSTOM_PREFIX" ]; then
+            ADDRESS_PREFIX="$CUSTOM_PREFIX"
         fi
+    fi
 
+    # Check for pre-existing imported key
+    VANITY_DIR=""
+    if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
+        VANITY_DIR=$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)
         if [ -n "$VANITY_DIR" ]; then
-            # Install imported key to arti-state volume
-            if ! docker volume create onionpress-arti-state >> "$LOG_FILE" 2>&1; then
-                log "ERROR: Failed to create arti-state volume"
-                return 1
-            fi
-            if ! docker run --rm \
-                -v onionpress-arti-state:/dest \
-                --mount type=bind,source="$VANITY_DIR",target=/src \
-                alpine sh -c 'mkdir -p /dest/state/keystore/hss/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/state/keystore/hss/wordpress/ && chown -R 100:100 /dest/state && chmod 700 /dest/state /dest/state/keystore /dest/state/keystore/hss /dest/state/keystore/hss/wordpress && chmod 600 /dest/state/keystore/hss/wordpress/*' >> "$LOG_FILE" 2>&1; then
-                log "ERROR: Failed to copy address key to arti-state volume"
-                return 1
-            fi
-
-            log "Address key installed to arti-state volume"
-            log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
-        else
-            log "No imported key found -- using random onion address"
+            log "Using pre-imported key: $(basename "$VANITY_DIR")"
         fi
+    fi
+
+    if [ -n "$VANITY_DIR" ]; then
+        # Always sync imported key to arti-state volume (ensures key survives restarts)
+        docker volume create onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+        if ! docker run --rm \
+            -v onionpress-arti-state:/dest \
+            --mount type=bind,source="$VANITY_DIR",target=/src \
+            alpine sh -c 'mkdir -p /dest/state/keystore/hss/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/state/keystore/hss/wordpress/ && chown -R 100:100 /dest/state && chmod 700 /dest/state /dest/state/keystore /dest/state/keystore/hss /dest/state/keystore/hss/wordpress && chmod 600 /dest/state/keystore/hss/wordpress/*' >> "$LOG_FILE" 2>&1; then
+            log "ERROR: Failed to copy address key to arti-state volume"
+            return 1
+        fi
+
+        log "Address key installed to arti-state volume"
+        log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
+    elif $FIRST_RUN; then
+        log "No imported key found -- using random onion address"
     fi
 
     # Update images if enabled
@@ -985,7 +984,9 @@ wait_for_services() {
     else
         ONION_ADDR="Generating..."
     fi
-    return 1
+    # Return success — containers are running, Tor may still be bootstrapping.
+    # Failing here would cause systemd to kill the running containers.
+    return 0
 }
 
 # ─── Write status (on-demand) ────────────────────────────────────────
