@@ -119,8 +119,10 @@ if [ -d "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" ]; then
     $SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" "$INSTALL_DIR/scripts"
 fi
 
-# Apply Pi compose override (bind WordPress to 0.0.0.0 for LAN access)
-$SUDO cp "$REPO_DIR/linux/docker-compose.pi.yml" "$INSTALL_DIR/docker/docker-compose.override.yml"
+# Bind WordPress and SOCKS ports to 0.0.0.0 for LAN access (Pi is headless,
+# users access from another device). The main compose file uses 127.0.0.1.
+$SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
+$SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
 
 # Write version file
 VERSION="unknown"
