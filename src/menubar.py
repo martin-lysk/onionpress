@@ -737,7 +737,6 @@ class OnionPressApp(rumps.App):
             rumps.MenuItem("Starting...", callback=None),
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
-            rumps.MenuItem("Copy Local URL", callback=self.copy_local_url),
             self.browser_menu_item,
             self.local_site_item,
             rumps.separator,
@@ -2071,7 +2070,7 @@ class OnionPressApp(rumps.App):
             if wq_count > 0:
                 self._wayback_queue_item.title = f"Pending Wayback Saves ({wq_count})"
                 if self._wayback_queue_item.title not in self.menu:
-                    self.menu.insert_after("Copy Local URL", self._wayback_queue_item)
+                    self.menu.insert_after("Copy Onion Address", self._wayback_queue_item)
             else:
                 # Remove any existing queue item (title may have changed)
                 for key in list(self.menu.keys()):
@@ -2502,15 +2501,6 @@ class OnionPressApp(rumps.App):
             )
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
-
-    @rumps.clicked("Copy Local URL")
-    def copy_local_url(self, _):
-        """Copy the local URL to clipboard"""
-        subprocess.run(
-            ["pbcopy"],
-            input=self.local_url.encode(),
-            check=True
-        )
 
     def open_local_site(self, _):
         """Open the local WordPress site in the default browser"""
