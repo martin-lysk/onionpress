@@ -2926,8 +2926,8 @@ class OnionPressApp(rumps.App):
                 )
                 hostname = result.stdout.strip().replace(".onion", "")
                 if hostname:
-                    # Extract the prefix that was used (first 3 chars as best guess)
-                    current_prefix = hostname[:3]
+                    # Extract the prefix from the current address
+                    current_prefix = hostname[:len(prefix)] if len(hostname) >= len(prefix) else hostname[:3]
             except Exception:
                 pass
 

@@ -41,6 +41,45 @@ add_action( 'network_admin_menu', function () {
 } );
 
 /**
+ * Handle service control actions (restart/stop) on Linux.
+ */
+add_action( 'admin_init', function () {
+    if ( ! isset( $_POST['onionpress_action_nonce'] ) ) {
+        return;
+    }
+    if ( ! wp_verify_nonce( $_POST['onionpress_action_nonce'], 'onionpress_action' ) ) {
+        return;
+    }
+    if ( ! current_user_can( 'manage_options' ) ) {
+        return;
+    }
+    $action = sanitize_text_field( $_POST['onionpress_action'] ?? '' );
+    if ( ! in_array( $action, array( 'restart', 'stop', 'save-restart' ), true ) ) {
+        return;
+    }
+
+    // If this is a save-restart, also save config updates first
+    if ( $action === 'save-restart' ) {
+        $_POST['onionpress_settings_nonce'] = wp_create_nonce( 'onionpress_settings_save' );
+        // The settings handler below will fire on the same request
+    }
+
+    $file = '/var/lib/onionpress/requested-action';
+    $cmd = ( $action === 'stop' ) ? 'stop' : 'restart';
+    if ( @file_put_contents( $file, $cmd ) === false ) {
+        add_action( 'admin_notices', function () {
+            echo '<div class="notice notice-error"><p>Failed to write action request. The shared volume may not be mounted.</p></div>';
+        } );
+        return;
+    }
+
+    $label = ( $action === 'stop' ) ? 'Stopping' : 'Restarting';
+    add_action( 'admin_notices', function () use ( $label ) {
+        echo '<div class="notice notice-info is-dismissible"><p>' . esc_html( $label ) . ' OnionPress... This may take a minute. The page will become unavailable during restart.</p></div>';
+    } );
+} );
+
+/**
  * Handle form submission — write config-updates.json to the shared volume.
  */
 add_action( 'admin_init', function () {
@@ -99,7 +138,22 @@ add_action( 'admin_init', function () {
 
     // Redirect with success message
     add_action( 'admin_notices', function () {
-        echo '<div class="notice notice-success is-dismissible"><p>Settings saved. Changes will take effect within 30 seconds.</p></div>';
+        $is_linux = false;
+        $sf = '/var/lib/onionpress/status.json';
+        if ( file_exists( $sf ) ) {
+            $sr = file_get_contents( $sf );
+            if ( $sr !== false ) {
+                $sd = json_decode( $sr, true );
+                if ( is_array( $sd ) && isset( $sd['platform'] ) && $sd['platform'] === 'linux' ) {
+                    $is_linux = true;
+                }
+            }
+        }
+        if ( $is_linux ) {
+            echo '<div class="notice notice-success is-dismissible"><p>Settings saved. Restart OnionPress for changes to take effect: <code>sudo systemctl restart onionpress</code></p></div>';
+        } else {
+            echo '<div class="notice notice-success is-dismissible"><p>Settings saved. Changes will take effect within 30 seconds.</p></div>';
+        }
     } );
 } );
 
@@ -309,11 +363,32 @@ function onionpress_settings_page() {
 
             <?php submit_button( 'Save Settings' ); ?>
 
+            <?php if ( $current_platform !== 'linux' ) : ?>
             <p class="description">
                 Settings are picked up by the OnionPress menubar app within 30 seconds.
                 Some settings (VM Memory, Address Prefix) require a restart to take effect.
             </p>
+            <?php endif; ?>
         </form>
+
+        <?php if ( $current_platform === 'linux' ) : ?>
+        <hr>
+        <h2>Service Control</h2>
+        <p class="description">Some settings (Address Prefix, Cloudflare Tunnel) require a restart to take effect.</p>
+        <form method="post" style="display: inline-block; margin-right: 10px;">
+            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
+            <input type="hidden" name="onionpress_action" value="restart">
+            <?php submit_button( 'Restart OnionPress', 'primary', 'submit', false ); ?>
+        </form>
+        <form method="post" style="display: inline-block;">
+            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
+            <input type="hidden" name="onionpress_action" value="stop">
+            <?php submit_button( 'Stop OnionPress', 'secondary', 'submit', false ); ?>
+        </form>
+        <p class="description" style="margin-top: 10px;">
+            Restart will apply any saved settings changes. The page will be unavailable briefly during restart.
+        </p>
+        <?php endif; ?>
     </div>
     <?php
 }

@@ -935,7 +935,16 @@ os.chmod(output_path, 0o600)
 
     # Update ADDRESS_PREFIX in config to match the imported address
     # so the startup prefix check doesn't flag a mismatch
-    local addr_prefix=$(echo "$address" | cut -c1-3)
+    # Use current prefix length if set, otherwise default to first 3 chars
+    local current_prefix=""
+    if [ -f "$DATA_DIR/config" ]; then
+        current_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+    fi
+    local prefix_len=${#current_prefix}
+    if [ "$prefix_len" -lt 2 ]; then
+        prefix_len=3
+    fi
+    local addr_prefix=$(echo "$address" | cut -c1-$prefix_len)
     if [ -f "$DATA_DIR/config" ] && grep -q "^ADDRESS_PREFIX=" "$DATA_DIR/config"; then
         sed -i '' "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$addr_prefix/" "$DATA_DIR/config"
     else

@@ -242,8 +242,42 @@ WantedBy=multi-user.target
 SVCEOF
 $SUDO cp /tmp/onionpress.service.tmp /etc/systemd/system/onionpress.service
 rm -f /tmp/onionpress.service.tmp
+
+# Install a timer that polls for action requests from the WordPress settings page
+# (restart, stop, config changes) — similar to the Mac menubar app's polling loop
+cat > /tmp/onionpress-watcher.service.tmp <<WATCHSVCEOF
+[Unit]
+Description=OnionPress settings watcher
+After=onionpress.service
+
+[Service]
+Type=oneshot
+User=$REAL_USER
+ExecStart=/opt/onionpress/onionpress handle-action
+StandardOutput=journal
+StandardError=journal
+WATCHSVCEOF
+
+cat > /tmp/onionpress-watcher.timer.tmp <<WATCHTMREOF
+[Unit]
+Description=Poll for OnionPress settings changes every 10s
+
+[Timer]
+OnActiveSec=10
+OnUnitActiveSec=10
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
+WATCHTMREOF
+
+$SUDO cp /tmp/onionpress-watcher.service.tmp /etc/systemd/system/onionpress-watcher.service
+$SUDO cp /tmp/onionpress-watcher.timer.tmp /etc/systemd/system/onionpress-watcher.timer
+rm -f /tmp/onionpress-watcher.service.tmp /tmp/onionpress-watcher.timer.tmp
+
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable onionpress
+$SUDO systemctl enable --now onionpress-watcher.timer
 echo "  Systemd service installed and enabled (starts on boot)"
 
 # ─── Start OnionPress ─────────────────────────────────────────────────
