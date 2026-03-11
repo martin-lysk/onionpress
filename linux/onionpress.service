@@ -1,0 +1,16 @@
+[Unit]
+Description=OnionPress - WordPress over Tor Onion Service
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/onionpress/onionpress start
+ExecStop=/opt/onionpress/onionpress stop
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

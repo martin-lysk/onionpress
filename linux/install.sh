@@ -1,0 +1,254 @@
+#!/bin/bash
+
+# OnionPress Installer for Raspberry Pi / Linux
+# Usage: curl -sSL https://raw.githubusercontent.com/brewsterkahle/onionpress/main/linux/install.sh | bash
+#
+# Or clone the repo and run: bash linux/install.sh
+
+set -e
+
+INSTALL_DIR="/opt/onionpress"
+DATA_DIR="$HOME/.onionpress"
+REPO_URL="https://github.com/brewsterkahle/onionpress"
+
+echo ""
+echo "  OnionPress Installer for Linux"
+echo "  ==============================="
+echo ""
+
+# ─── Checks ──────────────────────────────────────────────────────────
+
+# Check architecture
+ARCH=$(uname -m)
+case "$ARCH" in
+    aarch64|arm64)
+        echo "  Architecture: ARM64 (Raspberry Pi / Apple Silicon)"
+        ;;
+    x86_64)
+        echo "  Architecture: x86_64"
+        ;;
+    armv7l)
+        echo "  Architecture: ARM32 (may be slow, 64-bit OS recommended)"
+        ;;
+    *)
+        echo "ERROR: Unsupported architecture: $ARCH"
+        exit 1
+        ;;
+esac
+
+# Check for root/sudo
+if [ "$EUID" -ne 0 ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo "ERROR: This script must be run as root or with sudo available."
+        exit 1
+    fi
+    SUDO="sudo"
+else
+    SUDO=""
+fi
+
+# ─── Install Docker ──────────────────────────────────────────────────
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    echo "  Docker: already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
+else
+    echo "  Installing Docker..."
+    curl -sSL https://get.docker.com | $SUDO sh
+    # Add current user to docker group
+    if [ -n "$SUDO_USER" ]; then
+        $SUDO usermod -aG docker "$SUDO_USER"
+    elif [ "$EUID" -ne 0 ]; then
+        $SUDO usermod -aG docker "$(whoami)"
+    fi
+    echo "  Docker installed"
+fi
+
+# Check docker compose plugin
+if docker compose version >/dev/null 2>&1; then
+    echo "  Docker Compose: available"
+else
+    echo "  Installing Docker Compose plugin..."
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq docker-compose-plugin
+    echo "  Docker Compose plugin installed"
+fi
+
+# Ensure jq is available (used by status command)
+if ! command -v jq >/dev/null 2>&1; then
+    echo "  Installing jq..."
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq jq
+fi
+
+# Ensure python3 is available
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "  Installing python3..."
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq python3
+fi
+
+# ─── Install OnionPress files ────────────────────────────────────────
+
+echo ""
+echo "  Installing OnionPress to $INSTALL_DIR..."
+
+$SUDO mkdir -p "$INSTALL_DIR"
+
+# Determine source: if we're in the repo, use local files; otherwise clone
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/onionpress" ] && [ -d "$SCRIPT_DIR/../OnionPress.app" ]; then
+    # Running from cloned repo
+    REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    echo "  Source: local repo at $REPO_DIR"
+else
+    # Download from GitHub
+    echo "  Downloading from GitHub..."
+    TMPDIR=$(mktemp -d)
+    git clone --depth 1 "$REPO_URL" "$TMPDIR/onionpress"
+    REPO_DIR="$TMPDIR/onionpress"
+fi
+
+# Copy files
+$SUDO cp "$REPO_DIR/linux/onionpress" "$INSTALL_DIR/onionpress"
+$SUDO chmod +x "$INSTALL_DIR/onionpress"
+
+$SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/docker" "$INSTALL_DIR/docker"
+$SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/plugins" "$INSTALL_DIR/plugins"
+
+if [ -d "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" ]; then
+    $SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" "$INSTALL_DIR/scripts"
+fi
+
+# Apply Pi compose override (bind WordPress to 0.0.0.0 for LAN access)
+$SUDO cp "$REPO_DIR/linux/docker-compose.pi.yml" "$INSTALL_DIR/docker/docker-compose.override.yml"
+
+# Write version file
+VERSION="unknown"
+if [ -f "$REPO_DIR/OnionPress.app/Contents/Info.plist" ] && command -v python3 >/dev/null 2>&1; then
+    VERSION=$(python3 -c "
+import xml.etree.ElementTree as ET, sys
+try:
+    tree = ET.parse(sys.argv[1])
+    keys = list(tree.iter())
+    for i, el in enumerate(keys):
+        if el.tag == 'key' and el.text == 'CFBundleShortVersionString':
+            print(keys[i+1].text)
+            break
+except:
+    print('unknown')
+" "$REPO_DIR/OnionPress.app/Contents/Info.plist" 2>/dev/null || echo "unknown")
+fi
+echo "$VERSION" | $SUDO tee "$INSTALL_DIR/VERSION" > /dev/null
+
+echo "  OnionPress $VERSION installed to $INSTALL_DIR"
+
+# Clean up temp dir if we cloned
+if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR:-}" ]; then
+    rm -rf "$TMPDIR"
+fi
+
+# ─── Create data directory & secrets ─────────────────────────────────
+
+echo ""
+echo "  Setting up data directory..."
+
+mkdir -p "$DATA_DIR"
+mkdir -p "$DATA_DIR/shared/vanity-keys"
+
+# Generate secrets if they don't exist
+if [ ! -f "$DATA_DIR/secrets" ]; then
+    WP_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+    ROOT_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+
+    touch "$DATA_DIR/secrets"
+    chmod 600 "$DATA_DIR/secrets"
+    cat > "$DATA_DIR/secrets" <<EOF
+# Database passwords - generated on $(date)
+# DO NOT SHARE THESE PASSWORDS
+WORDPRESS_DB_PASSWORD='$WP_PASS'
+MYSQL_PASSWORD='$WP_PASS'
+MYSQL_ROOT_PASSWORD='$ROOT_PASS'
+EOF
+    echo "  Database passwords generated"
+else
+    echo "  Existing secrets preserved"
+fi
+
+# Create default config
+if [ ! -f "$DATA_DIR/config" ]; then
+    cat > "$DATA_DIR/config" <<EOF
+ADDRESS_PREFIX=op2
+INSTALL_IA_PLUGIN=yes
+UPDATE_ON_LAUNCH=no
+START_ON_BOOT=yes
+EOF
+    echo "  Default config created"
+fi
+
+# ─── Install systemd service ─────────────────────────────────────────
+
+echo ""
+echo "  Installing systemd service..."
+
+$SUDO cp "$REPO_DIR/linux/onionpress.service" /etc/systemd/system/onionpress.service
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable onionpress
+echo "  Systemd service installed and enabled (starts on boot)"
+
+# ─── Start OnionPress ─────────────────────────────────────────────────
+
+echo ""
+echo "  Starting OnionPress (this may take a few minutes on first run)..."
+echo "  Docker will pull container images for WordPress, MariaDB, and Tor."
+echo ""
+
+$SUDO systemctl start onionpress
+
+# Wait for the service to finish starting
+echo "  Waiting for services..."
+local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+
+sleep 5
+
+# Check if it started successfully
+if $SUDO systemctl is-active --quiet onionpress; then
+    # Try to get the onion address
+    onion_addr=$("$INSTALL_DIR/onionpress" address 2>/dev/null || echo "Generating...")
+
+    echo ""
+    echo "  ======================================="
+    echo "  OnionPress is running!"
+    echo "  ======================================="
+    echo ""
+    echo "  Local access:  http://${local_ip}:8080"
+    echo "  Status page:   http://${local_ip}:8080/onionpress-status"
+    echo ""
+    if [ "$onion_addr" != "Generating..." ] && [ -n "$onion_addr" ]; then
+        echo "  Onion address: http://${onion_addr}"
+    else
+        echo "  Onion address: Still generating... (run 'onionpress address' to check)"
+    fi
+    echo ""
+    echo "  Open http://${local_ip}:8080 in a browser to set up WordPress."
+    echo ""
+    echo "  Commands:"
+    echo "    onionpress status       - Show container status"
+    echo "    onionpress address      - Show .onion address"
+    echo "    onionpress logs         - Stream container logs"
+    echo "    onionpress write-status - Update status page data"
+    echo "    sudo systemctl restart onionpress - Restart"
+    echo "    sudo systemctl stop onionpress    - Stop"
+    echo ""
+    echo "  Log file: $DATA_DIR/onionpress.log"
+    echo ""
+else
+    echo ""
+    echo "  WARNING: OnionPress may still be starting."
+    echo "  Check status with: sudo systemctl status onionpress"
+    echo "  Check logs with:   journalctl -u onionpress"
+    echo "  Or:                cat $DATA_DIR/onionpress.log"
+    echo ""
+fi
+
+# Create symlink for easy CLI access
+$SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress 2>/dev/null || true
