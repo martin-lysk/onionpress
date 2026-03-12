@@ -953,6 +953,135 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     return 0
 }
 
+# ─── First-time WordPress setup ──────────────────────────────────────
+
+# Usage: setup_wordpress_interactive [--user USER] [--pass PASS] [--email EMAIL] [--title TITLE] [--ia-access KEY] [--ia-secret KEY]
+# If args are provided, runs non-interactively. Otherwise prompts.
+setup_wordpress_interactive() {
+    local wp_user="" wp_pass="" wp_email="" wp_title="OnionPress"
+    local ia_access="" ia_secret=""
+
+    # Parse optional arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --user)      wp_user="$2";    shift 2 ;;
+            --pass)      wp_pass="$2";    shift 2 ;;
+            --email)     wp_email="$2";   shift 2 ;;
+            --title)     wp_title="$2";   shift 2 ;;
+            --ia-access) ia_access="$2";  shift 2 ;;
+            --ia-secret) ia_secret="$2";  shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    # If credentials not provided, prompt interactively
+    if [ -z "$wp_user" ] || [ -z "$wp_pass" ]; then
+        echo ""
+        echo "  ======================================="
+        echo "  OnionPress First-Time Setup"
+        echo "  ======================================="
+        echo ""
+        echo "  Create your WordPress admin account."
+        echo "  You'll use these credentials to log in at /wp-admin."
+        echo ""
+
+        if [ -z "$wp_user" ]; then
+            while [ -z "$wp_user" ]; do
+                printf "  Admin username: "
+                read wp_user
+                if [ -z "$wp_user" ]; then
+                    echo "  Username cannot be empty."
+                fi
+            done
+        fi
+
+        if [ -z "$wp_pass" ]; then
+            local wp_pass2=""
+            while [ -z "$wp_pass" ]; do
+                printf "  Admin password: "
+                stty -echo 2>/dev/null
+                read wp_pass
+                stty echo 2>/dev/null
+                echo ""
+                if [ -z "$wp_pass" ]; then
+                    echo "  Password cannot be empty."
+                    continue
+                fi
+                printf "  Confirm password: "
+                stty -echo 2>/dev/null
+                read wp_pass2
+                stty echo 2>/dev/null
+                echo ""
+                if [ "$wp_pass" != "$wp_pass2" ]; then
+                    echo "  Passwords do not match. Try again."
+                    wp_pass=""
+                fi
+            done
+        fi
+
+        if [ -z "$wp_email" ]; then
+            printf "  Admin email (optional, press Enter to skip): "
+            read wp_email
+        fi
+
+        printf "  Site title [OnionPress]: "
+        read wp_title_input
+        if [ -n "$wp_title_input" ]; then
+            wp_title="$wp_title_input"
+        fi
+
+        # Archive.org credentials for Wayback Machine archiving
+        echo ""
+        echo "  Archive.org S3 API credentials (for Wayback Machine archiving)."
+        echo "  Get keys at https://archive.org/account/s3.php"
+        echo "  Press Enter to skip (can be set later in Settings)."
+        echo ""
+        if [ -z "$ia_access" ]; then
+            printf "  Archive.org S3 Access Key: "
+            read ia_access
+        fi
+        if [ -n "$ia_access" ] && [ -z "$ia_secret" ]; then
+            printf "  Archive.org S3 Secret Key: "
+            read ia_secret
+        fi
+    fi
+
+    if [ -z "$wp_email" ]; then
+        wp_email="${wp_user}@onionpress.local"
+    fi
+
+    echo ""
+    echo "  Installing WordPress..."
+    log "Running WP-CLI core install for first-time setup"
+
+    if docker exec onionpress-wordpress wp core install \
+        --url="http://localhost" \
+        --title="$wp_title" \
+        --admin_user="$wp_user" \
+        --admin_password="$wp_pass" \
+        --admin_email="$wp_email" \
+        --skip-email \
+        --allow-root >> "$LOG_FILE" 2>&1; then
+        log "WordPress installed successfully via WP-CLI"
+        echo "  WordPress installed successfully!"
+    else
+        log "ERROR: WP-CLI core install failed"
+        echo "  ERROR: WordPress installation failed. Check $LOG_FILE for details."
+        echo "  You can complete setup manually at http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}"
+        return 1
+    fi
+
+    # Save archive.org credentials to wp_options
+    if [ -n "$ia_access" ]; then
+        docker exec onionpress-wordpress wp option update onionpress_archive_s3_access "$ia_access" --allow-root >> "$LOG_FILE" 2>&1
+        log "Archive.org S3 access key saved"
+    fi
+    if [ -n "$ia_secret" ]; then
+        docker exec onionpress-wordpress wp option update onionpress_archive_s3_secret "$ia_secret" --allow-root >> "$LOG_FILE" 2>&1
+        log "Archive.org S3 secret key saved"
+    fi
+}
+
 # ─── Container management ────────────────────────────────────────────
 
 start_containers() {
@@ -1071,7 +1200,16 @@ start_containers() {
         log "WordPress is installed -- starting Tor"
         docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
     else
-        log "WordPress not yet installed -- waiting for setup (Tor NOT started)"
+        if [ -t 0 ]; then
+            # Interactive terminal — prompt for credentials
+            log "WordPress not yet installed -- running first-time setup"
+            setup_wordpress_interactive
+            # Now that WP is installed, start Tor
+            docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+        else
+            # Non-interactive (systemd) — wait for user to run setup
+            log "WordPress not yet installed -- run 'onionpress setup' or visit http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}"
+        fi
     fi
 
     # Install plugins and mu-plugins
@@ -1442,6 +1580,33 @@ main() {
 
         address)
             get_onion_address
+            ;;
+
+        setup)
+            # Usage: onionpress setup [--user USER] [--pass PASS] [--email EMAIL] [--title TITLE]
+            setup_db_passwords
+            cd "$DOCKER_DIR"
+            if wp_is_installed; then
+                echo "WordPress is already installed."
+                exit 0
+            fi
+            # Make sure containers are running
+            if ! curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT}" >/dev/null 2>&1; then
+                echo "WordPress container is not running. Start OnionPress first: sudo systemctl start onionpress"
+                exit 1
+            fi
+            shift  # remove "setup" from args
+            setup_wordpress_interactive "$@"
+            # Start Tor if not running
+            if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
+                echo "  Starting Tor..."
+                docker compose up -d tor >> "$LOG_FILE" 2>&1
+            fi
+            write_status
+            echo ""
+            echo "  Setup complete! Your site is now running."
+            echo "  Admin panel: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}/wp-admin"
+            echo "  Status page: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}/onionpress-status"
             ;;
 
         import-key)

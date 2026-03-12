@@ -92,6 +92,13 @@ if ! command -v python3 >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq python3
 fi
 
+# Ensure unzip is available (needed for plugin installs)
+if ! command -v unzip >/dev/null 2>&1; then
+    echo "  Installing unzip..."
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq unzip
+fi
+
 # ─── Install OnionPress files ────────────────────────────────────────
 
 echo ""
@@ -287,13 +294,22 @@ echo "  Starting OnionPress (this may take a few minutes on first run)..."
 echo "  Docker will pull container images for WordPress, MariaDB, and Tor."
 echo ""
 
-$SUDO systemctl start onionpress
+$SUDO systemctl daemon-reload
+$SUDO systemctl restart onionpress
 
 # Wait for the service to finish starting
 echo "  Waiting for services..."
 local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 
-sleep 5
+# Wait for WordPress container to respond (DB can take 20-30s on first run)
+wp_wait=0
+while [ $wp_wait -lt 60 ]; do
+    if curl -s --max-time 3 "http://localhost:8080" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+    wp_wait=$((wp_wait + 2))
+done
 
 # Check if it started successfully
 if $SUDO systemctl is-active --quiet onionpress; then
@@ -314,11 +330,22 @@ if $SUDO systemctl is-active --quiet onionpress; then
         echo "  Onion address: Still generating... (run 'onionpress address' to check)"
     fi
     echo ""
-    echo "  Open http://${local_ip}:8080 in a browser to set up WordPress."
+
+    # Run first-time WordPress setup if not already installed
+    if ! docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1; then
+        # Run as the real user so DATA_DIR resolves correctly
+        if [ -n "$SUDO_USER" ]; then
+            sudo -u "$SUDO_USER" "$INSTALL_DIR/onionpress" setup
+        else
+            "$INSTALL_DIR/onionpress" setup
+        fi
+    fi
+
     echo ""
     echo "  Commands:"
     echo "    onionpress status       - Show container status"
     echo "    onionpress address      - Show .onion address"
+    echo "    onionpress setup        - Re-run first-time setup"
     echo "    onionpress logs         - Stream container logs"
     echo "    onionpress write-status - Update status page data"
     echo "    sudo systemctl restart onionpress - Restart"
