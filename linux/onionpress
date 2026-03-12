@@ -373,6 +373,184 @@ os.chmod(output_path, 0o600)
     return 0
 }
 
+# Non-interactive key import (used by handle-action for settings page imports)
+import_key_noninteractive() {
+    local key_b32="$1"
+    if [ -z "$key_b32" ]; then
+        log "ERROR: No key provided for import"
+        return 1
+    fi
+
+    mkdir -p "$DATA_DIR"
+
+    # Decode and derive address (same as import_key)
+    local result
+    result=$(python3 -c "
+import base64, hashlib, sys, binascii
+
+key_b32 = sys.argv[1]
+
+try:
+    key_bytes = base64.b32decode(key_b32, casefold=True)
+except Exception as e:
+    print(f'ERROR: Invalid base32 encoding: {e}', file=sys.stderr)
+    sys.exit(1)
+
+if len(key_bytes) == 96 and key_bytes[:29] == b'== ed25519v1-secret: type0 ==':
+    key_bytes = key_bytes[32:]
+elif len(key_bytes) != 64:
+    print(f'ERROR: Key must be exactly 64 bytes (or 96 with header), got {len(key_bytes)}', file=sys.stderr)
+    sys.exit(1)
+
+p = 2**255 - 19
+def inv(x): return pow(x, p-2, p)
+d = -121665 * inv(121666) % p
+
+def recover_x(y, sign):
+    x2 = (y*y-1) * inv(d*y*y+1) % p
+    x = pow(x2, (p+3)//8, p)
+    if (x*x - x2) % p != 0:
+        x = x * pow(2, (p-1)//4, p) % p
+    if x % 2 != sign: x = p - x
+    return x
+
+By = 4 * inv(5) % p
+Bx = recover_x(By, 0)
+B = (Bx, By, 1, Bx*By % p)
+
+def point_add(P, Q):
+    x1,y1,z1,t1 = P; x2,y2,z2,t2 = Q
+    a=(y1-x1)*(y2-x2)%p; b=(y1+x1)*(y2+x2)%p
+    c=2*t1*t2*d%p; dd=2*z1*z2%p
+    e=b-a; f=dd-c; g=dd+c; h=b+a
+    return (e*f%p, g*h%p, f*g%p, e*h%p)
+
+def scalar_mult(s, P):
+    Q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1: Q = point_add(Q, P)
+        P = point_add(P, P)
+        s >>= 1
+    return Q
+
+def encode_point(P):
+    x,y,z,_ = P; zi = inv(z)
+    x,y = x*zi%p, y*zi%p
+    r = bytearray(y.to_bytes(32,'little'))
+    r[31] ^= (x&1) << 7
+    return bytes(r)
+
+scalar = int.from_bytes(key_bytes[:32], 'little')
+pubkey = encode_point(scalar_mult(scalar, B))
+
+checksum = hashlib.sha3_256(b'.onion checksum' + pubkey + b'\x03').digest()[:2]
+address = base64.b32encode(pubkey + checksum + b'\x03').decode().lower() + '.onion'
+
+print(address)
+print(binascii.hexlify(key_bytes).decode())
+print(binascii.hexlify(pubkey).decode())
+" "$key_b32" 2>&1)
+
+    if [ $? -ne 0 ]; then
+        log "ERROR: $result"
+        return 1
+    fi
+
+    local address hex_key hex_pubkey
+    address=$(echo "$result" | sed -n '1p')
+    hex_key=$(echo "$result" | sed -n '2p')
+    hex_pubkey=$(echo "$result" | sed -n '3p')
+
+    if [ -z "$address" ] || [ -z "$hex_key" ] || [ -z "$hex_pubkey" ]; then
+        log "ERROR: Failed to derive address from key"
+        return 1
+    fi
+
+    touch "$DATA_DIR/.import-key-pending"
+
+    local output_dir="$DATA_DIR/shared/vanity-keys/$address"
+    mkdir -p "$output_dir"
+
+    # Write OpenSSH PEM key file for Arti
+    python3 -c "
+import base64, binascii, os, struct, sys
+
+hex_key = sys.argv[1]
+hex_pubkey = sys.argv[2]
+output_path = sys.argv[3]
+
+private_key = binascii.unhexlify(hex_key)
+public_key = binascii.unhexlify(hex_pubkey)
+
+KEY_TYPE = b'ed25519-expanded@spec.torproject.org'
+MAGIC = b'openssh-key-v1\x00'
+
+def pack(data):
+    return struct.pack('>I', len(data)) + data
+
+pub_blob = pack(KEY_TYPE) + pack(public_key)
+
+check = struct.pack('>I', int.from_bytes(os.urandom(4), 'big'))
+priv_blob = (
+    check + check +
+    pack(KEY_TYPE) +
+    pack(public_key) +
+    pack(private_key) +
+    pack(b'')
+)
+pad_len = (8 - len(priv_blob) % 8) % 8
+priv_blob += bytes(range(1, pad_len + 1))
+
+binary = (
+    MAGIC +
+    pack(b'none') +
+    pack(b'none') +
+    pack(b'') +
+    struct.pack('>I', 1) +
+    pack(pub_blob) +
+    pack(priv_blob)
+)
+
+b64 = base64.b64encode(binary).decode('ascii')
+lines = [b64[i:i+70] for i in range(0, len(b64), 70)]
+pem = '-----BEGIN OPENSSH PRIVATE KEY-----\n'
+pem += '\n'.join(lines) + '\n'
+pem += '-----END OPENSSH PRIVATE KEY-----\n'
+
+with open(output_path, 'wb') as f:
+    f.write(pem.encode('utf-8'))
+os.chmod(output_path, 0o600)
+" "$hex_key" "$hex_pubkey" "$output_dir/ks_hs_id.ed25519_expanded_private"
+
+    if [ $? -ne 0 ]; then
+        log "ERROR: Failed to write OpenSSH key file"
+        return 1
+    fi
+
+    echo "$address" > "$output_dir/hostname"
+    chmod 644 "$output_dir/hostname"
+
+    # Update ADDRESS_PREFIX in config
+    local current_prefix=""
+    if [ -f "$DATA_DIR/config" ]; then
+        current_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+    fi
+    local prefix_len=${#current_prefix}
+    if [ "$prefix_len" -lt 2 ]; then
+        prefix_len=3
+    fi
+    local addr_prefix=$(echo "$address" | cut -c1-$prefix_len)
+    if [ -f "$DATA_DIR/config" ] && grep -q "^ADDRESS_PREFIX=" "$DATA_DIR/config"; then
+        sed -i "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$addr_prefix/" "$DATA_DIR/config"
+    else
+        echo "ADDRESS_PREFIX=$addr_prefix" >> "$DATA_DIR/config"
+    fi
+    log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
+
+    log "Non-interactive import: key for $address"
+    return 0
+}
+
 # ─── Plugin installation ─────────────────────────────────────────────
 
 install_ia_plugin() {
@@ -877,10 +1055,10 @@ start_containers() {
         wp_wait=$((wp_wait + 2))
     done
 
-    # Check if WordPress is set up
+    # Check if WordPress is set up (retry up to 30s — DB can be slow on cold start)
     local wp_installed=false
     local wp_check=0
-    while [ $wp_check -lt 5 ]; do
+    while [ $wp_check -lt 15 ]; do
         if wp_is_installed; then
             wp_installed=true
             break
@@ -1129,6 +1307,11 @@ print(json.dumps(config, indent=2))
 
     echo "$config_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/config-current.json' 2>>"$LOG_FILE"
     log "config-current.json written"
+
+    # Write recent logs to shared volume
+    if [ -f "$LOG_FILE" ]; then
+        tail -100 "$LOG_FILE" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/recent-logs.txt' 2>/dev/null
+    fi
 }
 
 # ─── Config watcher (on-demand) ──────────────────────────────────────
@@ -1285,11 +1468,23 @@ main() {
             local action
             action=$(docker exec onionpress-wordpress cat /var/lib/onionpress/requested-action 2>/dev/null || echo "")
             if [ -z "$action" ]; then
+                # No action requested — just refresh logs (cheap)
+                # Full status is written on-demand when the status page detects stale data
+                if [ -f "$LOG_FILE" ]; then
+                    tail -100 "$LOG_FILE" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/recent-logs.txt' 2>/dev/null
+                fi
                 exit 0
             fi
             docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/requested-action' 2>/dev/null
             log "Handling requested action: $action"
             case "$action" in
+                start)
+                    setup_db_passwords
+                    apply_config_updates 2>/dev/null || true
+                    start_containers
+                    wait_for_services
+                    write_status
+                    ;;
                 restart)
                     setup_db_passwords
                     apply_config_updates 2>/dev/null || true
@@ -1301,6 +1496,115 @@ main() {
                 stop)
                     setup_db_passwords
                     stop_containers
+                    ;;
+                check-reachability)
+                    log "Running Tor reachability test..."
+                    local onion_addr_test
+                    onion_addr_test=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
+                    if [ -z "$onion_addr_test" ]; then
+                        echo '{"reachable":false,"error":"No onion address found","tested_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/reachability-result.json' 2>/dev/null
+                        log "Reachability test: no onion address"
+                    else
+                        local http_code
+                        http_code=$(docker exec onionpress-tor-client curl -s -o /dev/null -w '%{http_code}' --max-time 60 --socks5-hostname 127.0.0.1:9050 "http://$onion_addr_test/" 2>/dev/null || echo "000")
+                        local reachable=false
+                        if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 500 ] 2>/dev/null; then
+                            reachable=true
+                        fi
+                        echo '{"reachable":'"$reachable"',"http_code":'"$http_code"',"address":"'"$onion_addr_test"'","tested_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/reachability-result.json' 2>/dev/null
+                        log "Reachability test: $onion_addr_test -> HTTP $http_code (reachable=$reachable)"
+                    fi
+                    ;;
+                generate-vanity)
+                    log "Starting vanity address generation..."
+                    setup_db_passwords
+                    local vanity_prefix
+                    vanity_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+                    vanity_prefix="${vanity_prefix:-op2}"
+                    local vanity_result_file="/tmp/onionpress-vanity-result.json"
+                    if ! command -v mkp224o >/dev/null 2>&1; then
+                        echo '{"success":false,"error":"mkp224o is not installed. Install it with: sudo apt install -y gcc libsodium-dev autoconf && cd /tmp && git clone https://github.com/cathugger/mkp224o && cd mkp224o && ./autogen.sh && ./configure && make && sudo cp mkp224o /usr/local/bin/","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/vanity-result.json' 2>/dev/null
+                        log "Vanity generation failed: mkp224o not installed"
+                    else
+                        local vanity_output_dir
+                        vanity_output_dir=$(mktemp -d)
+                        log "Generating vanity address with prefix: $vanity_prefix (this may take a while)..."
+                        if mkp224o -n 1 -d "$vanity_output_dir" "$vanity_prefix" >> "$LOG_FILE" 2>&1; then
+                            local vanity_addr_dir
+                            vanity_addr_dir=$(find "$vanity_output_dir" -maxdepth 1 -type d -name "*.onion" | head -1)
+                            if [ -n "$vanity_addr_dir" ] && [ -f "$vanity_addr_dir/hs_ed25519_secret_key" ]; then
+                                local vanity_address
+                                vanity_address=$(basename "$vanity_addr_dir")
+                                # Import the key using the existing import flow
+                                local vanity_b32_key
+                                vanity_b32_key=$(python3 -c "import base64; print(base64.b32encode(open('$vanity_addr_dir/hs_ed25519_secret_key','rb').read()).decode())")
+                                # Non-interactive import: skip confirmation, force replace
+                                stop_containers 2>/dev/null || true
+                                docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+                                docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
+                                rm -rf "$DATA_DIR/shared/vanity-keys/"
+                                # Run import-key logic inline (without interactive prompt)
+                                import_key_noninteractive "$vanity_b32_key"
+                                start_containers
+                                wait_for_services
+                                write_status
+                                echo '{"success":true,"address":"'"$vanity_address"'","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                    docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/vanity-result.json' 2>/dev/null
+                                log "Vanity address generated and imported: $vanity_address"
+                            else
+                                echo '{"success":false,"error":"mkp224o did not produce a key","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                    docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/vanity-result.json' 2>/dev/null
+                                log "Vanity generation failed: no key produced"
+                            fi
+                        else
+                            echo '{"success":false,"error":"mkp224o failed","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/vanity-result.json' 2>/dev/null
+                            log "Vanity generation failed: mkp224o error"
+                        fi
+                        rm -rf "$vanity_output_dir"
+                    fi
+                    ;;
+                import-key-file)
+                    log "Processing key file import from settings page..."
+                    setup_db_passwords
+                    local key_data
+                    key_data=$(docker exec onionpress-wordpress cat /var/lib/onionpress/import-key-data 2>/dev/null || echo "")
+                    docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/import-key-data' 2>/dev/null
+                    if [ -z "$key_data" ]; then
+                        echo '{"success":false,"error":"No key data found","imported_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/import-result.json' 2>/dev/null
+                        log "Key import failed: no key data"
+                    else
+                        stop_containers 2>/dev/null || true
+                        docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
+                        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
+                        rm -rf "$DATA_DIR/shared/vanity-keys/"
+                        if import_key_noninteractive "$key_data"; then
+                            start_containers
+                            wait_for_services
+                            write_status
+                            local new_addr
+                            new_addr=$(find "$DATA_DIR/shared/vanity-keys" -name hostname -exec cat {} \; 2>/dev/null | head -1)
+                            echo '{"success":true,"address":"'"$new_addr"'","imported_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/import-result.json' 2>/dev/null
+                            log "Key imported successfully: $new_addr"
+                        else
+                            echo '{"success":false,"error":"Key import failed - invalid key data","imported_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/import-result.json' 2>/dev/null
+                            start_containers
+                            wait_for_services
+                            write_status
+                            log "Key import failed: invalid key data"
+                        fi
+                    fi
+                    ;;
+                refresh-status)
+                    setup_db_passwords
+                    write_status
+                    log "Status refreshed via settings page"
                     ;;
                 *)
                     log "Unknown action: $action"
