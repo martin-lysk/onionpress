@@ -103,7 +103,7 @@ add_action( 'admin_init', function () {
         return;
     }
     $action = sanitize_text_field( $_POST['onionpress_action'] ?? '' );
-    if ( ! in_array( $action, array( 'restart', 'stop', 'start', 'save-restart', 'check-reachability', 'generate-vanity', 'import-key-file', 'create-backup', 'restore-backup' ), true ) ) {
+    if ( ! in_array( $action, array( 'restart', 'stop', 'start', 'save-restart', 'check-reachability', 'generate-vanity', 'import-key-file', 'create-backup', 'restore-backup', 'update' ), true ) ) {
         return;
     }
 
@@ -217,6 +217,7 @@ add_action( 'admin_init', function () {
         'check-reachability' => 'check-reachability', 'generate-vanity' => 'generate-vanity',
         'import-key-file' => 'import-key-file',
         'create-backup' => 'create-backup', 'restore-backup' => 'restore-backup',
+        'update' => 'update',
     );
     $cmd = $cmd_map[ $action ];
     if ( @file_put_contents( $file, $cmd ) === false ) {
@@ -233,9 +234,10 @@ add_action( 'admin_init', function () {
         'import-key-file' => 'Importing key for',
         'create-backup' => 'Creating backup of',
         'restore-backup' => 'Restoring backup for',
+        'update' => 'Updating',
     );
     $label = $label_map[ $action ] ?? 'Processing';
-    $causes_downtime = in_array( $action, array( 'restart', 'save-restart', 'stop', 'restore-backup' ), true );
+    $causes_downtime = in_array( $action, array( 'restart', 'save-restart', 'stop', 'restore-backup', 'update' ), true );
     $poll_action = $cmd_map[ $action ] ?? $action;
     add_action( 'admin_notices', function () use ( $label, $causes_downtime, $poll_action ) {
         $msg = esc_html( $label ) . ' OnionPress... This may take a minute.';
@@ -404,6 +406,7 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
         'import-key-file'    => '/var/lib/onionpress/import-result.json',
         'create-backup'      => '/var/lib/onionpress/backup-result.json',
         'restore-backup'     => '/var/lib/onionpress/restore-result.json',
+        'update'             => '/var/lib/onionpress/update-result.json',
     );
 
     if ( isset( $result_files[ $action ] ) ) {
@@ -417,6 +420,47 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
 
     // For start/stop/restart — done when action file is consumed
     wp_send_json( array( 'done' => ! $pending ) );
+} );
+
+/**
+ * AJAX handler for checking latest version (cached 10 min).
+ */
+add_action( 'wp_ajax_onionpress_check_update', function () {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( 'Unauthorized' );
+    }
+
+    $current = trim( @file_get_contents( '/var/lib/onionpress/version' ) ?: 'unknown' );
+
+    // Check transient cache first
+    $cached = get_transient( 'onionpress_latest_release' );
+    if ( $cached !== false ) {
+        wp_send_json( array(
+            'current'   => $current,
+            'latest'    => $cached['tag'],
+            'update'    => version_compare( ltrim( $cached['tag'], 'v' ), ltrim( $current, 'v' ), '>' ),
+        ) );
+    }
+
+    // Fetch from GitHub releases API
+    $resp = wp_remote_get( 'https://api.github.com/repos/brewsterkahle/onionpress/releases/latest', array(
+        'timeout' => 10,
+        'headers' => array( 'User-Agent' => 'OnionPress (+https://github.com/brewsterkahle/onionpress)' ),
+    ) );
+    if ( is_wp_error( $resp ) || wp_remote_retrieve_response_code( $resp ) !== 200 ) {
+        wp_send_json( array( 'current' => $current, 'latest' => null, 'update' => false, 'error' => 'Failed to check for updates' ) );
+    }
+
+    $data = json_decode( wp_remote_retrieve_body( $resp ), true );
+    $tag  = $data['tag_name'] ?? '';
+
+    set_transient( 'onionpress_latest_release', array( 'tag' => $tag ), 600 ); // 10 min
+
+    wp_send_json( array(
+        'current'   => $current,
+        'latest'    => $tag,
+        'update'    => version_compare( ltrim( $tag, 'v' ), ltrim( $current, 'v' ), '>' ),
+    ) );
 } );
 
 /**
@@ -660,6 +704,11 @@ function onionpress_settings_page() {
             Restart will apply any saved settings changes. The page will be unavailable briefly during restart.<br>
             To start after a full stop, use SSH: <code>sudo systemctl start onionpress</code>
         </p>
+
+        <!-- Update -->
+        <hr>
+        <h2>Updates</h2>
+        <div id="op-update-status"><p class="description">Checking for updates...</p></div>
 
         <!-- Tor Reachability Test -->
         <hr>
@@ -970,6 +1019,32 @@ function onionpress_settings_page() {
                     })
                     .catch(function() { /* server may be restarting — keep polling */ });
             }, 3000);
+        })();
+
+        /* Check for updates (async, doesn't stall page) */
+        (function() {
+            var el = document.getElementById('op-update-status');
+            if (!el) return;
+            fetch(ajaxurl + '?action=onionpress_check_update')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var current = data.current || 'unknown';
+                    if (data.update && data.latest) {
+                        el.innerHTML = '<form method="post" style="display:inline;">' +
+                            '<input type="hidden" name="onionpress_action_nonce" value="<?php echo wp_create_nonce( "onionpress_action" ); ?>">' +
+                            '<input type="hidden" name="onionpress_action" value="update">' +
+                            '<p><strong>Update available:</strong> ' + data.latest + ' (you are on ' + current + ')</p>' +
+                            '<button type="submit" class="button button-primary">Update to ' + data.latest + '</button>' +
+                            '</form>';
+                    } else if (data.latest) {
+                        el.innerHTML = '<p class="description">You are on the latest version (' + current + ').</p>';
+                    } else {
+                        el.innerHTML = '<p class="description">Version ' + current + '. ' + (data.error || 'Could not check for updates.') + '</p>';
+                    }
+                })
+                .catch(function() {
+                    el.innerHTML = '<p class="description">Could not check for updates.</p>';
+                });
         })();
     </script>
     <?php

@@ -1930,6 +1930,91 @@ main() {
             echo "Done! OnionPress restarted with restored data."
             ;;
 
+        update)
+            log "Checking for OnionPress updates..."
+            echo "  Checking for updates..."
+
+            # Find the git repo
+            local repo_dir=""
+            for d in /home/*/tmp/onionpress /home/*/onionpress /opt/onionpress-src; do
+                if [ -d "$d/.git" ]; then
+                    repo_dir="$d"
+                    break
+                fi
+            done
+
+            # Clone fresh if no repo found
+            if [ -z "$repo_dir" ]; then
+                repo_dir="/opt/onionpress-src"
+                log "No git repo found — cloning to $repo_dir..."
+                echo "  Cloning OnionPress repo..."
+                if ! sudo git clone https://github.com/brewsterkahle/onionpress.git "$repo_dir" >> "$LOG_FILE" 2>&1; then
+                    log "ERROR: git clone failed"
+                    echo "  ERROR: git clone failed. Check $LOG_FILE for details."
+                    exit 1
+                fi
+            fi
+
+            # Pull latest
+            log "Pulling latest from $repo_dir..."
+            cd "$repo_dir"
+            if ! git pull --ff-only >> "$LOG_FILE" 2>&1; then
+                # ff-only failed — try reset to origin/main
+                log "Fast-forward pull failed, resetting to origin/main..."
+                git fetch origin >> "$LOG_FILE" 2>&1
+                git reset --hard origin/main >> "$LOG_FILE" 2>&1 || {
+                    log "ERROR: git pull failed"
+                    echo "  ERROR: git pull failed. Check $LOG_FILE for details."
+                    exit 1
+                }
+            fi
+
+            local new_version
+            new_version=$(git -C "$repo_dir" describe --tags --abbrev=0 2>/dev/null || echo "unknown")
+            new_version="${new_version#v}"
+
+            # Re-install files
+            log "Installing updated files..."
+            local resources_dir="$repo_dir/OnionPress.app/Contents/Resources"
+            sudo cp "$repo_dir/linux/onionpress" "$INSTALL_DIR/onionpress"
+            sudo chmod +x "$INSTALL_DIR/onionpress"
+            sudo cp -r "$resources_dir/docker" "$INSTALL_DIR/docker"
+            sudo cp -r "$resources_dir/plugins" "$INSTALL_DIR/plugins"
+            if [ -d "$resources_dir/scripts" ]; then
+                sudo cp -r "$resources_dir/scripts" "$INSTALL_DIR/scripts"
+            fi
+            # Fix docker-compose port bindings for LAN access
+            sudo sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
+            sudo sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
+            echo "$new_version" | sudo tee "$INSTALL_DIR/VERSION" > /dev/null
+
+            # Deploy updated plugins to running container
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
+                for plugin in "$INSTALL_DIR/plugins/"*.php; do
+                    docker cp "$plugin" "onionpress-wordpress:/var/www/html/wp-content/mu-plugins/" 2>>"$LOG_FILE"
+                done
+                log "Updated plugins deployed to WordPress container"
+            fi
+
+            # Pull latest docker images
+            log "Pulling latest Docker images..."
+            echo "  Pulling latest Docker images..."
+            cd "$INSTALL_DIR/docker"
+            setup_db_passwords
+            docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+
+            # Restart
+            log "Restarting OnionPress..."
+            echo "  Restarting OnionPress..."
+            stop_containers
+            start_containers
+            wait_for_services
+            write_status
+
+            log "Update complete: $new_version"
+            echo "  Update complete! Now running OnionPress $new_version."
+            ;;
+
         write-status)
             setup_db_passwords
             write_status
@@ -2151,6 +2236,21 @@ main() {
                     setup_db_passwords
                     write_status
                     ;;
+                update)
+                    log "Update requested from settings page..."
+                    # Run the update command and capture result
+                    if "$0" update >> "$LOG_FILE" 2>&1; then
+                        local updated_ver
+                        updated_ver=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
+                        echo '{"success":true,"version":"'"$updated_ver"'","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/update-result.json' 2>/dev/null
+                        log "Update complete: $updated_ver"
+                    else
+                        echo '{"success":false,"error":"Update failed — check logs","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/update-result.json' 2>/dev/null
+                        log "Update failed"
+                    fi
+                    ;;
                 *)
                     log "Unknown action: $action"
                     ;;
@@ -2158,7 +2258,7 @@ main() {
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|import-key|backup|restore|logs|write-status|apply-config|handle-action}"
+            echo "Usage: $0 {start|stop|restart|status|address|import-key|backup|restore|update|logs|write-status|apply-config|handle-action}"
             exit 1
             ;;
     esac
