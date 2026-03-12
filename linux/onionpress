@@ -1348,13 +1348,14 @@ print(json.dumps(containers))
     onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
     onion_addr=$(echo "$onion_addr" | tr -d '\n\r ')
 
-    # Get bootstrap percentage
+    # Get bootstrap percentage (use docker logs directly — compose logs needs env vars
+    # and tail 50 may miss the bootstrap message in verbose Arti debug logs)
     local bootstrap_pct=0
-    if docker compose logs --tail 50 tor 2>/dev/null | grep -q -E "Bootstrapped 100%|Sufficiently bootstrapped"; then
+    if docker logs onionpress-tor 2>&1 | grep -q -E "Bootstrapped 100%|Sufficiently bootstrapped"; then
         bootstrap_pct=100
     else
         local pct_line
-        pct_line=$(docker compose logs --tail 50 tor 2>/dev/null | grep -oE "Bootstrapped [0-9]+%" | tail -1 || echo "")
+        pct_line=$(docker logs --tail 200 onionpress-tor 2>&1 | grep -oE "Bootstrapped [0-9]+%" | tail -1 || echo "")
         if [ -n "$pct_line" ]; then
             bootstrap_pct=$(echo "$pct_line" | grep -oE "[0-9]+" || echo 0)
         fi
@@ -1423,7 +1424,6 @@ print(json.dumps(status, indent=2))
 
     # Write to shared volume
     echo "$status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
-    log "status.json written"
 
     # Build config-current.json from ~/.onionpress/config
     local config_json="{}"
@@ -1444,7 +1444,6 @@ print(json.dumps(config, indent=2))
     fi
 
     echo "$config_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/config-current.json' 2>>"$LOG_FILE"
-    log "config-current.json written"
 
     # Write recent logs to shared volume
     if [ -f "$LOG_FILE" ]; then
@@ -1641,7 +1640,9 @@ main() {
                 exit 0
             fi
             docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/requested-action' 2>/dev/null
-            log "Handling requested action: $action"
+            if [ "$action" != "refresh-status" ]; then
+                log "Handling requested action: $action"
+            fi
             case "$action" in
                 start)
                     setup_db_passwords
@@ -1769,7 +1770,6 @@ main() {
                 refresh-status)
                     setup_db_passwords
                     write_status
-                    log "Status refreshed via settings page"
                     ;;
                 *)
                     log "Unknown action: $action"
