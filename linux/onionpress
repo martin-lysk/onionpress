@@ -1369,7 +1369,18 @@ print(json.dumps(containers))
     wp_state=$(echo "$containers_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-wordpress','stopped'))" 2>/dev/null || echo "stopped")
 
     if [ "$tor_state" = "running" ] && [ "$wp_state" = "running" ] && [ "$bootstrap_pct" = "100" ]; then
-        state="running"
+        # Verify onion service is actually reachable via Tor network
+        if [ -n "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
+            local reach_code
+            reach_code=$(docker exec onionpress-tor-client curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/" 2>/dev/null || echo "000")
+            if [ "$reach_code" = "200" ] || [ "$reach_code" = "301" ] || [ "$reach_code" = "302" ]; then
+                state="running"
+            else
+                state="starting"
+            fi
+        else
+            state="starting"
+        fi
     elif [ "$wp_state" = "running" ] || [ "$tor_state" = "running" ]; then
         state="starting"
     else
