@@ -953,9 +953,64 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     return 0
 }
 
+# ─── Archive.org credential exchange ─────────────────────────────────
+
+# Convert Archive.org login (email/username + password) into S3 API keys.
+# Sets ia_s3_access and ia_s3_secret on success, empty on failure.
+fetch_archive_s3_keys() {
+    local ia_email="$1" ia_pass="$2"
+    ia_s3_access=""
+    ia_s3_secret=""
+
+    local response
+    response=$(curl -s -X POST \
+        -H "User-Agent: OnionPress (+https://github.com/brewsterkahle/onionpress)" \
+        -d "email=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$ia_email'))")" \
+        -d "password=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$ia_pass'))")" \
+        "https://archive.org/services/xauthn/?op=login" 2>/dev/null) || return 1
+
+    local success
+    success=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('success',''))" 2>/dev/null)
+    if [ "$success" != "True" ]; then
+        local reason
+        reason=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('reason','unknown'))" 2>/dev/null)
+        log "Archive.org login failed: $reason"
+        return 1
+    fi
+
+    # Try S3 keys from login response
+    ia_s3_access=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('s3',{}).get('access',''))" 2>/dev/null)
+    ia_s3_secret=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('s3',{}).get('secret',''))" 2>/dev/null)
+
+    if [ -n "$ia_s3_access" ] && [ -n "$ia_s3_secret" ]; then
+        return 0
+    fi
+
+    # Fallback: fetch S3 keys separately using cookies
+    local sig user
+    sig=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('cookies',{}).get('logged-in-sig',''))" 2>/dev/null)
+    user=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('cookies',{}).get('logged-in-user',''))" 2>/dev/null)
+
+    if [ -n "$sig" ] && [ -n "$user" ]; then
+        local s3_response
+        s3_response=$(curl -s \
+            -H "User-Agent: OnionPress (+https://github.com/brewsterkahle/onionpress)" \
+            -H "Cookie: logged-in-sig=$sig; logged-in-user=$user" \
+            "https://archive.org/account/s3.php?output_json=1" 2>/dev/null)
+        ia_s3_access=$(echo "$s3_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3accesskey',''))" 2>/dev/null)
+        ia_s3_secret=$(echo "$s3_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3secretkey',''))" 2>/dev/null)
+        if [ -n "$ia_s3_access" ] && [ -n "$ia_s3_secret" ]; then
+            return 0
+        fi
+    fi
+
+    log "Archive.org login succeeded but could not retrieve S3 keys"
+    return 1
+}
+
 # ─── First-time WordPress setup ──────────────────────────────────────
 
-# Usage: setup_wordpress_interactive [--user USER] [--pass PASS] [--email EMAIL] [--title TITLE] [--ia-access KEY] [--ia-secret KEY]
+# Usage: setup_wordpress_interactive [--user USER] [--pass PASS] [--title TITLE] [--ia-account EMAIL] [--ia-password PASS]
 # If args are provided, runs non-interactively. Otherwise prompts.
 setup_wordpress_interactive() {
     local wp_user="" wp_pass="" wp_email="" wp_title="OnionPress"
@@ -964,12 +1019,11 @@ setup_wordpress_interactive() {
     # Parse optional arguments
     while [ $# -gt 0 ]; do
         case "$1" in
-            --user)      wp_user="$2";    shift 2 ;;
-            --pass)      wp_pass="$2";    shift 2 ;;
-            --email)     wp_email="$2";   shift 2 ;;
-            --title)     wp_title="$2";   shift 2 ;;
-            --ia-access) ia_access="$2";  shift 2 ;;
-            --ia-secret) ia_secret="$2";  shift 2 ;;
+            --user)        wp_user="$2";    shift 2 ;;
+            --pass)        wp_pass="$2";    shift 2 ;;
+            --title)       wp_title="$2";   shift 2 ;;
+            --ia-account)  ia_access="$2";  shift 2 ;;
+            --ia-password) ia_secret="$2";  shift 2 ;;
             *) shift ;;
         esac
     done
@@ -1019,11 +1073,6 @@ setup_wordpress_interactive() {
             done
         fi
 
-        if [ -z "$wp_email" ]; then
-            printf "  Admin email (optional, press Enter to skip): "
-            read wp_email
-        fi
-
         printf "  Site title [OnionPress]: "
         read wp_title_input
         if [ -n "$wp_title_input" ]; then
@@ -1032,17 +1081,19 @@ setup_wordpress_interactive() {
 
         # Archive.org credentials for Wayback Machine archiving
         echo ""
-        echo "  Archive.org S3 API credentials (for Wayback Machine archiving)."
-        echo "  Get keys at https://archive.org/account/s3.php"
+        echo "  Archive.org credentials (for Wayback Machine archiving)."
         echo "  Press Enter to skip (can be set later in Settings)."
         echo ""
         if [ -z "$ia_access" ]; then
-            printf "  Archive.org S3 Access Key: "
+            printf "  Archive.org account (username or email): "
             read ia_access
         fi
         if [ -n "$ia_access" ] && [ -z "$ia_secret" ]; then
-            printf "  Archive.org S3 Secret Key: "
+            printf "  Archive.org password: "
+            stty -echo 2>/dev/null
             read ia_secret
+            stty echo 2>/dev/null
+            echo ""
         fi
     fi
 
@@ -1071,14 +1122,19 @@ setup_wordpress_interactive() {
         return 1
     fi
 
-    # Save archive.org credentials to wp_options
-    if [ -n "$ia_access" ]; then
-        docker exec onionpress-wordpress wp option update onionpress_archive_s3_access "$ia_access" --allow-root >> "$LOG_FILE" 2>&1
-        log "Archive.org S3 access key saved"
-    fi
-    if [ -n "$ia_secret" ]; then
-        docker exec onionpress-wordpress wp option update onionpress_archive_s3_secret "$ia_secret" --allow-root >> "$LOG_FILE" 2>&1
-        log "Archive.org S3 secret key saved"
+    # Convert Archive.org login to S3 API keys and save to wp_options
+    if [ -n "$ia_access" ] && [ -n "$ia_secret" ]; then
+        echo "  Logging in to Archive.org..."
+        local ia_s3_access="" ia_s3_secret=""
+        if fetch_archive_s3_keys "$ia_access" "$ia_secret"; then
+            docker exec onionpress-wordpress wp option update onionpress_archive_s3_access "$ia_s3_access" --allow-root >> "$LOG_FILE" 2>&1
+            docker exec onionpress-wordpress wp option update onionpress_archive_s3_secret "$ia_s3_secret" --allow-root >> "$LOG_FILE" 2>&1
+            log "Archive.org S3 keys saved (from login)"
+            echo "  Archive.org credentials saved."
+        else
+            echo "  WARNING: Archive.org login failed. You can set credentials later in Settings."
+            log "Archive.org login failed during setup — skipping S3 key save"
+        fi
     fi
 }
 
@@ -1314,6 +1370,196 @@ wait_for_services() {
     return 0
 }
 
+# ─── Backup & Restore ─────────────────────────────────────────────────
+
+create_backup() {
+    # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
+    # Usage: create_backup <password> <output_path>
+    local password="$1"
+    local output_path="$2"
+    local staging
+
+    if [ -z "$password" ]; then
+        echo "ERROR: Password is required" >&2
+        return 1
+    fi
+
+    staging=$(mktemp -d -t onionpress-backup-XXXXXX)
+    trap "rm -rf '$staging'" RETURN
+
+    # 1. Extract Tor keys from vanity-keys directory
+    log "Backup: extracting Tor keys..."
+    mkdir -p "$staging/tor-keys"
+    local key_file
+    key_file=$(find "$DATA_DIR/shared/vanity-keys" -name "ks_hs_id.ed25519_expanded_private" 2>/dev/null | head -1)
+    if [ -z "$key_file" ]; then
+        # Try extracting from the arti-state volume
+        key_file=$(docker run --rm -v onionpress-arti-state:/src alpine cat /src/state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private 2>/dev/null) || true
+        if [ -n "$key_file" ]; then
+            echo "$key_file" > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
+        else
+            log "WARNING: No Tor key found — backup will not include keys"
+        fi
+    else
+        cp "$key_file" "$staging/tor-keys/"
+    fi
+
+    # 2. Dump WordPress database
+    log "Backup: exporting database..."
+    mkdir -p "$staging/database"
+    local db_pass="${WORDPRESS_DB_PASSWORD:-}"
+    if [ -z "$db_pass" ]; then
+        setup_db_passwords
+        db_pass="$WORDPRESS_DB_PASSWORD"
+    fi
+    docker exec onionpress-db mariadb-dump -u wordpress "-p${db_pass}" wordpress > "$staging/database/wordpress.sql" 2>>"$LOG_FILE"
+    if [ $? -ne 0 ] || [ ! -s "$staging/database/wordpress.sql" ]; then
+        log "ERROR: Database export failed"
+        return 1
+    fi
+
+    # 3. Copy wp-content from container
+    log "Backup: copying wp-content (themes, plugins, uploads)..."
+    docker cp onionpress-wordpress:/var/www/html/wp-content/. "$staging/wp-content" 2>>"$LOG_FILE"
+
+    # 4. Get onion address and write metadata
+    local onion_addr
+    onion_addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' || echo "")
+
+    log "Backup: writing metadata..."
+    python3 -c "
+import json, sys
+metadata = {
+    'onion_address': sys.argv[1],
+    'backup_date': sys.argv[2],
+    'onionpress_version': sys.argv[3],
+    'platform': 'linux'
+}
+with open(sys.argv[4], 'w') as f:
+    json.dump(metadata, f, indent=2)
+" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$staging/metadata.json"
+
+    # 5. Create password-protected zip
+    log "Backup: creating encrypted zip archive..."
+    rm -f "$output_path"
+    (cd "$staging" && zip -r -P "$password" "$output_path" .) >>"$LOG_FILE" 2>&1
+    if [ $? -ne 0 ]; then
+        log "ERROR: zip failed"
+        return 1
+    fi
+
+    local size
+    size=$(du -h "$output_path" | cut -f1)
+    log "Backup: complete ($size) -> $output_path"
+}
+
+restore_backup() {
+    # Restores from a password-protected backup zip.
+    # Usage: restore_backup <password> <zip_path>
+    local password="$1"
+    local zip_path="$2"
+    local staging
+
+    if [ -z "$password" ] || [ -z "$zip_path" ]; then
+        echo "ERROR: Password and zip path are required" >&2
+        return 1
+    fi
+    if [ ! -f "$zip_path" ]; then
+        echo "ERROR: Backup file not found: $zip_path" >&2
+        return 1
+    fi
+
+    staging=$(mktemp -d -t onionpress-restore-XXXXXX)
+    trap "rm -rf '$staging'" RETURN
+
+    # Extract zip
+    log "Restore: extracting backup archive..."
+    if ! unzip -P "$password" -o "$zip_path" -d "$staging" >>"$LOG_FILE" 2>&1; then
+        log "ERROR: Failed to extract backup (wrong password or corrupt zip)"
+        return 1
+    fi
+
+    # Verify metadata exists
+    local metadata_file="$staging/metadata.json"
+    if [ ! -f "$metadata_file" ]; then
+        metadata_file="$staging/./metadata.json"
+    fi
+    if [ ! -f "$metadata_file" ]; then
+        log "ERROR: Not a valid OnionPress backup (no metadata.json)"
+        return 1
+    fi
+
+    local onion_address
+    onion_address=$(python3 -c "import json; print(json.load(open('$metadata_file')).get('onion_address',''))" 2>/dev/null || echo "")
+    log "Restore: backup from $onion_address"
+
+    # 1. Restore Tor keys
+    local key_file="$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
+    if [ -f "$key_file" ] && [ -n "$onion_address" ]; then
+        log "Restore: writing Tor keys..."
+        # Mark arti-state volume for removal on next start (can't remove now — containers may be running)
+        touch "$DATA_DIR/.import-key-pending"
+        rm -rf "$DATA_DIR/shared/vanity-keys/"
+
+        # Write key to vanity-keys directory
+        local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
+        mkdir -p "$addr_dir"
+        cp "$key_file" "$addr_dir/"
+        echo "$onion_address" > "$addr_dir/hostname"
+
+        # Update ADDRESS_PREFIX in config to match restored address
+        local addr_base="${onion_address%.onion}"
+        if [ -f "$DATA_DIR/config" ]; then
+            local old_prefix
+            old_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2 || echo "")
+            if [ -n "$old_prefix" ]; then
+                local prefix_len=${#old_prefix}
+                local new_prefix="${addr_base:0:$prefix_len}"
+                sed -i "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$new_prefix/" "$DATA_DIR/config"
+                log "Restore: updated ADDRESS_PREFIX to $new_prefix"
+            fi
+        fi
+        log "Restore: Tor keys written for $onion_address"
+    else
+        log "WARNING: No Tor keys in backup — skipping key restore"
+    fi
+
+    # 2. Restore database
+    local sql_file="$staging/database/wordpress.sql"
+    if [ -f "$sql_file" ]; then
+        log "Restore: importing database..."
+        local db_pass="${WORDPRESS_DB_PASSWORD:-}"
+        if [ -z "$db_pass" ]; then
+            setup_db_passwords
+            db_pass="$WORDPRESS_DB_PASSWORD"
+        fi
+        docker cp "$sql_file" onionpress-db:/tmp/wordpress.sql 2>>"$LOG_FILE"
+        docker exec onionpress-db mariadb -u wordpress "-p${db_pass}" wordpress -e "source /tmp/wordpress.sql" 2>>"$LOG_FILE"
+        if [ $? -ne 0 ]; then
+            log "ERROR: Database import failed"
+            return 1
+        fi
+        docker exec onionpress-db rm -f /tmp/wordpress.sql 2>/dev/null
+        log "Restore: database imported"
+    else
+        log "WARNING: No database dump in backup — skipping"
+    fi
+
+    # 3. Restore wp-content
+    local wpcontent_dir="$staging/wp-content"
+    if [ -d "$wpcontent_dir" ]; then
+        log "Restore: copying wp-content (themes, plugins, uploads)..."
+        docker cp "$wpcontent_dir/." onionpress-wordpress:/var/www/html/wp-content/ 2>>"$LOG_FILE"
+        docker exec onionpress-wordpress chown -R www-data:www-data /var/www/html/wp-content/ 2>>"$LOG_FILE"
+        log "Restore: wp-content restored"
+    else
+        log "WARNING: No wp-content in backup — skipping"
+    fi
+
+    log "Restore: complete (from $onion_address)"
+    echo "$onion_address"
+}
+
 # ─── Write status (on-demand) ────────────────────────────────────────
 
 write_status() {
@@ -1385,6 +1631,23 @@ print(json.dumps(containers))
         state="starting"
     else
         state="stopped"
+    fi
+
+    # Log state transitions — especially when the onion address first becomes reachable
+    local prev_state=""
+    local state_file="$DATA_DIR/.last_status_state"
+    if [ -f "$state_file" ]; then
+        prev_state=$(cat "$state_file" 2>/dev/null || echo "")
+    fi
+    if [ "$state" != "$prev_state" ]; then
+        if [ "$state" = "running" ]; then
+            log "Onion service is now reachable at http://${onion_addr}/"
+        elif [ "$state" = "starting" ] && [ "$prev_state" = "running" ]; then
+            log "Onion service is no longer reachable (state: starting)"
+        elif [ "$state" = "stopped" ] && [ "$prev_state" != "" ] && [ "$prev_state" != "stopped" ]; then
+            log "OnionPress stopped"
+        fi
+        echo "$state" > "$state_file"
     fi
 
     # Get uptime (seconds since tor container started)
@@ -1628,6 +1891,45 @@ main() {
             docker compose logs -f
             ;;
 
+        backup)
+            setup_db_passwords
+            local backup_pass="${2:-}"
+            local backup_path="${3:-}"
+            if [ -z "$backup_pass" ]; then
+                echo "Usage: $0 backup <password> [output_path]"
+                echo "Creates a password-protected backup of your OnionPress site."
+                exit 1
+            fi
+            if [ -z "$backup_path" ]; then
+                local onion_addr_short
+                onion_addr_short=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' | sed 's/\.onion//' | cut -c1-8 || echo "unknown")
+                backup_path="$DATA_DIR/OnionPress-${onion_addr_short}-$(date +%Y-%m-%d-%H-%M).zip"
+            fi
+            create_backup "$backup_pass" "$backup_path"
+            echo "Backup saved to: $backup_path"
+            ;;
+
+        restore)
+            setup_db_passwords
+            local restore_pass="${2:-}"
+            local restore_path="${3:-}"
+            if [ -z "$restore_pass" ] || [ -z "$restore_path" ]; then
+                echo "Usage: $0 restore <password> <backup_file.zip>"
+                echo "Restores from an OnionPress backup. Containers must be running."
+                exit 1
+            fi
+            echo "WARNING: This will overwrite your current database, wp-content, and Tor keys."
+            echo "Press Enter to continue or Ctrl+C to cancel..."
+            read -r
+            restore_backup "$restore_pass" "$restore_path"
+            echo "Restore complete. Restarting OnionPress..."
+            stop_containers
+            start_containers
+            wait_for_services
+            write_status
+            echo "Done! OnionPress restarted with restored data."
+            ;;
+
         write-status)
             setup_db_passwords
             write_status
@@ -1778,6 +2080,73 @@ main() {
                         fi
                     fi
                     ;;
+                create-backup)
+                    log "Creating backup from settings page..."
+                    setup_db_passwords
+                    local bp_password
+                    bp_password=$(docker exec onionpress-wordpress cat /var/lib/onionpress/backup-password 2>/dev/null || echo "")
+                    docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/backup-password' 2>/dev/null
+                    if [ -z "$bp_password" ]; then
+                        echo '{"success":false,"error":"No password provided","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/backup-result.json' 2>/dev/null
+                        log "Backup failed: no password"
+                    else
+                        local bp_onion
+                        bp_onion=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' | sed 's/\.onion//' | cut -c1-8 || echo "site")
+                        local bp_filename="OnionPress-${bp_onion}-$(date +%Y-%m-%d-%H-%M).zip"
+                        local bp_path="/tmp/$bp_filename"
+                        if create_backup "$bp_password" "$bp_path" 2>>"$LOG_FILE"; then
+                            # Copy zip into the WordPress container for download
+                            docker cp "$bp_path" "onionpress-wordpress:/var/lib/onionpress/$bp_filename" 2>>"$LOG_FILE"
+                            docker exec onionpress-wordpress chown www-data:www-data "/var/lib/onionpress/$bp_filename" 2>/dev/null
+                            rm -f "$bp_path"
+                            echo '{"success":true,"filename":"'"$bp_filename"'","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/backup-result.json' 2>/dev/null
+                            log "Backup created: $bp_filename"
+                        else
+                            rm -f "$bp_path"
+                            echo '{"success":false,"error":"Backup failed — check logs","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/backup-result.json' 2>/dev/null
+                            log "Backup failed"
+                        fi
+                    fi
+                    ;;
+                restore-backup)
+                    log "Restoring from backup via settings page..."
+                    setup_db_passwords
+                    local rp_password
+                    rp_password=$(docker exec onionpress-wordpress cat /var/lib/onionpress/restore-password 2>/dev/null || echo "")
+                    docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/restore-password' 2>/dev/null
+                    local rp_file="/var/lib/onionpress/restore-upload.zip"
+                    # Copy the uploaded zip out of the container
+                    local rp_local="/tmp/onionpress-restore-$$.zip"
+                    docker cp "onionpress-wordpress:$rp_file" "$rp_local" 2>>"$LOG_FILE"
+                    docker exec onionpress-wordpress sh -c "rm -f $rp_file" 2>/dev/null
+                    if [ -z "$rp_password" ] || [ ! -f "$rp_local" ]; then
+                        rm -f "$rp_local"
+                        echo '{"success":false,"error":"Missing password or backup file","restored_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/restore-result.json' 2>/dev/null
+                        log "Restore failed: missing password or file"
+                    else
+                        local rp_addr
+                        if rp_addr=$(restore_backup "$rp_password" "$rp_local" 2>>"$LOG_FILE"); then
+                            rm -f "$rp_local"
+                            # Restart to pick up restored keys
+                            stop_containers 2>/dev/null || true
+                            start_containers
+                            wait_for_services
+                            write_status
+                            echo '{"success":true,"address":"'"$rp_addr"'","restored_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/restore-result.json' 2>/dev/null
+                            log "Restore complete: $rp_addr"
+                        else
+                            rm -f "$rp_local"
+                            echo '{"success":false,"error":"Restore failed — wrong password or corrupt backup","restored_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/restore-result.json' 2>/dev/null
+                            log "Restore failed"
+                        fi
+                    fi
+                    ;;
                 refresh-status)
                     setup_db_passwords
                     write_status
@@ -1789,7 +2158,7 @@ main() {
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|import-key|logs|write-status|apply-config|handle-action}"
+            echo "Usage: $0 {start|stop|restart|status|address|import-key|backup|restore|logs|write-status|apply-config|handle-action}"
             exit 1
             ;;
     esac

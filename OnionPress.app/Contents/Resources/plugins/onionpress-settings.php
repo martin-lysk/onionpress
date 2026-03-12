@@ -13,6 +13,55 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
+ * Convert Archive.org account + password into S3 API keys via xauthn.
+ *
+ * @return array{'access':string,'secret':string}|string  Keys on success, error message on failure.
+ */
+function onionpress_fetch_ia_s3_keys( $email, $password ) {
+    $resp = wp_remote_post( 'https://archive.org/services/xauthn/?op=login', array(
+        'timeout' => 15,
+        'headers' => array( 'User-Agent' => 'OnionPress (+https://github.com/brewsterkahle/onionpress)' ),
+        'body'    => array( 'email' => $email, 'password' => $password ),
+    ) );
+    if ( is_wp_error( $resp ) ) {
+        return $resp->get_error_message();
+    }
+    $data = json_decode( wp_remote_retrieve_body( $resp ), true );
+    if ( empty( $data['success'] ) ) {
+        return $data['values']['reason'] ?? 'Login failed';
+    }
+
+    $access = $data['values']['s3']['access'] ?? '';
+    $secret = $data['values']['s3']['secret'] ?? '';
+    if ( $access && $secret ) {
+        return array( 'access' => $access, 'secret' => $secret );
+    }
+
+    // Fallback: fetch S3 keys separately using returned cookies
+    $sig  = $data['values']['cookies']['logged-in-sig'] ?? '';
+    $user = $data['values']['cookies']['logged-in-user'] ?? '';
+    if ( $sig && $user ) {
+        $resp2 = wp_remote_get( 'https://archive.org/account/s3.php?output_json=1', array(
+            'timeout' => 15,
+            'headers' => array(
+                'User-Agent' => 'OnionPress (+https://github.com/brewsterkahle/onionpress)',
+                'Cookie'     => "logged-in-sig=$sig; logged-in-user=$user",
+            ),
+        ) );
+        if ( ! is_wp_error( $resp2 ) ) {
+            $s3 = json_decode( wp_remote_retrieve_body( $resp2 ), true );
+            $access = $s3['key']['s3accesskey'] ?? '';
+            $secret = $s3['key']['s3secretkey'] ?? '';
+            if ( $access && $secret ) {
+                return array( 'access' => $access, 'secret' => $secret );
+            }
+        }
+    }
+
+    return 'Login succeeded but could not retrieve S3 keys';
+}
+
+/**
  * Register the admin menu page.
  */
 add_action( 'admin_menu', function () {
@@ -54,7 +103,7 @@ add_action( 'admin_init', function () {
         return;
     }
     $action = sanitize_text_field( $_POST['onionpress_action'] ?? '' );
-    if ( ! in_array( $action, array( 'restart', 'stop', 'start', 'save-restart', 'check-reachability', 'generate-vanity', 'import-key-file' ), true ) ) {
+    if ( ! in_array( $action, array( 'restart', 'stop', 'start', 'save-restart', 'check-reachability', 'generate-vanity', 'import-key-file', 'create-backup', 'restore-backup' ), true ) ) {
         return;
     }
 
@@ -62,6 +111,60 @@ add_action( 'admin_init', function () {
     if ( $action === 'save-restart' ) {
         $_POST['onionpress_settings_nonce'] = wp_create_nonce( 'onionpress_settings_save' );
         // The settings handler below will fire on the same request
+    }
+
+    // Handle backup creation — verify WP password and use it to encrypt the zip
+    if ( $action === 'create-backup' ) {
+        $bp_pass = $_POST['op_backup_password'] ?? '';
+        if ( empty( $bp_pass ) ) {
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-error"><p>Please enter your password.</p></div>';
+            } );
+            return;
+        }
+        $current_user = wp_get_current_user();
+        if ( ! wp_check_password( $bp_pass, $current_user->user_pass, $current_user->ID ) ) {
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-error"><p>Incorrect password. Please enter the password for your WordPress account.</p></div>';
+            } );
+            return;
+        }
+        if ( @file_put_contents( '/var/lib/onionpress/backup-password', $bp_pass ) === false ) {
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-error"><p>Failed to write backup password.</p></div>';
+            } );
+            return;
+        }
+    }
+
+    // Handle restore — write password and uploaded zip to shared volume
+    if ( $action === 'restore-backup' ) {
+        $rp_pass = $_POST['op_restore_password'] ?? '';
+        if ( empty( $rp_pass ) ) {
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-error"><p>Please enter the backup password.</p></div>';
+            } );
+            return;
+        }
+        if ( empty( $_FILES['op_restore_file'] ) || $_FILES['op_restore_file']['error'] !== UPLOAD_ERR_OK ) {
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-error"><p>Please select a backup zip file to restore.</p></div>';
+            } );
+            return;
+        }
+        if ( @file_put_contents( '/var/lib/onionpress/restore-password', $rp_pass ) === false ) {
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-error"><p>Failed to write restore password.</p></div>';
+            } );
+            return;
+        }
+        if ( ! move_uploaded_file( $_FILES['op_restore_file']['tmp_name'], '/var/lib/onionpress/restore-upload.zip' ) ) {
+            @unlink( '/var/lib/onionpress/restore-password' );
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-error"><p>Failed to save uploaded backup file.</p></div>';
+            } );
+            return;
+        }
     }
 
     // Handle key file upload for import-key-file action
@@ -113,6 +216,7 @@ add_action( 'admin_init', function () {
         'stop' => 'stop', 'start' => 'start', 'restart' => 'restart', 'save-restart' => 'restart',
         'check-reachability' => 'check-reachability', 'generate-vanity' => 'generate-vanity',
         'import-key-file' => 'import-key-file',
+        'create-backup' => 'create-backup', 'restore-backup' => 'restore-backup',
     );
     $cmd = $cmd_map[ $action ];
     if ( @file_put_contents( $file, $cmd ) === false ) {
@@ -127,10 +231,18 @@ add_action( 'admin_init', function () {
         'check-reachability' => 'Testing Tor reachability for',
         'generate-vanity' => 'Generating vanity address for',
         'import-key-file' => 'Importing key for',
+        'create-backup' => 'Creating backup of',
+        'restore-backup' => 'Restoring backup for',
     );
     $label = $label_map[ $action ] ?? 'Processing';
-    add_action( 'admin_notices', function () use ( $label ) {
-        echo '<div class="notice notice-info is-dismissible"><p>' . esc_html( $label ) . ' OnionPress... This may take a minute. The page will become unavailable during restart.</p></div>';
+    $causes_downtime = in_array( $action, array( 'restart', 'save-restart', 'stop', 'restore-backup' ), true );
+    $poll_action = $cmd_map[ $action ] ?? $action;
+    add_action( 'admin_notices', function () use ( $label, $causes_downtime, $poll_action ) {
+        $msg = esc_html( $label ) . ' OnionPress... This may take a minute.';
+        if ( $causes_downtime ) {
+            $msg .= ' The page will become unavailable during restart.';
+        }
+        echo '<div class="notice notice-info op-action-notice" data-op-action="' . esc_attr( $poll_action ) . '"><p>' . $msg . '</p></div>';
     } );
 } );
 
@@ -168,15 +280,28 @@ add_action( 'admin_init', function () {
         $updates[ $key ] = $val;
     }
 
-    // Handle Wayback Machine S3 credentials (stored in wp_options, not config file)
-    $wayback_fields = array(
-        'archive_s3_access' => 'onionpress_archive_s3_access',
-        'archive_s3_secret' => 'onionpress_archive_s3_secret',
-    );
-    foreach ( $wayback_fields as $post_key => $option_key ) {
-        if ( isset( $_POST[ 'op_' . $post_key ] ) ) {
-            $val = sanitize_text_field( wp_unslash( $_POST[ 'op_' . $post_key ] ) );
-            update_option( $option_key, $val );
+    // Handle Archive.org credentials — convert account/password to S3 keys via xauthn API
+    $ia_account  = isset( $_POST['op_ia_account'] )  ? sanitize_text_field( wp_unslash( $_POST['op_ia_account'] ) )  : '';
+    $ia_password = isset( $_POST['op_ia_password'] ) ? wp_unslash( $_POST['op_ia_password'] ) : '';
+    if ( $ia_account !== '' && $ia_password !== '' ) {
+        $s3_keys = onionpress_fetch_ia_s3_keys( $ia_account, $ia_password );
+        if ( is_array( $s3_keys ) ) {
+            update_option( 'onionpress_archive_s3_access', $s3_keys['access'] );
+            update_option( 'onionpress_archive_s3_secret', $s3_keys['secret'] );
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-success"><p>Archive.org credentials saved.</p></div>';
+            } );
+        } else {
+            add_action( 'admin_notices', function () use ( $s3_keys ) {
+                echo '<div class="notice notice-error"><p>Archive.org login failed: ' . esc_html( $s3_keys ) . '</p></div>';
+            } );
+        }
+    } elseif ( $ia_account === '' && $ia_password === '' ) {
+        // Both empty — clear credentials
+        $had_creds = get_option( 'onionpress_archive_s3_access', '' ) !== '';
+        if ( $had_creds ) {
+            update_option( 'onionpress_archive_s3_access', '' );
+            update_option( 'onionpress_archive_s3_secret', '' );
         }
     }
 
@@ -213,6 +338,88 @@ add_action( 'admin_init', function () {
 } );
 
 /**
+ * Increase upload limit for backup restore on the settings page.
+ */
+add_filter( 'upload_size_limit', function ( $size ) {
+    if ( isset( $_GET['page'] ) && $_GET['page'] === 'onionpress-settings' ) {
+        return 512 * 1024 * 1024; // 512 MB
+    }
+    return $size;
+} );
+
+// Set PHP limits when on the settings page (backup uploads can be large)
+add_action( 'admin_init', function () {
+    if ( isset( $_GET['page'] ) && $_GET['page'] === 'onionpress-settings' ) {
+        @ini_set( 'upload_max_filesize', '512M' );
+        @ini_set( 'post_max_size', '512M' );
+        @ini_set( 'max_execution_time', '600' );
+    }
+} );
+
+/**
+ * AJAX handler for downloading backup files.
+ */
+add_action( 'wp_ajax_onionpress_download_backup', function () {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Unauthorized' );
+    }
+    check_ajax_referer( 'onionpress_download_backup' );
+
+    $filename = sanitize_file_name( $_GET['file'] ?? '' );
+    if ( empty( $filename ) ) {
+        wp_die( 'No file specified' );
+    }
+
+    $filepath = '/var/lib/onionpress/' . $filename;
+    if ( ! file_exists( $filepath ) ) {
+        wp_die( 'Backup file not found. It may have been cleaned up.' );
+    }
+
+    header( 'Content-Type: application/zip' );
+    header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
+    header( 'Content-Length: ' . filesize( $filepath ) );
+    readfile( $filepath );
+
+    // Clean up after download
+    @unlink( $filepath );
+    @unlink( '/var/lib/onionpress/backup-result.json' );
+    exit;
+} );
+
+/**
+ * AJAX handler for polling action completion.
+ */
+add_action( 'wp_ajax_onionpress_poll_action', function () {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( 'Unauthorized' );
+    }
+
+    $action = sanitize_text_field( $_GET['op_action'] ?? '' );
+    $pending = file_exists( '/var/lib/onionpress/requested-action' );
+
+    // Map actions to their result files
+    $result_files = array(
+        'check-reachability' => '/var/lib/onionpress/reachability-result.json',
+        'generate-vanity'    => '/var/lib/onionpress/vanity-result.json',
+        'import-key-file'    => '/var/lib/onionpress/import-result.json',
+        'create-backup'      => '/var/lib/onionpress/backup-result.json',
+        'restore-backup'     => '/var/lib/onionpress/restore-result.json',
+    );
+
+    if ( isset( $result_files[ $action ] ) ) {
+        $rf = $result_files[ $action ];
+        if ( file_exists( $rf ) ) {
+            $result = json_decode( file_get_contents( $rf ), true );
+            wp_send_json( array( 'done' => true, 'result' => $result ) );
+        }
+        wp_send_json( array( 'done' => false ) );
+    }
+
+    // For start/stop/restart — done when action file is consumed
+    wp_send_json( array( 'done' => ! $pending ) );
+} );
+
+/**
  * Define the settings fields and their metadata.
  */
 function onionpress_settings_fields() {
@@ -239,12 +446,6 @@ function onionpress_settings_fields() {
         'INSTALL_IA_PLUGIN' => array(
             'label'       => 'Internet Archive Link Fixer',
             'description' => 'Automatically install and activate the Wayback Machine Link Fixer plugin.',
-            'type'        => 'select',
-            'options'     => array( 'yes' => 'Enabled', 'no' => 'Disabled' ),
-        ),
-        'INSTALL_WP_STATISTICS' => array(
-            'label'       => 'WP Statistics',
-            'description' => 'Automatically install WP Statistics for privacy-friendly traffic analytics.',
             'type'        => 'select',
             'options'     => array( 'yes' => 'Enabled', 'no' => 'Disabled' ),
         ),
@@ -408,21 +609,25 @@ function onionpress_settings_page() {
                 </tr>
                 <?php endforeach; ?>
 
-                <!-- Wayback Machine S3 Credentials (stored in wp_options) -->
+                <!-- Archive.org Credentials -->
                 <tr>
-                    <th scope="row"><label for="op_archive_s3_access">Wayback S3 Access Key</label></th>
+                    <th scope="row"><label for="op_ia_account">Archive.org Account</label></th>
                     <td>
-                        <input type="text" name="op_archive_s3_access" id="op_archive_s3_access"
-                               value="<?php echo esc_attr( $s3_access ); ?>" class="regular-text">
-                        <p class="description">archive.org S3 API access key for authenticated Wayback Machine archiving.</p>
+                        <input type="text" name="op_ia_account" id="op_ia_account"
+                               value="" class="regular-text" autocomplete="off"
+                               placeholder="<?php echo $s3_access ? '(credentials saved)' : ''; ?>">
+                        <p class="description">Used to archive your site on the Wayback Machine, making it more robust and permanent. <?php if ( $s3_access ) echo '<strong>Credentials are configured.</strong> Re-enter to update.'; ?></p>
                     </td>
                 </tr>
                 <tr>
-                    <th scope="row"><label for="op_archive_s3_secret">Wayback S3 Secret Key</label></th>
+                    <th scope="row"><label for="op_ia_password">Archive.org Password</label></th>
                     <td>
-                        <input type="password" name="op_archive_s3_secret" id="op_archive_s3_secret"
-                               value="<?php echo esc_attr( $s3_secret ); ?>" class="regular-text">
-                        <p class="description">archive.org S3 API secret key.</p>
+                        <span class="op-password-wrap">
+                            <input type="password" name="op_ia_password" id="op_ia_password"
+                                   value="" class="regular-text" autocomplete="off">
+                            <button type="button" class="op-eye-toggle" aria-label="Show password">&#128065;</button>
+                        </span>
+                        <p class="description">Your Archive.org password. Used to retrieve API keys — not stored.</p>
                     </td>
                 </tr>
             </table>
@@ -527,7 +732,7 @@ function onionpress_settings_page() {
         }
         ?>
         <p class="description">Import a pre-generated ed25519 key. This will <strong>replace</strong> your current onion address. Paste the base32-encoded key or upload the <code>hs_ed25519_secret_key</code> file.</p>
-        <form method="post" enctype="multipart/form-data" style="margin-top: 8px;">
+        <form method="post" enctype="multipart/form-data" style="margin-top: 8px;" id="op-import-key-form">
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="import-key-file">
             <table class="form-table" role="presentation">
@@ -549,7 +754,223 @@ function onionpress_settings_page() {
             <?php submit_button( 'Import Key', 'secondary', 'submit', false ); ?>
         </form>
 
+        <!-- Backup -->
+        <hr>
+        <h2>Backup</h2>
+        <?php
+        $backup_file = '/var/lib/onionpress/backup-result.json';
+        if ( file_exists( $backup_file ) ) {
+            $backup_result = json_decode( file_get_contents( $backup_file ), true );
+            if ( is_array( $backup_result ) ) {
+                if ( ! empty( $backup_result['success'] ) ) {
+                    $dl_filename = $backup_result['filename'] ?? '';
+                    echo '<p><strong style="color:#16a34a">Backup created:</strong> <code>' . esc_html( $dl_filename ) . '</code>';
+                    if ( $dl_filename ) {
+                        $dl_url = admin_url( 'admin-ajax.php?action=onionpress_download_backup&file=' . urlencode( $dl_filename ) . '&_wpnonce=' . wp_create_nonce( 'onionpress_download_backup' ) );
+                        echo ' &mdash; <a href="' . esc_url( $dl_url ) . '">Download</a>';
+                    }
+                    echo '</p>';
+                } elseif ( ! empty( $backup_result['error'] ) ) {
+                    echo '<p><strong style="color:#dc2626">Error:</strong> ' . esc_html( $backup_result['error'] ) . '</p>';
+                }
+            }
+        }
+        ?>
+        <p class="description">Create a password-protected backup of your database, wp-content, Tor keys, and config. Your WordPress password encrypts the backup — you'll need it to restore.</p>
+        <form method="post" style="margin-top: 8px;">
+            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
+            <input type="hidden" name="onionpress_action" value="create-backup">
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row"><label for="op_backup_password">Password for <?php echo esc_html( wp_get_current_user()->user_login ); ?></label></th>
+                    <td>
+                        <span class="op-password-wrap">
+                            <input type="password" name="op_backup_password" id="op_backup_password" class="regular-text" required autocomplete="current-password">
+                            <button type="button" class="op-eye-toggle" aria-label="Show password">&#128065;</button>
+                        </span>
+                        <p class="description">Enter your WordPress password to create the backup.</p>
+                    </td>
+                </tr>
+            </table>
+            <?php submit_button( 'Create Backup', 'secondary', 'submit', false ); ?>
+        </form>
+
+        <!-- Restore -->
+        <hr>
+        <h2>Restore</h2>
+        <?php
+        $restore_file = '/var/lib/onionpress/restore-result.json';
+        if ( file_exists( $restore_file ) ) {
+            $restore_result = json_decode( file_get_contents( $restore_file ), true );
+            if ( is_array( $restore_result ) ) {
+                if ( ! empty( $restore_result['success'] ) ) {
+                    echo '<p><strong style="color:#16a34a">Restored:</strong> <code>' . esc_html( $restore_result['address'] ?? '' ) . '</code></p>';
+                } elseif ( ! empty( $restore_result['error'] ) ) {
+                    echo '<p><strong style="color:#dc2626">Error:</strong> ' . esc_html( $restore_result['error'] ) . '</p>';
+                }
+            }
+        }
+        ?>
+        <p class="description">Restore from an OnionPress backup zip. This will <strong>overwrite</strong> your current database, wp-content, and Tor keys. OnionPress will restart automatically after restore.</p>
+        <form method="post" enctype="multipart/form-data" style="margin-top: 8px;">
+            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
+            <input type="hidden" name="onionpress_action" value="restore-backup">
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row"><label for="op_restore_file">Backup File</label></th>
+                    <td>
+                        <input type="file" name="op_restore_file" id="op_restore_file" accept=".zip" required>
+                        <p class="description">Upload your OnionPress backup .zip file.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="op_restore_password">Backup Password</label></th>
+                    <td>
+                        <span class="op-password-wrap">
+                            <input type="password" name="op_restore_password" id="op_restore_password" class="regular-text" required autocomplete="current-password">
+                            <button type="button" class="op-eye-toggle" aria-label="Show password">&#128065;</button>
+                        </span>
+                        <p class="description">The WordPress password of the admin who created the backup.</p>
+                    </td>
+                </tr>
+            </table>
+            <?php submit_button( 'Restore from Backup', 'secondary', 'submit', false ); ?>
+        </form>
+
         <?php endif; ?>
     </div>
+    <style>
+        .op-password-wrap { display: inline-flex; align-items: center; }
+        .op-password-wrap input { margin-right: 0; }
+        .op-eye-toggle { background: none; border: 1px solid #8c8f94; border-left: 0; border-radius: 0 4px 4px 0; padding: 0 8px; cursor: pointer; font-size: 16px; line-height: 30px; height: 30px; color: #50575e; }
+        .op-eye-toggle:hover { color: #135e96; }
+        .op-password-wrap input.regular-text { border-radius: 4px 0 0 4px; }
+    </style>
+    <script>
+        /* Client-side validation: highlight empty required fields */
+        document.querySelectorAll('form').forEach(function(form) {
+            form.addEventListener('submit', function(e) {
+                var missing = false;
+                form.querySelectorAll('input[required]').forEach(function(input) {
+                    var label = form.querySelector('label[for="' + input.id + '"]');
+                    if (!input.value && input.type !== 'file' || input.type === 'file' && !input.files.length) {
+                        if (label) label.style.color = '#dc2626';
+                        input.style.borderColor = '#dc2626';
+                        missing = true;
+                    } else {
+                        if (label) label.style.color = '';
+                        input.style.borderColor = '';
+                    }
+                });
+                if (missing) e.preventDefault();
+            });
+            form.querySelectorAll('input[required]').forEach(function(input) {
+                input.addEventListener('input', function() {
+                    var label = form.querySelector('label[for="' + input.id + '"]');
+                    if (label) label.style.color = '';
+                    input.style.borderColor = '';
+                });
+                if (input.type === 'file') {
+                    input.addEventListener('change', function() {
+                        var label = form.querySelector('label[for="' + input.id + '"]');
+                        if (label) label.style.color = '';
+                        input.style.borderColor = '';
+                    });
+                }
+            });
+        });
+
+        /* Import key form: require at least one of base32 or file */
+        var ikForm = document.getElementById('op-import-key-form');
+        if (ikForm) {
+            ikForm.addEventListener('submit', function(e) {
+                var b32 = ikForm.querySelector('#op_key_b32');
+                var file = ikForm.querySelector('#op_key_file');
+                var b32Label = ikForm.querySelector('label[for="op_key_b32"]');
+                var fileLabel = ikForm.querySelector('label[for="op_key_file"]');
+                if (!b32.value && !file.files.length) {
+                    if (b32Label) b32Label.style.color = '#dc2626';
+                    if (fileLabel) fileLabel.style.color = '#dc2626';
+                    b32.style.borderColor = '#dc2626';
+                    file.style.borderColor = '#dc2626';
+                    e.preventDefault();
+                } else {
+                    if (b32Label) b32Label.style.color = '';
+                    if (fileLabel) fileLabel.style.color = '';
+                    b32.style.borderColor = '';
+                    file.style.borderColor = '';
+                }
+            });
+            ['op_key_b32', 'op_key_file'].forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el) el.addEventListener(el.type === 'file' ? 'change' : 'input', function() {
+                    var label = ikForm.querySelector('label[for="' + id + '"]');
+                    if (label) label.style.color = '';
+                    el.style.borderColor = '';
+                });
+            });
+        }
+
+        document.querySelectorAll('.op-eye-toggle').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var input = this.previousElementSibling;
+                if (input.type === 'password') {
+                    input.type = 'text';
+                    this.setAttribute('aria-label', 'Hide password');
+                } else {
+                    input.type = 'password';
+                    this.setAttribute('aria-label', 'Show password');
+                }
+            });
+        });
+
+        /* Poll for action completion and update the notice */
+        (function() {
+            var notice = document.querySelector('.op-action-notice');
+            if (!notice) return;
+            var action = notice.getAttribute('data-op-action');
+            if (!action) return;
+
+            var poll = setInterval(function() {
+                fetch(ajaxurl + '?action=onionpress_poll_action&op_action=' + encodeURIComponent(action))
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (!data.done) return;
+                        clearInterval(poll);
+
+                        var p = notice.querySelector('p');
+                        var result = data.result;
+
+                        if (result && result.success === true) {
+                            notice.className = 'notice notice-success is-dismissible';
+                            var msg = 'Done!';
+                            if (result.address) msg = 'Done! Address: ' + result.address;
+                            if (result.filename) msg = 'Backup ready: ' + result.filename;
+                            if (result.reachable === true) msg = 'Onion service is reachable (HTTP ' + (result.http_code || '200') + ')';
+                            if (result.reachable === false) msg = 'Onion service is not reachable' + (result.error ? ': ' + result.error : '');
+                            p.textContent = msg;
+                        } else if (result && result.error) {
+                            notice.className = 'notice notice-error is-dismissible';
+                            p.textContent = 'Error: ' + result.error;
+                        } else {
+                            notice.className = 'notice notice-success is-dismissible';
+                            p.textContent = 'Done!';
+                            /* Reload to show updated state */
+                            setTimeout(function() { location.reload(); }, 1500);
+                        }
+
+                        /* Add download link for backup */
+                        if (result && result.success && result.filename) {
+                            var link = document.createElement('a');
+                            link.href = ajaxurl + '?action=onionpress_download_backup&file=' + encodeURIComponent(result.filename) + '&_wpnonce=<?php echo wp_create_nonce( "onionpress_download_backup" ); ?>';
+                            link.textContent = ' Download';
+                            link.style.marginLeft = '8px';
+                            p.appendChild(link);
+                        }
+                    })
+                    .catch(function() { /* server may be restarting — keep polling */ });
+            }, 3000);
+        })();
+    </script>
     <?php
 }

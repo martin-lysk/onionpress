@@ -46,38 +46,6 @@ function onionpress_wayback_auth_header() {
     return $header;
 }
 
-/**
- * Auto-detect and cache the clearnet domain.
- *
- * On every web request, if the incoming HTTP_HOST is not .onion, localhost*, or
- * the Docker-internal hostname "wordpress", we treat it as the clearnet domain
- * (set via Cloudflare Tunnel or similar) and persist it to disk.
- */
-add_action( 'init', function () {
-    if ( ! isset( $_SERVER['HTTP_HOST'] ) ) {
-        return;
-    }
-
-    $host = $_SERVER['HTTP_HOST'];
-
-    // Skip .onion, localhost (with or without port), and Docker-internal hostname
-    if ( preg_match( '/\.onion$/i', $host )
-        || preg_match( '/^localhost(:\d+)?$/i', $host )
-        || $host === 'wordpress'
-    ) {
-        return;
-    }
-
-    $file = '/var/lib/onionpress/clearnet_domain';
-
-    // Only write if the value changed (avoid disk churn)
-    $current = @file_get_contents( $file );
-    if ( $current !== false && trim( $current ) === $host ) {
-        return;
-    }
-
-    @file_put_contents( $file, $host );
-}, 1 );
 
 /**
  * Archive to the Wayback Machine when a post or page is published/updated.
@@ -133,16 +101,6 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     // 3. RSS feed .onion URL
     $urls[] = 'http://' . $onion_addr . '/feed/';
 
-    // 4. Clearnet URLs (if Cloudflare Tunnel is configured)
-    $clearnet_file = '/var/lib/onionpress/clearnet_domain';
-    if ( file_exists( $clearnet_file ) ) {
-        $clearnet_domain = trim( file_get_contents( $clearnet_file ) );
-        if ( ! empty( $clearnet_domain ) ) {
-            $urls[] = 'https://' . $clearnet_domain . $path;
-            $urls[] = 'https://' . $clearnet_domain . '/';
-            $urls[] = 'https://' . $clearnet_domain . '/feed/';
-        }
-    }
 
     // Deduplicate (e.g. if the post IS the homepage)
     $urls = array_unique( $urls );

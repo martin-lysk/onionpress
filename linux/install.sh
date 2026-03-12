@@ -92,11 +92,11 @@ if ! command -v python3 >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq python3
 fi
 
-# Ensure unzip is available (needed for plugin installs)
-if ! command -v unzip >/dev/null 2>&1; then
-    echo "  Installing unzip..."
+# Ensure unzip and zip are available (needed for plugin installs and backups)
+if ! command -v unzip >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1; then
+    echo "  Installing zip/unzip..."
     $SUDO apt-get update -qq
-    $SUDO apt-get install -y -qq unzip
+    $SUDO apt-get install -y -qq zip unzip
 fi
 
 # ─── Install OnionPress files ────────────────────────────────────────
