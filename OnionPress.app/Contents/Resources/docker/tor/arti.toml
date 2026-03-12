@@ -19,6 +19,12 @@ state_dir = "/var/lib/arti/state"
 [storage.keystore]
 enabled = true
 
+[vanguards]
+# Disable vanguards — they add overhead on low-resource devices (Pi) and cause
+# noisy "unbootstrapped vanguard manager" errors during startup. OnionPress
+# serves public WordPress content, not sensitive hidden services.
+mode = "disabled"
+
 [onion_services."wordpress"]
 enabled = true
 # Arti requires IP addresses (no hostnames). socat on 127.0.0.1:8080

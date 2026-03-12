@@ -189,6 +189,7 @@ echo "  Setting up data directory at $DATA_DIR..."
 
 # Create data dirs owned by the real user (not root)
 install -d -o "$REAL_USER" -m 755 "$DATA_DIR"
+install -d -o "$REAL_USER" -m 755 "$DATA_DIR/shared"
 install -d -o "$REAL_USER" -m 755 "$DATA_DIR/shared/vanity-keys"
 
 # Generate secrets if they don't exist
