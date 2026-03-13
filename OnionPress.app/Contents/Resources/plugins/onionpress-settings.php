@@ -307,7 +307,40 @@ add_action( 'admin_init', function () {
         }
     }
 
+    // Check if a restart is actually needed (must read old values before writing updates)
+    $needs_restart = false;
+    $restart_keys = array( 'ADDRESS_PREFIX', 'CLOUDFLARE_TUNNEL_TOKEN', 'VM_MEMORY' );
     if ( ! empty( $updates ) ) {
+        $old_values = array();
+        $config_file = '/var/lib/onionpress/config-current.json';
+        if ( file_exists( $config_file ) ) {
+            $decoded = json_decode( file_get_contents( $config_file ), true );
+            if ( is_array( $decoded ) ) {
+                $old_values = $decoded;
+            }
+        }
+        $onion_address = '';
+        $sf = '/var/lib/onionpress/status.json';
+        if ( file_exists( $sf ) ) {
+            $sd = json_decode( file_get_contents( $sf ), true );
+            if ( is_array( $sd ) ) {
+                $onion_address = $sd['onion_address'] ?? '';
+            }
+        }
+        foreach ( $updates as $key => $val ) {
+            if ( ! in_array( $key, $restart_keys, true ) ) {
+                continue;
+            }
+            if ( isset( $old_values[ $key ] ) && $old_values[ $key ] === $val ) {
+                continue;
+            }
+            if ( $key === 'ADDRESS_PREFIX' && $onion_address && strpos( $onion_address, $val ) === 0 ) {
+                continue;
+            }
+            $needs_restart = true;
+        }
+
+        // Write config-updates.json for the onionpress script to pick up
         $json = json_encode( $updates, JSON_PRETTY_PRINT );
         $file = '/var/lib/onionpress/config-updates.json';
         if ( @file_put_contents( $file, $json ) === false ) {
@@ -316,10 +349,14 @@ add_action( 'admin_init', function () {
             } );
             return;
         }
+
+        // Update config-current.json so the form reflects the saved values immediately
+        $current = array_merge( $old_values, $updates );
+        @file_put_contents( $config_file, json_encode( $current, JSON_PRETTY_PRINT ) );
     }
 
-    // Redirect with success message
-    add_action( 'admin_notices', function () {
+    // Show success message
+    add_action( 'admin_notices', function () use ( $needs_restart ) {
         $is_linux = false;
         $sf = '/var/lib/onionpress/status.json';
         if ( file_exists( $sf ) ) {
@@ -331,10 +368,15 @@ add_action( 'admin_init', function () {
                 }
             }
         }
-        if ( $is_linux ) {
-            echo '<div class="notice notice-success is-dismissible"><p>Settings saved. Restart OnionPress for changes to take effect: <code>sudo systemctl restart onionpress</code></p></div>';
-        } else {
+        if ( $is_linux && $needs_restart ) {
+            $restart_nonce = wp_create_nonce( 'onionpress_action' );
+            echo '<div class="notice notice-success is-dismissible"><p>Settings saved. Restart OnionPress for changes to take effect. ';
+            echo '<form method="post" style="display:inline;"><input type="hidden" name="onionpress_action_nonce" value="' . esc_attr( $restart_nonce ) . '"><input type="hidden" name="onionpress_action" value="restart"><button type="submit" class="button button-primary" style="margin-left:8px;">Restart Now</button></form>';
+            echo '</p></div>';
+        } elseif ( ! $is_linux ) {
             echo '<div class="notice notice-success is-dismissible"><p>Settings saved. Changes will take effect within 30 seconds.</p></div>';
+        } else {
+            echo '<div class="notice notice-success is-dismissible"><p>Settings saved.</p></div>';
         }
     } );
 } );
@@ -486,12 +528,6 @@ function onionpress_settings_fields() {
             'description' => 'Customize the beginning of your .onion address (base32: a-z, 2-7, max 5 chars). Changing this generates a new address — your old address will stop working.',
             'type'        => 'text',
             'placeholder' => 'op2',
-        ),
-        'INSTALL_IA_PLUGIN' => array(
-            'label'       => 'Internet Archive Link Fixer',
-            'description' => 'Automatically install and activate the Wayback Machine Link Fixer plugin.',
-            'type'        => 'select',
-            'options'     => array( 'yes' => 'Enabled', 'no' => 'Disabled' ),
         ),
         'UPDATE_ON_LAUNCH' => array(
             'label'       => 'Update on Launch',
@@ -687,7 +723,7 @@ function onionpress_settings_page() {
         </form>
 
         <?php if ( $current_platform === 'linux' ) : ?>
-        <hr>
+        <hr style="border: none; border-top: 3px solid #c3c4c7; margin: 30px 0;">
         <h2>Service Control</h2>
         <p class="description">Some settings (Address Prefix, Cloudflare Tunnel) require a restart to take effect.</p>
         <form method="post" style="display: inline-block; margin-right: 10px;">
@@ -739,68 +775,6 @@ function onionpress_settings_page() {
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="check-reachability">
             <?php submit_button( 'Test Reachability', 'secondary', 'submit', false ); ?>
-        </form>
-
-        <!-- Vanity Address Generation -->
-        <hr>
-        <h2>Vanity Address Generation</h2>
-        <?php
-        $vanity_file = '/var/lib/onionpress/vanity-result.json';
-        if ( file_exists( $vanity_file ) ) {
-            $vanity = json_decode( file_get_contents( $vanity_file ), true );
-            if ( is_array( $vanity ) ) {
-                if ( ! empty( $vanity['success'] ) ) {
-                    echo '<p><strong style="color:#16a34a">Generated:</strong> <code>' . esc_html( $vanity['address'] ?? '' ) . '</code></p>';
-                } elseif ( ! empty( $vanity['error'] ) ) {
-                    echo '<p><strong style="color:#dc2626">Error:</strong> ' . esc_html( $vanity['error'] ) . '</p>';
-                }
-            }
-        }
-        ?>
-        <p class="description">Generate a new vanity .onion address matching your Address Prefix setting. This will <strong>replace</strong> your current address. Generation can take seconds to minutes depending on prefix length.</p>
-        <form method="post" style="margin-top: 8px;">
-            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
-            <input type="hidden" name="onionpress_action" value="generate-vanity">
-            <?php submit_button( 'Generate Vanity Address', 'secondary', 'submit', false ); ?>
-        </form>
-
-        <!-- Import Key -->
-        <hr>
-        <h2>Import Onion Service Key</h2>
-        <?php
-        $import_file = '/var/lib/onionpress/import-result.json';
-        if ( file_exists( $import_file ) ) {
-            $import_result = json_decode( file_get_contents( $import_file ), true );
-            if ( is_array( $import_result ) ) {
-                if ( ! empty( $import_result['success'] ) ) {
-                    echo '<p><strong style="color:#16a34a">Imported:</strong> <code>' . esc_html( $import_result['address'] ?? '' ) . '</code></p>';
-                } elseif ( ! empty( $import_result['error'] ) ) {
-                    echo '<p><strong style="color:#dc2626">Error:</strong> ' . esc_html( $import_result['error'] ) . '</p>';
-                }
-            }
-        }
-        ?>
-        <p class="description">Import a pre-generated ed25519 key. This will <strong>replace</strong> your current onion address. Paste the base32-encoded key or upload the <code>hs_ed25519_secret_key</code> file.</p>
-        <form method="post" enctype="multipart/form-data" style="margin-top: 8px;" id="op-import-key-form">
-            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
-            <input type="hidden" name="onionpress_action" value="import-key-file">
-            <table class="form-table" role="presentation">
-                <tr>
-                    <th scope="row"><label for="op_key_b32">Base32 Key</label></th>
-                    <td>
-                        <input type="text" name="op_key_b32" id="op_key_b32" class="large-text" placeholder="Paste base32-encoded key here...">
-                        <p class="description">The base32-encoded 64-byte expanded ed25519 secret key.</p>
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row"><label for="op_key_file">Or Upload Key File</label></th>
-                    <td>
-                        <input type="file" name="op_key_file" id="op_key_file">
-                        <p class="description">Upload <code>hs_ed25519_secret_key</code> from mkp224o output or a backup.</p>
-                    </td>
-                </tr>
-            </table>
-            <?php submit_button( 'Import Key', 'secondary', 'submit', false ); ?>
         </form>
 
         <!-- Backup -->
@@ -884,6 +858,68 @@ function onionpress_settings_page() {
                 </tr>
             </table>
             <?php submit_button( 'Restore from Backup', 'secondary', 'submit', false ); ?>
+        </form>
+
+        <!-- Vanity Address Generation -->
+        <hr>
+        <h2>Vanity Address Generation</h2>
+        <?php
+        $vanity_file = '/var/lib/onionpress/vanity-result.json';
+        if ( file_exists( $vanity_file ) ) {
+            $vanity = json_decode( file_get_contents( $vanity_file ), true );
+            if ( is_array( $vanity ) ) {
+                if ( ! empty( $vanity['success'] ) ) {
+                    echo '<p><strong style="color:#16a34a">Generated:</strong> <code>' . esc_html( $vanity['address'] ?? '' ) . '</code></p>';
+                } elseif ( ! empty( $vanity['error'] ) ) {
+                    echo '<p><strong style="color:#dc2626">Error:</strong> ' . esc_html( $vanity['error'] ) . '</p>';
+                }
+            }
+        }
+        ?>
+        <p class="description">Generate a new vanity .onion address matching your Address Prefix setting. This will <strong>replace</strong> your current address, forever. Not reversible. Generation can take seconds to minutes depending on prefix length.</p>
+        <form method="post" style="margin-top: 8px;">
+            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
+            <input type="hidden" name="onionpress_action" value="generate-vanity">
+            <?php submit_button( 'Generate Vanity Address', 'secondary', 'submit', false ); ?>
+        </form>
+
+        <!-- Import Key -->
+        <hr>
+        <h2>Import Onion Service Key</h2>
+        <?php
+        $import_file = '/var/lib/onionpress/import-result.json';
+        if ( file_exists( $import_file ) ) {
+            $import_result = json_decode( file_get_contents( $import_file ), true );
+            if ( is_array( $import_result ) ) {
+                if ( ! empty( $import_result['success'] ) ) {
+                    echo '<p><strong style="color:#16a34a">Imported:</strong> <code>' . esc_html( $import_result['address'] ?? '' ) . '</code></p>';
+                } elseif ( ! empty( $import_result['error'] ) ) {
+                    echo '<p><strong style="color:#dc2626">Error:</strong> ' . esc_html( $import_result['error'] ) . '</p>';
+                }
+            }
+        }
+        ?>
+        <p class="description">Import a pre-generated ed25519 key. This will <strong>replace</strong> your current onion address, forever. Not reversible. Paste the base32-encoded key or upload the <code>hs_ed25519_secret_key</code> file.</p>
+        <form method="post" enctype="multipart/form-data" style="margin-top: 8px;" id="op-import-key-form">
+            <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
+            <input type="hidden" name="onionpress_action" value="import-key-file">
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row"><label for="op_key_b32">Base32 Key</label></th>
+                    <td>
+                        <input type="text" name="op_key_b32" id="op_key_b32" class="large-text" placeholder="Paste base32-encoded key here...">
+                        <p class="description">The base32-encoded 64-byte expanded ed25519 secret key.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="op_key_file">Or Upload Key File</label></th>
+                    <td>
+                        <input type="file" name="op_key_file" id="op_key_file">
+                        <p class="description">Upload <code>hs_ed25519_secret_key</code> from mkp224o output or a backup.</p>
+                    </td>
+                </tr>
+            </table>
+            <?php submit_button( 'Import Key', 'secondary', 'submit', false ); ?>
         </form>
 
         <?php endif; ?>

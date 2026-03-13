@@ -263,7 +263,7 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
 <h1>
     <span>OnionPress Status <span>v<span id="op-version"><?php echo esc_html( $version ); ?></span></span></span>
     <span style="display:flex;align-items:center;gap:10px;">
-        <span class="live-dot" id="op-live-dot">Auto Updated <?php echo date( 'g:i:s A' ); ?></span>
+        <span class="live-dot" id="op-live-dot">Auto Updated <script>document.write(new Date().toLocaleTimeString())</script></span>
         <button type="button" class="refresh-btn" id="op-refresh" onclick="window.opRefresh(this)">Refresh Now</button>
     </span>
 </h1>

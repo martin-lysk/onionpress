@@ -754,10 +754,17 @@ configure_wp_statistics() {
         || log "WARNING: Failed to disable anonymous data sending"
     docker exec onionpress-wordpress wp option update wp_statistics_check_update 0 --allow-root >> "$LOG_FILE" 2>&1 \
         || log "WARNING: Failed to disable update checks"
+    # Ensure admin visits are tracked (WP Statistics excludes admins by default)
+    docker exec onionpress-wordpress wp eval '
+        $opt = get_option("wp_statistics", array());
+        $opt["exclude_administrator"] = 0;
+        update_option("wp_statistics", $opt);
+    ' --allow-root >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: Failed to disable admin exclusion"
     docker exec onionpress-wordpress wp option update wp_statistics_configured_by_onionpress 1 --allow-root >> "$LOG_FILE" 2>&1 \
         || log "WARNING: Failed to set configured flag"
 
-    log "WP Statistics configured (GeoIP disabled, page tracking enabled, no external data sharing)"
+    log "WP Statistics configured (GeoIP disabled, page tracking enabled, admin tracking enabled, no external data sharing)"
     return 0
 }
 
@@ -1698,6 +1705,9 @@ print(json.dumps(status, indent=2))
 
     # Write to shared volume
     echo "$status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
+
+    # Write version file for the settings page update checker
+    echo "$ONIONPRESS_VERSION" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/version' 2>>"$LOG_FILE"
 
     # Build config-current.json from ~/.onionpress/config
     local config_json="{}"
