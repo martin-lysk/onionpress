@@ -94,8 +94,11 @@ def docker_exec(container, args, timeout=30):
             cmd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout
         )
+        if result.returncode != 0 and result.stderr.strip():
+            log.debug("docker exec %s failed: %s", container, result.stderr.strip()[:200])
         return result.returncode == 0, result.stdout.strip()
     except subprocess.TimeoutExpired:
+        log.warning("docker exec %s timed out after %ds", container, timeout)
         return False, ""
     except Exception as e:
         return False, str(e)
@@ -193,7 +196,9 @@ def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key, 
         try:
             return True, json.loads(output)
         except json.JSONDecodeError:
+            log.warning("POST /%s: non-JSON response: %s", endpoint, output[:200])
             return False, None
+    log.debug("POST /%s: ok=%s output=%r", endpoint, ok, output[:200] if output else "")
     return False, None
 
 
@@ -293,12 +298,15 @@ def heartbeat(hub_addr, content_addr, hc_addr, priv_key, pub_key):
     if ok and output.strip() in ("200", "301", "302"):
         wp_healthy = True
 
+    log.debug("WP health check: ok=%s output=%r healthy=%s", ok, output, wp_healthy)
+
     ok, resp = sign_and_post(
         "online", hub_addr, content_addr, hc_addr, priv_key, pub_key,
         extra={"wordpress_healthy": wp_healthy},
     )
 
     if ok and resp and resp.get("online"):
+        log.info("Heartbeat OK (wp_healthy=%s)", wp_healthy)
         return True
     if ok and resp:
         log.warning("Heartbeat rejected: %s", resp.get("error", "unknown"))
