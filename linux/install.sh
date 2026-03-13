@@ -139,6 +139,12 @@ if [ -d "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" ]; then
     $SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" "$INSTALL_DIR/scripts"
 fi
 
+# Copy OnionHeaven client scripts
+$SUDO mkdir -p "$INSTALL_DIR/scripts"
+$SUDO cp "$REPO_DIR/src/onion_auth.py" "$INSTALL_DIR/scripts/"
+$SUDO cp "$REPO_DIR/src/key_manager.py" "$INSTALL_DIR/scripts/"
+$SUDO cp "$REPO_DIR/linux/onionheaven-client.py" "$INSTALL_DIR/scripts/"
+
 # Bind WordPress and SOCKS ports to 0.0.0.0 for LAN access (Pi is headless,
 # users access from another device). The main compose file uses 127.0.0.1.
 # Docker Compose override files don't reliably merge port bindings, so we patch directly.
@@ -218,6 +224,8 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
+REGISTER_WITH_ONIONHEAVEN=yes
+ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 EOF
     chown "$REAL_USER" "$DATA_DIR/config"
     echo "  Default config created"
@@ -283,9 +291,31 @@ $SUDO cp /tmp/onionpress-watcher.service.tmp /etc/systemd/system/onionpress-watc
 $SUDO cp /tmp/onionpress-watcher.timer.tmp /etc/systemd/system/onionpress-watcher.timer
 rm -f /tmp/onionpress-watcher.service.tmp /tmp/onionpress-watcher.timer.tmp
 
+# Install OnionHeaven client service (registers with hub, sends heartbeats)
+cat > /tmp/onionpress-onionheaven.service.tmp <<OHSVCEOF
+[Unit]
+Description=OnionPress OnionHeaven client
+After=onionpress.service
+Requires=onionpress.service
+
+[Service]
+Type=simple
+User=$REAL_USER
+ExecStart=/usr/bin/python3 /opt/onionpress/scripts/onionheaven-client.py
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+OHSVCEOF
+$SUDO cp /tmp/onionpress-onionheaven.service.tmp /etc/systemd/system/onionpress-onionheaven.service
+rm -f /tmp/onionpress-onionheaven.service.tmp
+
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable onionpress
 $SUDO systemctl enable --now onionpress-watcher.timer
+$SUDO systemctl enable onionpress-onionheaven
 echo "  Systemd service installed and enabled (starts on boot)"
 
 # ─── Start OnionPress ─────────────────────────────────────────────────

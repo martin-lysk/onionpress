@@ -170,6 +170,7 @@ detect_onionheaven_mode() {
     fi
     if [ "$our_address" = "$onionheaven_address" ]; then
         export ONIONHEAVEN="1"
+        export ONIONHEAVEN_HUB="1"
         log "OnionHeaven mode activated (address: $our_address)"
 
         # OnionHeaven needs more memory and CPUs for polling, takeover services, etc.

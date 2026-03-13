@@ -132,6 +132,7 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
     $containers    = $status ? ( $status['containers'] ?? array() ) : array();
     $wayback_queue = $status ? ( $status['wayback_queue_count'] ?? 0 ) : 0;
     $updated_at    = $status ? ( $status['updated_at'] ?? '' ) : '';
+    $oh            = $status ? ( $status['onionheaven'] ?? array() ) : array();
 
     // State color
     $state_colors = array(
@@ -357,6 +358,57 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
 </div>
 <?php endif; ?>
 
+<?php if ( ! empty( $oh ) ) : ?>
+<div class="card" id="op-oh-card">
+    <h2>OnionHeaven</h2>
+    <div class="status-grid">
+        <?php if ( ! empty( $oh['server_active'] ) ) : ?>
+        <div class="status-stat">
+            <div class="label">Mode</div>
+            <div class="value" id="op-oh-mode">Hub (server)</div>
+        </div>
+        <div class="status-stat">
+            <div class="label">Registered Sites</div>
+            <div class="value" id="op-oh-registered"><?php echo (int) ( $oh['registered_count'] ?? 0 ); ?></div>
+        </div>
+        <div class="status-stat">
+            <div class="label">Online</div>
+            <div class="value" id="op-oh-online"><?php echo (int) ( $oh['online_count'] ?? 0 ); ?></div>
+        </div>
+        <div class="status-stat" id="op-oh-takeover-row" <?php if ( empty( $oh['taken_over_count'] ) ) echo 'style="display:none"'; ?>>
+            <div class="label">Taken Over</div>
+            <div class="value" id="op-oh-taken-over"><?php echo (int) ( $oh['taken_over_count'] ?? 0 ); ?></div>
+        </div>
+        <div class="status-stat" id="op-oh-workers-row" <?php if ( empty( $oh['takeover_containers'] ) ) echo 'style="display:none"'; ?>>
+            <div class="label">Takeover Workers</div>
+            <div class="value" id="op-oh-workers"><?php echo (int) ( $oh['takeover_containers'] ?? 0 ); ?></div>
+        </div>
+        <?php else : ?>
+        <div class="status-stat">
+            <div class="label">Mode</div>
+            <div class="value" id="op-oh-mode">Client</div>
+        </div>
+        <div class="status-stat">
+            <div class="label">Hub</div>
+            <div class="value" id="op-oh-hub" style="font-size:0.7rem;word-break:break-all"><?php echo esc_html( $oh['client_hub'] ?? '' ); ?></div>
+        </div>
+        <div class="status-stat">
+            <div class="label">Registration</div>
+            <div class="value" id="op-oh-client-status"><?php
+                if ( empty( $oh['client_enabled'] ) ) {
+                    echo 'Disabled';
+                } elseif ( ! empty( $oh['client_registered'] ) ) {
+                    echo 'Registered';
+                } else {
+                    echo 'Pending';
+                }
+            ?></div>
+        </div>
+        <?php endif; ?>
+    </div>
+</div>
+<?php endif; ?>
+
 <div class="card logs-wrap">
     <h2>Recent Logs</h2>
     <button type="button" class="most-recent-btn" id="op-logs-bottom" onclick="var l=document.getElementById('op-logs');l.scrollTop=l.scrollHeight;">Most Recent</button>
@@ -364,6 +416,8 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
 </div>
 
 <?php endif; ?>
+
+<p style="text-align:center;margin:24px 0 8px;"><a href="/wp-admin/admin.php?page=onionpress-settings" target="_blank" style="color:#666;text-decoration:none;">Settings &rarr;</a></p>
 
 <script>
 (function(){
@@ -422,6 +476,26 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
                 }
                 cc.innerHTML=h;
                 if(cw)cw.style.display='';
+            }
+            // OnionHeaven stats
+            var oh=s.onionheaven;
+            if(oh){
+                var ohCard=document.getElementById('op-oh-card');
+                if(ohCard)ohCard.style.display='';
+                el=document.getElementById('op-oh-mode');
+                if(el)el.textContent=oh.server_active?'Hub (server)':'Client';
+                if(oh.server_active){
+                    el=document.getElementById('op-oh-registered');if(el)el.textContent=oh.registered_count||0;
+                    el=document.getElementById('op-oh-online');if(el)el.textContent=oh.online_count||0;
+                    el=document.getElementById('op-oh-takeover-row');if(el)el.style.display=(oh.taken_over_count>0)?'':'none';
+                    el=document.getElementById('op-oh-taken-over');if(el)el.textContent=oh.taken_over_count||0;
+                    el=document.getElementById('op-oh-workers-row');if(el)el.style.display=(oh.takeover_containers>0)?'':'none';
+                    el=document.getElementById('op-oh-workers');if(el)el.textContent=oh.takeover_containers||0;
+                } else {
+                    el=document.getElementById('op-oh-hub');if(el)el.textContent=oh.client_hub||'';
+                    el=document.getElementById('op-oh-client-status');
+                    if(el)el.textContent=!oh.client_enabled?'Disabled':oh.client_registered?'Registered':'Pending';
+                }
             }
             el=document.getElementById('op-live-dot');
             if(el)el.textContent='Auto Updated '+new Date().toLocaleTimeString();

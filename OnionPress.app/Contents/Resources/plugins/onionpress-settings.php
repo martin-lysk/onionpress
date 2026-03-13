@@ -309,7 +309,7 @@ add_action( 'admin_init', function () {
 
     // Check if a restart is actually needed (must read old values before writing updates)
     $needs_restart = false;
-    $restart_keys = array( 'ADDRESS_PREFIX', 'CLOUDFLARE_TUNNEL_TOKEN', 'VM_MEMORY' );
+    $restart_keys = array( 'ADDRESS_PREFIX', 'CLOUDFLARE_TUNNEL_TOKEN', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS' );
     if ( ! empty( $updates ) ) {
         $old_values = array();
         $config_file = '/var/lib/onionpress/config-current.json';
@@ -460,7 +460,18 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
         wp_send_json( array( 'done' => false ) );
     }
 
-    // For start/stop/restart — done when action file is consumed
+    // For start/stop/restart — check for result file, pending marker, then action-consumed
+    $service_result  = '/var/lib/onionpress/service-result.json';
+    $service_pending = '/var/lib/onionpress/service-pending';
+    if ( file_exists( $service_result ) ) {
+        $result = json_decode( file_get_contents( $service_result ), true );
+        @unlink( $service_result );
+        wp_send_json( array( 'done' => true, 'result' => $result ) );
+    }
+    // Still in progress if pending marker exists (written before container restart)
+    if ( file_exists( $service_pending ) ) {
+        wp_send_json( array( 'done' => false ) );
+    }
     wp_send_json( array( 'done' => ! $pending ) );
 } );
 
@@ -573,6 +584,12 @@ function onionpress_settings_fields() {
             'description' => 'Register your site with OnionHeaven for Wayback Machine fallback when offline.',
             'type'        => 'select',
             'options'     => array( 'yes' => 'Enabled', 'no' => 'Disabled' ),
+        ),
+        'ONIONHEAVEN_ADDRESS' => array(
+            'label'       => 'OnionHeaven Hub Address',
+            'description' => 'The .onion address of the OnionHeaven hub to register with for Wayback Machine fallback.',
+            'type'        => 'text',
+            'placeholder' => 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion',
         ),
     );
 }
@@ -1028,7 +1045,7 @@ function onionpress_settings_page() {
 
                         if (result && result.success === true) {
                             notice.className = 'notice notice-success is-dismissible';
-                            var msg = 'Done!';
+                            var msg = result.message || 'Done!';
                             if (result.address) msg = 'Done! Address: ' + result.address;
                             if (result.filename) msg = 'Backup ready: ' + result.filename;
                             if (result.reachable === true) msg = 'Onion service is reachable (HTTP ' + (result.http_code || '200') + ')';

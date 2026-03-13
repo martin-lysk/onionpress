@@ -145,8 +145,11 @@ if [ "${ONIONHEAVEN}" = "1" ]; then
     fi
     # Add port 8083 to the wordpress onion service proxy_ports
     sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
-    # OnionHeaven receives all heartbeats on this address — use max intro points (10)
-    sed -i 's/num_intro_points = 3/num_intro_points = 10/' /etc/arti/arti.toml
+    # Only increase intro points on the actual hub (high-traffic machine).
+    # Regular nodes run the OH server but don't need 10 intro points.
+    if [ "${ONIONHEAVEN_HUB}" = "1" ]; then
+        sed -i 's/num_intro_points = 3/num_intro_points = 10/' /etc/arti/arti.toml
+    fi
 fi
 
 # Start healthcheck HTTP server in background (port 8081)

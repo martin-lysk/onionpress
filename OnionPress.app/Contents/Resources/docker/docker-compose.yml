@@ -11,6 +11,7 @@ services:
       - TZ=${TZ:-UTC}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
       - ONIONHEAVEN=${ONIONHEAVEN:-0}
+      - ONIONHEAVEN_HUB=${ONIONHEAVEN_HUB:-0}
     volumes:
       - arti-state:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress

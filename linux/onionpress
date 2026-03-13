@@ -39,8 +39,12 @@ export ONIONPRESS_WP_PORT=8080
 export ONIONPRESS_SOCKS_PORT=9050
 export ONIONPRESS_PROXY_PORT=9077
 
-# OnionHeaven disabled on headless Pi
-export ONIONHEAVEN="0"
+# Every OnionPress node is an OnionHeaven server (accepts registrations).
+# The server container is moderate overhead (~20-50MB). Takeover containers
+# only spawn on demand when a registered site goes offline.
+# ONIONHEAVEN_HUB=1 enables 10 intro points (for the high-traffic hub).
+export ONIONHEAVEN="1"
+export ONIONHEAVEN_HUB="${ONIONHEAVEN_HUB:-0}"
 
 # Read config
 CLOUDFLARE_TUNNEL_TOKEN=""
@@ -53,6 +57,8 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
+REGISTER_WITH_ONIONHEAVEN=yes
+ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 EOF
 fi
 
@@ -1145,6 +1151,137 @@ setup_wordpress_interactive() {
     fi
 }
 
+# ─── OnionHeaven farm (takeover containers) ─────────────────────────
+
+# Image used for takeover workers (same as main tor image)
+ONIONHEAVEN_IMAGE="${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}"
+ONIONHEAVEN_FARM_MONITOR_PID=""
+
+_start_takeover_worker() {
+    local idx="$1"
+    local name="onionheaven-takeover-${idx}"
+    local vol="onionpress-arti-state-takeover-${idx}"
+
+    docker rm -f "$name" >> "$LOG_FILE" 2>&1 || true
+
+    if docker run -d \
+        --name "$name" \
+        --network onionpress-network \
+        --ulimit nofile=10000:10000 \
+        -e TZ="${TZ:-UTC}" \
+        -e TAKEOVER_WORKER=1 \
+        -e CONTAINER_NAME="$name" \
+        -e MAX_TAKEOVER_SERVICES=50 \
+        -v "${vol}:/var/lib/arti/" \
+        -v "onionpress-persistent-data:/var/lib/onionpress" \
+        --restart unless-stopped \
+        "$ONIONHEAVEN_IMAGE" >> "$LOG_FILE" 2>&1; then
+        log "OnionHeaven farm: started takeover worker $name"
+    else
+        log "WARNING: Failed to start takeover worker $name"
+        return 1
+    fi
+}
+
+start_onionheaven_farm() {
+    # Start with 0 takeover workers — they'll be spawned on demand when
+    # the heartbeat monitor writes to farm_scale_requests.
+    log "OnionHeaven farm: launching scaling monitor (0 initial workers)"
+
+    _onionheaven_farm_monitor &
+    ONIONHEAVEN_FARM_MONITOR_PID=$!
+}
+
+_onionheaven_farm_monitor() {
+    local next_takeover=0
+    local db="/var/lib/onionpress/onionheaven/registry.db"
+    local hub_promoted=false
+
+    # Auto-detect hub mode: if we have 5+ registered sites, bump intro points
+    # by restarting the tor container with ONIONHEAVEN_HUB=1. Only done once.
+    local HUB_THRESHOLD=5
+
+    while true; do
+        sleep 30
+
+        # Auto-promote to hub mode when registration count crosses threshold
+        if [ "$hub_promoted" = "false" ] && [ "$ONIONHEAVEN_HUB" != "1" ]; then
+            local reg_count
+            reg_count=$(docker exec onionheaven sqlite3 "$db" \
+                "SELECT COUNT(*) FROM registry WHERE status='online'" 2>/dev/null) || reg_count=0
+            if [ "$reg_count" -ge "$HUB_THRESHOLD" ] 2>/dev/null; then
+                log "OnionHeaven farm: $reg_count registered sites >= $HUB_THRESHOLD — promoting to hub mode (10 intro points)"
+                export ONIONHEAVEN_HUB="1"
+                # Restart tor container to pick up increased intro points
+                cd "$DOCKER_DIR"
+                docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to restart tor for hub mode"
+                hub_promoted=true
+            fi
+        fi
+
+        # Check for unfulfilled scale-up requests
+        local requests
+        requests=$(docker exec onionheaven sqlite3 "$db" \
+            "SELECT id, worker_type FROM farm_scale_requests WHERE fulfilled_at IS NULL ORDER BY id" 2>/dev/null) || continue
+
+        if [ -z "$requests" ]; then
+            continue
+        fi
+
+        # Memory guard: skip scale-up if host memory usage >85%
+        local mem_pct
+        mem_pct=$(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%d", (1-a/t)*100}' /proc/meminfo 2>/dev/null) || mem_pct=0
+        if [ "$mem_pct" -gt 85 ] 2>/dev/null; then
+            log "OnionHeaven farm: skipping scale-up — memory at ${mem_pct}% (>85%)"
+            while IFS='|' read -r req_id req_type; do
+                local now
+                now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                docker exec onionheaven sqlite3 "$db" \
+                    "UPDATE farm_scale_requests SET fulfilled_at = '${now}' WHERE id = ${req_id}" \
+                    >> "$LOG_FILE" 2>&1 || true
+            done <<< "$requests"
+            continue
+        fi
+
+        # Process each request (format: "id|worker_type" per line)
+        while IFS='|' read -r req_id req_type; do
+            case "$req_type" in
+                takeover)
+                    log "OnionHeaven farm: scaling up — adding 2 takeover workers (starting at index $next_takeover)"
+                    _start_takeover_worker "$next_takeover"
+                    _start_takeover_worker "$((next_takeover + 1))"
+                    next_takeover=$((next_takeover + 2))
+                    ;;
+                *)
+                    log "WARNING: Unknown farm scale request type: $req_type"
+                    ;;
+            esac
+
+            local now
+            now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            docker exec onionheaven sqlite3 "$db" \
+                "UPDATE farm_scale_requests SET fulfilled_at = '${now}' WHERE id = ${req_id}" \
+                >> "$LOG_FILE" 2>&1 || true
+        done <<< "$requests"
+    done
+}
+
+stop_onionheaven_farm() {
+    # Stop the scaling monitor
+    if [ -n "$ONIONHEAVEN_FARM_MONITOR_PID" ] && kill -0 "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null; then
+        kill "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null || true
+        wait "$ONIONHEAVEN_FARM_MONITOR_PID" 2>/dev/null || true
+        ONIONHEAVEN_FARM_MONITOR_PID=""
+    fi
+
+    # Stop all takeover containers
+    for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^onionheaven-takeover-[0-9]+$'); do
+        docker stop "$container" >> "$LOG_FILE" 2>&1 || true
+        docker rm "$container" >> "$LOG_FILE" 2>&1 || true
+        log "OnionHeaven farm: stopped $container"
+    done
+}
+
 # ─── Container management ────────────────────────────────────────────
 
 start_containers() {
@@ -1275,6 +1412,13 @@ start_containers() {
         fi
     fi
 
+    # Start OnionHeaven server container (every node is an OH server).
+    # Takeover containers and hub mode (10 intro points) are automatic via farm monitor.
+    log "Starting OnionHeaven server container..."
+    docker compose --profile onionheaven up -d >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start OnionHeaven container"
+    # Start farm monitor for on-demand takeover containers (0 initial workers)
+    start_onionheaven_farm
+
     # Install plugins and mu-plugins
     install_ia_plugin
     configure_ia_plugin
@@ -1287,6 +1431,7 @@ start_containers() {
 
 stop_containers() {
     log "Stopping OnionPress containers..."
+    stop_onionheaven_farm
     cd "$DOCKER_DIR"
     docker compose down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
@@ -1685,6 +1830,53 @@ except:
     local now_iso
     now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+    # Gather OnionHeaven stats
+    local oh_server_active="false"
+    local oh_registered_count=0
+    local oh_online_count=0
+    local oh_taken_over_count=0
+    local oh_takeover_containers=0
+    local oh_client_registered="false"
+    local oh_client_hub=""
+    local oh_config_enabled="false"
+
+    # Read client registration state
+    if [ -f "$DATA_DIR/onionheaven-registration.json" ]; then
+        oh_client_registered=$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print('true' if d.get('registered') else 'false')
+except: print('false')
+" "$DATA_DIR/onionheaven-registration.json" 2>/dev/null || echo "false")
+    fi
+
+    # Read config
+    if [ -f "$DATA_DIR/config" ]; then
+        oh_config_enabled=$(grep "^REGISTER_WITH_ONIONHEAVEN=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+        oh_client_hub=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    fi
+    oh_config_enabled=${oh_config_enabled:-yes}
+    oh_client_hub=${oh_client_hub:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}
+
+    # Check if this node is an OH server
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
+        oh_server_active="true"
+        # Query OH server stats from registry DB
+        local oh_stats
+        oh_stats=$(docker exec onionheaven sqlite3 /var/lib/onionpress/onionheaven/registry.db \
+            "SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status='online' THEN 1 ELSE 0 END) AS online,
+                SUM(CASE WHEN status='taken-over' THEN 1 ELSE 0 END) AS taken_over
+            FROM registry" 2>/dev/null || echo "0|0|0")
+        oh_registered_count=$(echo "$oh_stats" | cut -d'|' -f1)
+        oh_online_count=$(echo "$oh_stats" | cut -d'|' -f2)
+        oh_taken_over_count=$(echo "$oh_stats" | cut -d'|' -f3)
+        oh_takeover_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -cE '^onionheaven-takeover-[0-9]+$' || echo 0)
+    fi
+
     # Build status.json
     local status_json
     status_json=$(python3 -c "
@@ -1698,10 +1890,22 @@ status = {
     'containers': json.loads(sys.argv[6]),
     'wayback_queue_count': int(sys.argv[7]),
     'updated_at': sys.argv[8],
-    'platform': 'linux'
+    'platform': 'linux',
+    'onionheaven': {
+        'server_active': sys.argv[9] == 'true',
+        'registered_count': int(sys.argv[10]),
+        'online_count': int(sys.argv[11]),
+        'taken_over_count': int(sys.argv[12]),
+        'takeover_containers': int(sys.argv[13]),
+        'client_registered': sys.argv[14] == 'true',
+        'client_hub': sys.argv[15],
+        'client_enabled': sys.argv[16] == 'yes',
+    }
 }
 print(json.dumps(status, indent=2))
-" "$state" "$ONIONPRESS_VERSION" "$onion_addr" "$uptime_seconds" "$bootstrap_pct" "$containers_json" "$wayback_queue" "$now_iso")
+" "$state" "$ONIONPRESS_VERSION" "$onion_addr" "$uptime_seconds" "$bootstrap_pct" "$containers_json" "$wayback_queue" "$now_iso" \
+  "$oh_server_active" "$oh_registered_count" "$oh_online_count" "$oh_taken_over_count" "$oh_takeover_containers" \
+  "$oh_client_registered" "$oh_client_hub" "$oh_config_enabled")
 
     # Write to shared volume
     echo "$status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
@@ -1993,6 +2197,11 @@ main() {
             if [ -d "$resources_dir/scripts" ]; then
                 sudo cp -r "$resources_dir/scripts" "$INSTALL_DIR/scripts"
             fi
+            # Copy OnionHeaven client scripts
+            sudo mkdir -p "$INSTALL_DIR/scripts"
+            sudo cp "$repo_dir/src/onion_auth.py" "$INSTALL_DIR/scripts/"
+            sudo cp "$repo_dir/src/key_manager.py" "$INSTALL_DIR/scripts/"
+            sudo cp "$repo_dir/linux/onionheaven-client.py" "$INSTALL_DIR/scripts/"
             # Fix docker-compose port bindings for LAN access
             sudo sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
             sudo sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
@@ -2021,6 +2230,11 @@ main() {
             wait_for_services
             write_status
 
+            # Restart OnionHeaven client service if it exists
+            if systemctl list-unit-files onionpress-onionheaven.service >/dev/null 2>&1; then
+                sudo systemctl restart onionpress-onionheaven 2>>"$LOG_FILE" || log "WARNING: Failed to restart OnionHeaven client"
+            fi
+
             log "Update complete: $new_version"
             echo "  Update complete! Now running OnionPress $new_version."
             ;;
@@ -2047,7 +2261,7 @@ main() {
                 fi
                 exit 0
             fi
-            docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/requested-action' 2>/dev/null
+            docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json' 2>/dev/null
             if [ "$action" != "refresh-status" ]; then
                 log "Handling requested action: $action"
             fi
@@ -2055,17 +2269,28 @@ main() {
                 start)
                     setup_db_passwords
                     apply_config_updates 2>/dev/null || true
+                    docker exec onionpress-wordpress sh -c 'echo start > /var/lib/onionpress/service-pending' 2>/dev/null
                     start_containers
                     wait_for_services
                     write_status
+                    local containers_info
+                    containers_info=$(docker ps --filter "name=onionpress" --format '{{.Names}}: {{.Status}}' 2>/dev/null | sed 's/onionpress-//g' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
+                    echo '{"success":true,"action":"start","message":"Started '"$containers_info"'","completed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                        docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/service-result.json && rm -f /var/lib/onionpress/service-pending' 2>/dev/null
                     ;;
                 restart)
                     setup_db_passwords
                     apply_config_updates 2>/dev/null || true
+                    # Write pending marker to shared volume before stopping (survives container restart)
+                    docker exec onionpress-wordpress sh -c 'echo restart > /var/lib/onionpress/service-pending' 2>/dev/null
                     stop_containers
                     start_containers
                     wait_for_services
                     write_status
+                    local containers_info
+                    containers_info=$(docker ps --filter "name=onionpress" --format '{{.Names}}: {{.Status}}' 2>/dev/null | sed 's/onionpress-//g' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
+                    echo '{"success":true,"action":"restart","message":"Restarted '"$containers_info"'","completed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                        docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/service-result.json && rm -f /var/lib/onionpress/service-pending' 2>/dev/null
                     ;;
                 stop)
                     setup_db_passwords
