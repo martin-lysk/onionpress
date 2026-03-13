@@ -765,7 +765,6 @@ function onionpress_settings_page() {
             <?php endif; ?>
         </form>
 
-        <?php if ( $current_platform === 'linux' ) : ?>
         <hr style="border: none; border-top: 3px solid #c3c4c7; margin: 30px 0;">
         <h2>Service Control</h2>
         <p class="description">Some settings (Address Prefix, Cloudflare Tunnel) require a restart to take effect.</p>
@@ -780,8 +779,10 @@ function onionpress_settings_page() {
             <?php submit_button( 'Stop OnionPress', 'secondary', 'submit', false ); ?>
         </form>
         <p class="description" style="margin-top: 10px;">
-            Restart will apply any saved settings changes. The page will be unavailable briefly during restart.<br>
-            To start after a full stop, use SSH: <code>sudo systemctl start onionpress</code>
+            Restart will apply any saved settings changes. The page will be unavailable briefly during restart.
+            <?php if ( $current_platform === 'linux' ) : ?>
+            <br>To start after a full stop, use SSH: <code>sudo systemctl start onionpress</code>
+            <?php endif; ?>
         </p>
 
         <!-- Update -->
@@ -965,7 +966,6 @@ function onionpress_settings_page() {
             <?php submit_button( 'Import Key', 'secondary', 'submit', false ); ?>
         </form>
 
-        <?php endif; ?>
     </div>
     <style>
         .op-password-wrap { display: inline-flex; align-items: center; }

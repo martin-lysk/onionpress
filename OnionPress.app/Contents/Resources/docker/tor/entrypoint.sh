@@ -102,12 +102,59 @@ if [ "${POLLING_ONLY}" = "1" ]; then
         fi
 
         # Start onionheaven heartbeat monitor in background (log to shared volume)
-        python3 /onionheaven-heartbeat.py 2>/var/lib/onionpress/onionheaven/heartbeat.log &
+        HEARTBEAT_LOG="/var/lib/onionpress/onionheaven/heartbeat.log"
+        python3 /onionheaven-heartbeat.py 2>"$HEARTBEAT_LOG" &
         HEARTBEAT_PID=$!
         sleep 1
         if ! kill -0 $HEARTBEAT_PID 2>/dev/null; then
             echo "ERROR: onionheaven-heartbeat.py failed to start"
         fi
+
+        # Heartbeat watchdog — restarts the heartbeat if its log goes stale.
+        # The heartbeat writes every ~15s; if 5 minutes pass with no update,
+        # something is wrong (stuck wall_sleep, silent crash, DB lock, etc.).
+        # Logs diagnostics before killing so we can investigate the root cause.
+        WATCHDOG_STALE_SECS=300
+        WATCHDOG_CHECK_INTERVAL=60
+        (
+            while true; do
+                sleep $WATCHDOG_CHECK_INTERVAL
+
+                # If heartbeat log doesn't exist yet, skip
+                [ -f "$HEARTBEAT_LOG" ] || continue
+
+                # Get log file age in seconds (works on both GNU and BusyBox stat)
+                log_mtime=$(stat -c %Y "$HEARTBEAT_LOG" 2>/dev/null) || continue
+                now=$(date +%s)
+                age=$(( now - log_mtime ))
+
+                if [ "$age" -gt "$WATCHDOG_STALE_SECS" ]; then
+                    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] WATCHDOG: heartbeat log stale for ${age}s (threshold: ${WATCHDOG_STALE_SECS}s)" >> "$HEARTBEAT_LOG"
+
+                    # Log diagnostics before killing
+                    if kill -0 $HEARTBEAT_PID 2>/dev/null; then
+                        echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] WATCHDOG: heartbeat PID $HEARTBEAT_PID is alive but not writing logs" >> "$HEARTBEAT_LOG"
+                        # Capture what the process is doing (/proc/PID/wchan shows kernel wait channel)
+                        wchan=$(cat /proc/$HEARTBEAT_PID/wchan 2>/dev/null || echo "unknown")
+                        fdcount=$(ls /proc/$HEARTBEAT_PID/fd 2>/dev/null | wc -l || echo "unknown")
+                        echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] WATCHDOG: PID $HEARTBEAT_PID wchan=$wchan open_fds=$fdcount" >> "$HEARTBEAT_LOG"
+                        echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] WATCHDOG: killing stale heartbeat PID $HEARTBEAT_PID" >> "$HEARTBEAT_LOG"
+                        kill $HEARTBEAT_PID 2>/dev/null
+                        sleep 2
+                        # Force kill if still alive
+                        kill -9 $HEARTBEAT_PID 2>/dev/null
+                    else
+                        echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] WATCHDOG: heartbeat PID $HEARTBEAT_PID is dead (silent crash)" >> "$HEARTBEAT_LOG"
+                    fi
+
+                    # Restart
+                    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] WATCHDOG: restarting heartbeat monitor" >> "$HEARTBEAT_LOG"
+                    python3 /onionheaven-heartbeat.py 2>>"$HEARTBEAT_LOG" &
+                    HEARTBEAT_PID=$!
+                    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] WATCHDOG: heartbeat restarted as PID $HEARTBEAT_PID" >> "$HEARTBEAT_LOG"
+                fi
+            done
+        ) &
 
         # Wait on Arti (main process)
         wait $ARTI_PID

@@ -308,6 +308,8 @@ _start_takeover_worker() {
         --name "$name" \
         --network onionpress-network \
         --ulimit nofile=10000:10000 \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         -e TZ="${TZ:-UTC}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
@@ -1391,6 +1393,21 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
             log "WARNING: Failed to copy onionpress-favicon.php"
         fi
     fi
+
+    # Copy settings and status page mu-plugins
+    for plugin in onionpress-settings.php onionpress-status.php; do
+        if [ -f "$plugins_dir/$plugin" ]; then
+            if docker cp "$plugins_dir/$plugin" \
+                "onionpress-wordpress:/var/www/html/wp-content/mu-plugins/$plugin" >> "$LOG_FILE" 2>&1; then
+                docker exec onionpress-wordpress chown www-data:www-data \
+                    "/var/www/html/wp-content/mu-plugins/$plugin" >> "$LOG_FILE" 2>&1 \
+                    || log "WARNING: Failed to chown $plugin"
+                log "✓ $plugin mu-plugin installed"
+            else
+                log "WARNING: Failed to copy $plugin"
+            fi
+        fi
+    done
 
     return 0
 }

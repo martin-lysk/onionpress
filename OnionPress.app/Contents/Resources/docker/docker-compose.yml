@@ -3,6 +3,10 @@ services:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
     container_name: onionpress-tor
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
     ulimits:
       nofile:
         soft: 10000
@@ -71,6 +75,10 @@ services:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
     container_name: onionpress-tor-client
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
     ulimits:
       nofile:
         soft: 10000
@@ -88,6 +96,10 @@ services:
     image: ${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}
     build: ./tor
     container_name: onionheaven
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
     ulimits:
       nofile:
         soft: 10000

@@ -1898,6 +1898,11 @@ class OnionPressApp(rumps.App):
                 if self.is_ready:
                     self.drain_wayback_queue()
 
+                # Write status, poll for config updates & action requests from WordPress settings page
+                self.write_status_to_volume()
+                self.poll_config_updates()
+                self.poll_requested_actions()
+
                 # OnionHeaven: detect onionheaven mode (one-shot)
                 if self.is_ready and not self._onionheaven_checked:
                     self._onionheaven_checked = True
@@ -4462,6 +4467,607 @@ License: AGPL v3"""
 
         # Run uninstall in background thread to avoid blocking UI
         threading.Thread(target=do_uninstall, daemon=True).start()
+
+    # ── Settings Page Support ─────────────────────────────────────
+
+    def write_status_to_volume(self):
+        """Write status.json, config-current.json, recent-logs.txt to the shared Docker volume
+        so the WordPress settings/status pages can display current state."""
+        try:
+            # Determine state
+            if not self.is_running:
+                state = "stopped"
+            elif self.is_ready:
+                state = "running"
+            elif not self._has_internet:
+                state = "offline"
+            elif self._yellow_since and (time.time() - self._yellow_since) > 300:
+                state = "stuck"
+            else:
+                state = "starting"
+
+            # Get container states
+            containers = {}
+            try:
+                result = subprocess.run(
+                    ["docker", "ps", "--format", "{{.Names}}\t{{.State}}",
+                     "--filter", "name=onionpress"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().splitlines():
+                        parts = line.split("\t", 1)
+                        if len(parts) == 2:
+                            containers[parts[0]] = parts[1]
+            except Exception:
+                pass
+
+            # Get uptime
+            uptime_seconds = int(time.time() - self.startup_time) if self.is_running else 0
+
+            # Bootstrap percentage
+            bootstrap_pct = self._last_bootstrap_pct if hasattr(self, '_last_bootstrap_pct') else 0
+            if self.is_ready:
+                bootstrap_pct = 100
+
+            # Wayback queue count
+            wq_count = 0
+            try:
+                with self._wayback_queue_lock:
+                    wq_count = len(self._wayback_queue)
+            except Exception:
+                pass
+
+            # OnionHeaven stats
+            oh_server_active = getattr(self, 'is_onionheaven', False)
+            oh_stats = {'server_active': oh_server_active, 'client_registered': False,
+                        'client_enabled': True, 'client_hub': '', 'registered_count': 0,
+                        'online_count': 0, 'taken_over_count': 0, 'takeover_containers': 0}
+            if oh_server_active:
+                try:
+                    result = subprocess.run(
+                        ["docker", "exec", "onionheaven", "sqlite3",
+                         "/var/lib/onionpress/onionheaven/registry.db",
+                         "SELECT COUNT(*), SUM(CASE WHEN status='online' THEN 1 ELSE 0 END), "
+                         "SUM(CASE WHEN status='taken-over' THEN 1 ELSE 0 END) FROM registry"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        parts = result.stdout.strip().split("|")
+                        oh_stats['registered_count'] = int(parts[0] or 0)
+                        oh_stats['online_count'] = int(parts[1] or 0)
+                        oh_stats['taken_over_count'] = int(parts[2] or 0)
+                except Exception:
+                    pass
+                try:
+                    result = subprocess.run(
+                        ["docker", "ps", "--format", "{{.Names}}",
+                         "--filter", "name=onionheaven-takeover"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        oh_stats['takeover_containers'] = len([
+                            l for l in result.stdout.strip().splitlines() if l.strip()
+                        ])
+                except Exception:
+                    pass
+            oh_stats['client_enabled'] = self._read_config_value("REGISTER_WITH_ONIONHEAVEN", "yes") == "yes"
+            oh_stats['client_hub'] = self._read_config_value(
+                "ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
+
+            onion_addr = self.onion_address if self.onion_address and ".onion" in str(self.onion_address) else ""
+
+            # System load averages and host uptime
+            load_avg = list(os.getloadavg())
+            try:
+                host_uptime = int(time.time() - self._host_boot_time)
+            except AttributeError:
+                # Cache boot time on first call
+                try:
+                    r = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                                       capture_output=True, text=True, timeout=2)
+                    # Output like: { sec = 1710345600, usec = 0 } ...
+                    import re
+                    m = re.search(r'sec\s*=\s*(\d+)', r.stdout)
+                    self._host_boot_time = int(m.group(1)) if m else time.time()
+                except Exception:
+                    self._host_boot_time = time.time()
+                host_uptime = int(time.time() - self._host_boot_time)
+
+            import datetime
+            status = {
+                'state': state,
+                'version': self.version,
+                'onion_address': onion_addr,
+                'uptime_seconds': uptime_seconds,
+                'bootstrap_pct': bootstrap_pct,
+                'containers': containers,
+                'wayback_queue_count': wq_count,
+                'updated_at': datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                'platform': 'macos',
+                'load_avg': load_avg,
+                'host_uptime_seconds': host_uptime,
+                'onionheaven': oh_stats,
+            }
+
+            status_json = json.dumps(status, indent=2)
+
+            # Write status.json
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/status.json"],
+                input=status_json, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+
+            # Write version file
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/version"],
+                input=self.version, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+
+            # Write config-current.json
+            config = {}
+            config_file = os.path.join(self.app_support, "config")
+            try:
+                with open(config_file, encoding='utf-8', errors='replace') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        if '=' in line:
+                            key, val = line.split('=', 1)
+                            config[key] = val
+            except (OSError, IOError):
+                pass
+
+            config_json = json.dumps(config, indent=2)
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/config-current.json"],
+                input=config_json, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+
+            # Write recent logs
+            log_file = os.path.join(self.app_support, "onionpress.log")
+            try:
+                with open(log_file, encoding='utf-8', errors='replace') as f:
+                    lines = f.readlines()
+                recent = "".join(lines[-100:])
+                subprocess.run(
+                    ["docker", "exec", "-i", "onionpress-wordpress",
+                     "tee", "/var/lib/onionpress/recent-logs.txt"],
+                    input=recent, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=5
+                )
+            except (OSError, IOError):
+                pass
+
+        except Exception:
+            pass  # Container may not be running
+
+    def poll_config_updates(self):
+        """Check for config changes written by the WordPress settings page."""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "cat", "/var/lib/onionpress/config-updates.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return
+
+            updates = json.loads(result.stdout.strip())
+            if not updates or not isinstance(updates, dict):
+                return
+
+            self.log(f"Settings page: applying {len(updates)} config update(s)")
+
+            # Apply each setting to ~/.onionpress/config
+            for key, val in updates.items():
+                old_val = self._read_config_value(key)
+                if old_val != val:
+                    self.write_config_value(key, val)
+                    self.log(f"  {key}: {old_val!r} → {val!r}")
+
+            # Delete the updates file
+            subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "rm", "-f", "/var/lib/onionpress/config-updates.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+
+            # Re-read settings that the menubar app uses at runtime
+            self.cloudflare_tunnel_enabled = bool(self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
+
+        except json.JSONDecodeError:
+            pass
+        except Exception:
+            pass  # Container may not be running
+
+    def poll_requested_actions(self):
+        """Check for action requests from the WordPress settings page."""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "cat", "/var/lib/onionpress/requested-action"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return
+
+            action = result.stdout.strip()
+
+            # Clear the action file immediately
+            subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "sh", "-c", "rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+
+            if action == "refresh-status":
+                self.write_status_to_volume()
+                return
+
+            self.log(f"Settings page: handling action '{action}'")
+
+            # Run action in background thread so it doesn't block the polling loop
+            threading.Thread(
+                target=self._handle_requested_action, args=(action,),
+                daemon=True
+            ).start()
+
+        except Exception:
+            pass
+
+    def _handle_requested_action(self, action):
+        """Execute a requested action from the WordPress settings page."""
+        import datetime
+
+        def _write_result(filename, data):
+            """Write a JSON result file to the WordPress shared volume."""
+            try:
+                result_json = json.dumps(data)
+                subprocess.run(
+                    ["docker", "exec", "-i", "onionpress-wordpress",
+                     "tee", f"/var/lib/onionpress/{filename}"],
+                    input=result_json, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=5
+                )
+            except Exception:
+                pass
+
+        def _clear_pending():
+            try:
+                subprocess.run(
+                    ["docker", "exec", "onionpress-wordpress",
+                     "sh", "-c", "rm -f /var/lib/onionpress/service-pending"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=5
+                )
+            except Exception:
+                pass
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        try:
+            if action in ("restart", "start"):
+                # Write pending marker
+                try:
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "sh", "-c", f"echo {action} > /var/lib/onionpress/service-pending"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                except Exception:
+                    pass
+
+                if action == "restart":
+                    self.log("Settings page: restarting OnionPress...")
+                    self.run_command("restart")
+                else:
+                    self.log("Settings page: starting OnionPress...")
+                    self.run_command("start")
+
+                # Wait for services to come back
+                import time
+                for _ in range(30):
+                    time.sleep(2)
+                    if self.is_running:
+                        break
+
+                self.write_status_to_volume()
+                containers_info = ""
+                try:
+                    r = subprocess.run(
+                        ["docker", "ps", "--filter", "name=onionpress", "--format", "{{.Names}}: {{.Status}}"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
+                    )
+                    if r.returncode == 0:
+                        containers_info = r.stdout.strip().replace("onionpress-", "").replace("\n", ", ")
+                except Exception:
+                    pass
+                _write_result("service-result.json", {
+                    "success": True, "action": action,
+                    "message": f"{'Restarted' if action == 'restart' else 'Started'} {containers_info}",
+                    "completed_at": now_iso
+                })
+                _clear_pending()
+
+            elif action == "stop":
+                self.log("Settings page: stopping OnionPress...")
+                self.run_command("stop")
+                _write_result("service-result.json", {
+                    "success": True, "action": "stop",
+                    "message": "OnionPress stopped", "completed_at": now_iso
+                })
+
+            elif action == "check-reachability":
+                self.log("Settings page: running reachability test...")
+                onion_addr = self.onion_address if self.onion_address and ".onion" in str(self.onion_address) else ""
+                if not onion_addr:
+                    _write_result("reachability-result.json", {
+                        "reachable": False, "error": "No onion address found",
+                        "tested_at": now_iso
+                    })
+                else:
+                    try:
+                        r = subprocess.run(
+                            ["docker", "exec", "onionpress-tor-client",
+                             "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                             "--max-time", "60", "--socks5-hostname", "127.0.0.1:9050",
+                             f"http://{onion_addr}/"],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=75
+                        )
+                        http_code = r.stdout.strip() or "000"
+                        reachable = http_code.isdigit() and 200 <= int(http_code) < 500
+                    except Exception:
+                        http_code = "000"
+                        reachable = False
+                    _write_result("reachability-result.json", {
+                        "reachable": reachable, "http_code": http_code,
+                        "address": onion_addr, "tested_at": now_iso
+                    })
+                    self.log(f"Settings page: reachability test -> HTTP {http_code} (reachable={reachable})")
+
+            elif action == "generate-vanity":
+                self.log("Settings page: generating vanity address...")
+                prefix = self._read_config_value("ADDRESS_PREFIX", "op2")
+                try:
+                    # Use the onionpress script's prefix change mechanism:
+                    # stop → delete arti state volume → start (triggers key regen)
+                    self.run_command("stop")
+                    import time
+                    time.sleep(2)
+                    # Delete the arti state volume so a new key is generated on next start
+                    subprocess.run(
+                        ["docker", "volume", "rm", "onionpress-arti-state"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=15
+                    )
+                    self.run_command("start")
+                    for _ in range(60):
+                        time.sleep(2)
+                        if self.is_running and self.onion_address and ".onion" in str(self.onion_address):
+                            break
+                    self.write_status_to_volume()
+                    new_addr = self.onion_address or ""
+                    _write_result("vanity-result.json", {
+                        "success": True, "address": new_addr,
+                        "generated_at": now_iso
+                    })
+                    self.log(f"Settings page: vanity address generated: {new_addr}")
+                except Exception as e:
+                    _write_result("vanity-result.json", {
+                        "success": False, "error": str(e),
+                        "generated_at": now_iso
+                    })
+                    self.log(f"Settings page: vanity generation failed: {e}")
+
+            elif action == "import-key-file":
+                self.log("Settings page: importing key...")
+                try:
+                    r = subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "cat", "/var/lib/onionpress/import-key-data"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    key_data = r.stdout.strip() if r.returncode == 0 else ""
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "rm", "-f", "/var/lib/onionpress/import-key-data"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    if not key_data:
+                        _write_result("import-result.json", {
+                            "success": False, "error": "No key data found",
+                            "imported_at": now_iso
+                        })
+                    else:
+                        # Use the onionpress script's import-key command
+                        r = subprocess.run(
+                            [self.launcher_script, "import-key", key_data],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=120
+                        )
+                        if r.returncode == 0:
+                            # Restart to pick up the imported key
+                            self.run_command("restart")
+                            import time
+                            for _ in range(60):
+                                time.sleep(2)
+                                if self.is_running and self.onion_address and ".onion" in str(self.onion_address):
+                                    break
+                            self.write_status_to_volume()
+                            new_addr = self.onion_address or ""
+                            _write_result("import-result.json", {
+                                "success": True, "address": new_addr,
+                                "imported_at": now_iso
+                            })
+                            self.log(f"Settings page: key imported, address: {new_addr}")
+                        else:
+                            error_msg = r.stderr.strip() or r.stdout.strip() or "Import failed"
+                            _write_result("import-result.json", {
+                                "success": False, "error": error_msg,
+                                "imported_at": now_iso
+                            })
+                            self.log(f"Settings page: key import failed: {error_msg}")
+                except Exception as e:
+                    _write_result("import-result.json", {
+                        "success": False, "error": str(e),
+                        "imported_at": now_iso
+                    })
+                    self.log(f"Settings page: key import failed: {e}")
+
+            elif action == "create-backup":
+                self.log("Settings page: creating backup...")
+                try:
+                    r = subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "cat", "/var/lib/onionpress/backup-password"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    password = r.stdout.strip() if r.returncode == 0 else ""
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "rm", "-f", "/var/lib/onionpress/backup-password"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    if not password:
+                        _write_result("backup-result.json", {
+                            "success": False, "error": "No password provided",
+                            "created_at": now_iso
+                        })
+                    else:
+                        import tempfile
+                        onion_short = (self.onion_address or "site").replace(".onion", "")[:8]
+                        import time
+                        filename = f"OnionPress-{onion_short}-{time.strftime('%Y-%m-%d-%H-%M')}.zip"
+                        tmp_path = os.path.join(tempfile.gettempdir(), filename)
+
+                        import backup_manager
+                        onion_addr = self.onion_address or "unknown"
+                        backup_manager.create_backup(
+                            onion_addr, "admin", password,
+                            tmp_path, self.version, self.log
+                        )
+
+                        # Copy into WordPress container for download
+                        subprocess.run(
+                            ["docker", "cp", tmp_path,
+                             f"onionpress-wordpress:/var/lib/onionpress/{filename}"],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=30
+                        )
+                        subprocess.run(
+                            ["docker", "exec", "onionpress-wordpress",
+                             "chown", "www-data:www-data", f"/var/lib/onionpress/{filename}"],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=5
+                        )
+                        try:
+                            os.remove(tmp_path)
+                        except OSError:
+                            pass
+                        _write_result("backup-result.json", {
+                            "success": True, "filename": filename,
+                            "created_at": now_iso
+                        })
+                        self.log(f"Settings page: backup created: {filename}")
+                except Exception as e:
+                    _write_result("backup-result.json", {
+                        "success": False, "error": str(e),
+                        "created_at": now_iso
+                    })
+                    self.log(f"Settings page: backup failed: {e}")
+
+            elif action == "restore-backup":
+                self.log("Settings page: restoring from backup...")
+                try:
+                    r = subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "cat", "/var/lib/onionpress/restore-password"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+                    password = r.stdout.strip() if r.returncode == 0 else ""
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "rm", "-f", "/var/lib/onionpress/restore-password"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+
+                    import tempfile
+                    local_zip = os.path.join(tempfile.gettempdir(), "onionpress-restore.zip")
+                    subprocess.run(
+                        ["docker", "cp",
+                         "onionpress-wordpress:/var/lib/onionpress/restore-upload.zip",
+                         local_zip],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=60
+                    )
+                    subprocess.run(
+                        ["docker", "exec", "onionpress-wordpress",
+                         "rm", "-f", "/var/lib/onionpress/restore-upload.zip"],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=5
+                    )
+
+                    if not password or not os.path.exists(local_zip):
+                        _write_result("restore-result.json", {
+                            "success": False, "error": "Missing password or backup file",
+                            "restored_at": now_iso
+                        })
+                    else:
+                        import backup_manager
+                        backup_manager.restore_from_backup(local_zip, password, self.log)
+                        try:
+                            os.remove(local_zip)
+                        except OSError:
+                            pass
+                        # Restart to pick up restored keys
+                        self.run_command("restart")
+                        import time
+                        for _ in range(30):
+                            time.sleep(2)
+                            if self.is_running:
+                                break
+                        self.write_status_to_volume()
+                        new_addr = self.onion_address or ""
+                        _write_result("restore-result.json", {
+                            "success": True, "address": new_addr,
+                            "restored_at": now_iso
+                        })
+                        self.log(f"Settings page: restore complete, address: {new_addr}")
+                except Exception as e:
+                    _write_result("restore-result.json", {
+                        "success": False, "error": str(e),
+                        "restored_at": now_iso
+                    })
+                    self.log(f"Settings page: restore failed: {e}")
+
+            else:
+                self.log(f"Settings page: unknown action '{action}'")
+
+        except Exception as e:
+            self.log(f"Settings page: action '{action}' failed: {e}")
 
     # ── Wayback Queue ──────────────────────────────────────────────
 

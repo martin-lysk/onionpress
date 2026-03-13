@@ -133,6 +133,8 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
     $wayback_queue = $status ? ( $status['wayback_queue_count'] ?? 0 ) : 0;
     $updated_at    = $status ? ( $status['updated_at'] ?? '' ) : '';
     $oh            = $status ? ( $status['onionheaven'] ?? array() ) : array();
+    $load_avg      = $status ? ( $status['load_avg'] ?? array() ) : array();
+    $host_uptime   = $status ? ( $status['host_uptime_seconds'] ?? 0 ) : 0;
 
     // State color
     $state_colors = array(
@@ -158,6 +160,27 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
         } else {
             $uptime_str = "{$minutes}m";
         }
+    }
+
+    // Format host uptime
+    $host_uptime_str = '';
+    if ( $host_uptime > 0 ) {
+        $hd = floor( $host_uptime / 86400 );
+        $hh = floor( ( $host_uptime % 86400 ) / 3600 );
+        $hm = floor( ( $host_uptime % 3600 ) / 60 );
+        if ( $hd > 0 ) {
+            $host_uptime_str = "{$hd}d {$hh}h {$hm}m";
+        } elseif ( $hh > 0 ) {
+            $host_uptime_str = "{$hh}h {$hm}m";
+        } else {
+            $host_uptime_str = "{$hm}m";
+        }
+    }
+
+    // Format load averages
+    $load_str = '';
+    if ( ! empty( $load_avg ) ) {
+        $load_str = implode( ' / ', array_map( function( $v ) { return number_format( $v, 2 ); }, array_slice( $load_avg, 0, 3 ) ) );
     }
 
     // Build daily views SVG graph
@@ -296,6 +319,18 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
             <div class="label">Wayback Queue</div>
             <div class="value" id="op-wayback"><?php echo (int) $wayback_queue; ?> item<?php echo $wayback_queue != 1 ? 's' : ''; ?></div>
         </div>
+        <?php if ( $load_str ) : ?>
+        <div class="status-stat">
+            <div class="label">Load Average</div>
+            <div class="value" id="op-load"><?php echo esc_html( $load_str ); ?></div>
+        </div>
+        <?php endif; ?>
+        <?php if ( $host_uptime_str ) : ?>
+        <div class="status-stat">
+            <div class="label">Host Uptime</div>
+            <div class="value" id="op-host-uptime"><?php echo esc_html( $host_uptime_str ); ?></div>
+        </div>
+        <?php endif; ?>
     </div>
 
     <div class="onion-row" id="op-onion-row" <?php if ( ! $onion_address || strpos( $onion_address, '.onion' ) === false ) echo 'style="display:none"'; ?>>
@@ -495,6 +530,18 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
                     el=document.getElementById('op-oh-hub');if(el)el.textContent=oh.client_hub||'';
                     el=document.getElementById('op-oh-client-status');
                     if(el)el.textContent=!oh.client_enabled?'Disabled':oh.client_registered?'Registered':'Pending';
+                }
+            }
+            // Load average and host uptime
+            if(s.load_avg&&s.load_avg.length){
+                el=document.getElementById('op-load');
+                if(el)el.textContent=s.load_avg.slice(0,3).map(function(v){return v.toFixed(2)}).join(' / ');
+            }
+            if(s.host_uptime_seconds>0){
+                el=document.getElementById('op-host-uptime');
+                if(el){
+                    var hu=s.host_uptime_seconds,hd=Math.floor(hu/86400),hh=Math.floor((hu%86400)/3600),hm=Math.floor((hu%3600)/60);
+                    el.textContent=hd>0?hd+'d '+hh+'h '+hm+'m':hh>0?hh+'h '+hm+'m':hm+'m';
                 }
             }
             el=document.getElementById('op-live-dot');

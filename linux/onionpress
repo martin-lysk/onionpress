@@ -1894,6 +1894,16 @@ except: print('false')
         oh_takeover_containers=${oh_takeover_containers:-0}
     fi
 
+    # System load averages and host uptime (Linux)
+    local load_avg_json="[]"
+    if [ -f /proc/loadavg ]; then
+        load_avg_json=$(awk '{printf "[%s, %s, %s]", $1, $2, $3}' /proc/loadavg 2>/dev/null || echo "[]")
+    fi
+    local host_uptime_seconds=0
+    if [ -f /proc/uptime ]; then
+        host_uptime_seconds=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
+    fi
+
     # Build status.json
     local status_json
     status_json=$(python3 -c "
@@ -1908,6 +1918,8 @@ status = {
     'wayback_queue_count': int(sys.argv[7]),
     'updated_at': sys.argv[8],
     'platform': 'linux',
+    'load_avg': json.loads(sys.argv[17]),
+    'host_uptime_seconds': int(sys.argv[18]),
     'onionheaven': {
         'server_active': sys.argv[9] == 'true',
         'registered_count': int(sys.argv[10]),
@@ -1922,7 +1934,8 @@ status = {
 print(json.dumps(status, indent=2))
 " "$state" "$ONIONPRESS_VERSION" "$onion_addr" "$uptime_seconds" "$bootstrap_pct" "$containers_json" "$wayback_queue" "$now_iso" \
   "$oh_server_active" "$oh_registered_count" "$oh_online_count" "$oh_taken_over_count" "$oh_takeover_containers" \
-  "$oh_client_registered" "$oh_client_hub" "$oh_config_enabled")
+  "$oh_client_registered" "$oh_client_hub" "$oh_config_enabled" \
+  "$load_avg_json" "$host_uptime_seconds")
 
     # Write to shared volume
     echo "$status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
