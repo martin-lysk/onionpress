@@ -2214,8 +2214,12 @@ main() {
             fi
 
             local new_version
-            new_version=$(git -C "$repo_dir" describe --tags --abbrev=0 2>/dev/null || echo "unknown")
-            new_version="${new_version#v}"
+            if [ -f "$repo_dir/VERSION" ]; then
+                new_version=$(cat "$repo_dir/VERSION" | tr -d '[:space:]')
+            else
+                new_version=$(git -C "$repo_dir" describe --tags --abbrev=0 2>/dev/null || echo "unknown")
+                new_version="${new_version#v}"
+            fi
 
             # Re-install files
             log "Installing updated files..."

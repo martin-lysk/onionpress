@@ -153,8 +153,9 @@ $SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS
 
 # Write version file
 VERSION="unknown"
-PLIST="$REPO_DIR/OnionPress.app/Contents/Info.plist"
-if [ -f "$PLIST" ] && command -v python3 >/dev/null 2>&1; then
+if [ -f "$REPO_DIR/VERSION" ]; then
+    VERSION=$(cat "$REPO_DIR/VERSION" | tr -d '[:space:]')
+elif [ -f "$REPO_DIR/OnionPress.app/Contents/Info.plist" ] && command -v python3 >/dev/null 2>&1; then
     VERSION=$(python3 -c "
 import xml.etree.ElementTree as ET, sys
 try:
@@ -164,20 +165,7 @@ try:
         if el.tag == 'key' and el.text == 'CFBundleShortVersionString':
             print(keys[i+1].text); break
 except: print('unknown')
-" "$PLIST" 2>/dev/null || echo "unknown")
-elif [ -d "$REPO_DIR/.git" ] && command -v git >/dev/null 2>&1; then
-    # Fall back to reading plist from git (file may not be checked out on Linux)
-    VERSION=$(git -C "$REPO_DIR" show HEAD:OnionPress.app/Contents/Info.plist 2>/dev/null \
-        | python3 -c "
-import xml.etree.ElementTree as ET, sys
-try:
-    tree = ET.parse(sys.stdin)
-    keys = list(tree.iter())
-    for i, el in enumerate(keys):
-        if el.tag == 'key' and el.text == 'CFBundleShortVersionString':
-            print(keys[i+1].text); break
-except: print('unknown')
-" 2>/dev/null || echo "unknown")
+" "$REPO_DIR/OnionPress.app/Contents/Info.plist" 2>/dev/null || echo "unknown")
 fi
 echo "$VERSION" | $SUDO tee "$INSTALL_DIR/VERSION" > /dev/null
 

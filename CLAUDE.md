@@ -37,13 +37,14 @@
   - `src/install_native_messaging.py` — browser extension support
   - `setup.py` — py2app config (if you add a new local module, add it to `includes` AND the build script's `cp` lines)
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
-- Version must be bumped in **all 5 locations** (Finder shows the MenubarApp plist version in Get Info):
-  1. `src/menubar.py` — `self.version = "X.Y.Z"` (~line 529)
-  2. `src/menubar.py` — `self.log("QUIT BUTTON CLICKED - vX.Y.Z RUNNING")` (~line 3446)
-  3. `setup.py` — `CFBundleVersion` and `CFBundleShortVersionString` (2 values, same line area)
-  4. `OnionPress.app/Contents/Info.plist` — `CFBundleShortVersionString`
-  5. `OnionPress.app/Contents/Resources/MenubarApp/Contents/Info.plist` — `CFBundleShortVersionString` AND `CFBundleVersion` (py2app build artifact; the build script overwrites this, but it must also be updated manually for non-rebuild releases)
-  6. `OnionPress.app/Contents/Resources/docker/tor/onionheaven-server.py` — `ONIONHEAVEN_SERVER_VERSION` (shown in `/status` response)
+- Version must be bumped in **all 7 locations** (Finder shows the MenubarApp plist version in Get Info):
+  1. `VERSION` — single source of truth for version number (used by Linux install/update)
+  2. `src/menubar.py` — `self.version = "X.Y.Z"` (~line 529)
+  3. `src/menubar.py` — `self.log("QUIT BUTTON CLICKED - vX.Y.Z RUNNING")` (~line 3446)
+  4. `setup.py` — `CFBundleVersion` and `CFBundleShortVersionString` (2 values, same line area)
+  5. `OnionPress.app/Contents/Info.plist` — `CFBundleShortVersionString`
+  6. `OnionPress.app/Contents/Resources/MenubarApp/Contents/Info.plist` — `CFBundleShortVersionString` AND `CFBundleVersion` (py2app build artifact; the build script overwrites this, but it must also be updated manually for non-rebuild releases)
+  7. `OnionPress.app/Contents/Resources/docker/tor/onionheaven-server.py` — `ONIONHEAVEN_SERVER_VERSION` (shown in `/status` response)
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
 ## Security
