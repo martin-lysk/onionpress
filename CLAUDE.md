@@ -73,7 +73,7 @@
 
 ## Tor Client Container (`onionpress-tor-client`)
 - **Independent Arti SOCKS proxy** for true external reachability tests (~20-50MB RAM)
-- Same image as `onionpress-tor` (`ghcr.io/brewsterkahle/onionpress-tor:latest`) but runs with `POLLING_ONLY=1` (pure SOCKS, no onion services)
+- Same image as `onionpress-tor` (`ghcr.io/brewsterkahle/onionpress-tor:latest`) but runs with `NO_ONION_SERVICE=1` (pure SOCKS, no onion services)
 - Has its own Tor circuits and must discover `.onion` addresses through the real Tor network — unlike `onionpress-tor` which resolves its own `.onion` locally via self-connection shortcut
 - **No host port mapping** — accessed only via `docker exec` or container-to-container networking (`onionpress-tor-client:9050`)
 - Started early alongside WordPress and DB (no dependencies), giving it 60+ seconds to bootstrap while WordPress warms up

@@ -12,7 +12,7 @@
 #              signals Arti to reload.
 
 # Detect config: onionheaven/takeover-worker containers use arti-onionheaven.toml, main tor uses arti.toml
-if [ "${POLLING_ONLY}" = "1" ] || [ "${TAKEOVER_WORKER}" = "1" ]; then
+if [ "${NO_ONION_SERVICE}" = "1" ] || [ "${TAKEOVER_WORKER}" = "1" ]; then
     ARTI_TOML="/etc/arti/arti-onionheaven.toml"
 else
     ARTI_TOML="/etc/arti/arti.toml"

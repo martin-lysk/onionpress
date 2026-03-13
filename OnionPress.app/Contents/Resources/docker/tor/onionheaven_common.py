@@ -131,7 +131,7 @@ def _sanitize_arti_toml():
     Previous cleanup bugs left orphaned lines like bare [["80", ...]] which
     TOML parses as invalid table headers, blocking ALL config reloads.
     """
-    if os.environ.get("POLLING_ONLY") == "1" or os.environ.get("TAKEOVER_WORKER") == "1":
+    if os.environ.get("NO_ONION_SERVICE") == "1" or os.environ.get("TAKEOVER_WORKER") == "1":
         toml_path = "/etc/arti/arti-onionheaven.toml"
     else:
         toml_path = "/etc/arti/arti.toml"
@@ -264,7 +264,7 @@ def _clean_corrupted_service(nickname):
     arti_keystore = "/var/lib/arti/state/keystore/hss"
 
     # Detect config file
-    if os.environ.get("POLLING_ONLY") == "1" or os.environ.get("TAKEOVER_WORKER") == "1":
+    if os.environ.get("NO_ONION_SERVICE") == "1" or os.environ.get("TAKEOVER_WORKER") == "1":
         arti_toml = "/etc/arti/arti-onionheaven.toml"
     else:
         arti_toml = "/etc/arti/arti.toml"

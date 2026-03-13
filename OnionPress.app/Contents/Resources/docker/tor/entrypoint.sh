@@ -71,11 +71,13 @@ if [ "${TAKEOVER_WORKER}" = "1" ]; then
     exit $?
 fi
 
-# Polling-only mode
-if [ "${POLLING_ONLY}" = "1" ]; then
+# No-onion-service mode (tor-client = SOCKS only, onionheaven = heartbeat/takeover)
+if [ "${NO_ONION_SERVICE}" = "1" ]; then
     if [ "${ONIONHEAVEN}" = "1" ]; then
-        # OnionHeaven mode: Arti with keystore (for takeover) + onionheaven-server + onionheaven-heartbeat + redirect
-        echo "OnionHeaven mode: starting Arti (SOCKS + keystore), registration server, redirect service, and heartbeat monitor..."
+        # OnionHeaven heartbeat/takeover mode: Arti with takeover keystore +
+        # heartbeat monitor + redirect. The API server runs in the main tor
+        # container — this container only handles monitoring and takeover duties.
+        echo "OnionHeaven mode: starting Arti (SOCKS + keystore), redirect service, and heartbeat monitor..."
 
         # Start OnionHeaven redirect service in background (port 8082)
         /onionheaven-redirect.sh &
@@ -83,14 +85,6 @@ if [ "${POLLING_ONLY}" = "1" ]; then
         sleep 1
         if ! kill -0 $ONIONHEAVEN_REDIRECT_PID 2>/dev/null; then
             echo "ERROR: onionheaven-redirect.sh failed to start"
-        fi
-
-        # Start onionheaven registration API server (port 8083)
-        python3 /onionheaven-server.py &
-        ONIONHEAVEN_SERVER_PID=$!
-        sleep 1
-        if ! kill -0 $ONIONHEAVEN_SERVER_PID 2>/dev/null; then
-            echo "ERROR: onionheaven-server.py failed to start"
         fi
 
         # Start Arti with OnionHeaven config (SOCKS + keystore)
@@ -113,8 +107,8 @@ if [ "${POLLING_ONLY}" = "1" ]; then
         wait $ARTI_PID
         exit $?
     else
-        # Plain polling mode: just SOCKS proxy, no onion services
-        echo "Polling-only mode: starting Arti SOCKS proxy (no onion services)..."
+        # SOCKS-only mode (tor-client): just a proxy, no onion services
+        echo "SOCKS-only mode: starting Arti SOCKS proxy (no onion services)..."
         su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml" 2>&1 | tee -a "$ARTI_LOG"
     fi
 fi
@@ -134,14 +128,19 @@ if ! kill -0 $SOCAT_PID 2>/dev/null; then
     echo "ERROR: socat (port 8080 forward) failed to start"
 fi
 
-# OnionHeaven mode: forward port 8083 to onionheaven container's registration API
-# and add port 8083 to the onion service config in arti.toml
+# OnionHeaven API server — runs directly in the tor container so every node
+# can accept registrations without a separate onionheaven container.
+# The onionheaven container (heartbeat monitor + takeover Arti) starts lazily
+# when the first registration arrives.
 if [ "${ONIONHEAVEN}" = "1" ]; then
-    socat TCP-LISTEN:8083,reuseaddr,fork TCP:onionheaven:8083 &
-    SOCAT_API_PID=$!
+    # Ensure data directories exist for the API server's SQLite DB and keys
+    mkdir -p /var/lib/onionpress/onionheaven/keys
+    # Start the registration API server (port 8083) directly in this container
+    python3 /onionheaven-server.py &
+    ONIONHEAVEN_SERVER_PID=$!
     sleep 1
-    if ! kill -0 $SOCAT_API_PID 2>/dev/null; then
-        echo "ERROR: socat (port 8083 forward to onionheaven) failed to start"
+    if ! kill -0 $ONIONHEAVEN_SERVER_PID 2>/dev/null; then
+        echo "ERROR: onionheaven-server.py failed to start"
     fi
     # Add port 8083 to the wordpress onion service proxy_ports
     sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml

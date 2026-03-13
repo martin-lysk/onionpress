@@ -40,9 +40,10 @@ export ONIONPRESS_SOCKS_PORT=9050
 export ONIONPRESS_PROXY_PORT=9077
 
 # Every OnionPress node is an OnionHeaven server (accepts registrations).
-# The server container is moderate overhead (~20-50MB). Takeover containers
-# only spawn on demand when a registered site goes offline.
-# ONIONHEAVEN_HUB=1 enables 10 intro points (auto-detected by farm monitor).
+# The API server runs inside the tor container (always on, ~15MB overhead).
+# The heartbeat monitor + takeover Arti container starts lazily on first
+# registration. Takeover workers spawn on demand when a registered site
+# goes offline. ONIONHEAVEN_HUB=1 enables 10 intro points (auto-detected).
 export ONIONHEAVEN="1"
 export ONIONHEAVEN_HUB="${ONIONHEAVEN_HUB:-0}"
 export ONIONHEAVEN_MAX_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}"
@@ -1295,6 +1296,62 @@ stop_onionheaven_farm() {
     done
 }
 
+# ─── OnionHeaven lazy activation ──────────────────────────────────────
+
+ONIONHEAVEN_WATCHER_PID=""
+
+start_onionheaven_activation_watcher() {
+    # If the onionheaven container is already running (e.g., restart after activation),
+    # just start the farm monitor directly.
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
+        log "OnionHeaven container already running — starting farm monitor"
+        start_onionheaven_farm
+        return
+    fi
+
+    # If the activation flag already exists (previous registration), start immediately.
+    local activate_flag
+    activate_flag=$(docker exec onionpress-tor cat /var/lib/onionpress/onionheaven/activate 2>/dev/null) || true
+    if [ -n "$activate_flag" ]; then
+        log "OnionHeaven activation flag found — starting heartbeat container"
+        _activate_onionheaven
+        return
+    fi
+
+    log "OnionHeaven API server running in tor container — waiting for first registration to activate heartbeat monitor"
+    _onionheaven_activation_watcher &
+    ONIONHEAVEN_WATCHER_PID=$!
+}
+
+_onionheaven_activation_watcher() {
+    # Poll for the activation flag file every 30s. Written by onionheaven-server.py
+    # on the first /register call (inside the tor container, on the shared volume).
+    while true; do
+        sleep 30
+        local flag
+        flag=$(docker exec onionpress-tor cat /var/lib/onionpress/onionheaven/activate 2>/dev/null) || true
+        if [ -n "$flag" ]; then
+            log "OnionHeaven activation flag detected — starting heartbeat container"
+            _activate_onionheaven
+            return
+        fi
+    done
+}
+
+_activate_onionheaven() {
+    cd "$DOCKER_DIR"
+    docker compose --profile onionheaven up -d >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start OnionHeaven container"
+    start_onionheaven_farm
+}
+
+stop_onionheaven_activation_watcher() {
+    if [ -n "$ONIONHEAVEN_WATCHER_PID" ] && kill -0 "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null; then
+        kill "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null || true
+        wait "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null || true
+        ONIONHEAVEN_WATCHER_PID=""
+    fi
+}
+
 # ─── Container management ────────────────────────────────────────────
 
 start_containers() {
@@ -1425,12 +1482,10 @@ start_containers() {
         fi
     fi
 
-    # Start OnionHeaven server container (every node is an OH server).
-    # Takeover containers and hub mode (10 intro points) are automatic via farm monitor.
-    log "Starting OnionHeaven server container..."
-    docker compose --profile onionheaven up -d >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start OnionHeaven container"
-    # Start farm monitor for on-demand takeover containers (0 initial workers)
-    start_onionheaven_farm
+    # OnionHeaven: the API server runs inside the tor container (always on).
+    # The heartbeat monitor + takeover Arti container starts lazily when the
+    # first registration arrives (signaled by an activation flag file).
+    start_onionheaven_activation_watcher
 
     # Install plugins and mu-plugins
     install_ia_plugin
@@ -1444,6 +1499,7 @@ start_containers() {
 
 stop_containers() {
     log "Stopping OnionPress containers..."
+    stop_onionheaven_activation_watcher
     stop_onionheaven_farm
     cd "$DOCKER_DIR"
     docker compose down 2>&1 | tee -a "$LOG_FILE"

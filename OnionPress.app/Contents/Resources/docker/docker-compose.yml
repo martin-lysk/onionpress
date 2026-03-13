@@ -76,7 +76,7 @@ services:
         hard: 10000
     environment:
       - TZ=${TZ:-UTC}
-      - POLLING_ONLY=1
+      - NO_ONION_SERVICE=1
     volumes:
       - arti-state-client:/var/lib/arti/
     restart: unless-stopped
@@ -93,7 +93,7 @@ services:
         hard: 10000
     environment:
       - TZ=${TZ:-UTC}
-      - POLLING_ONLY=1
+      - NO_ONION_SERVICE=1
       - ONIONHEAVEN=${ONIONHEAVEN:-0}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
     volumes:

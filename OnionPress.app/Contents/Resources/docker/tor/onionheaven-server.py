@@ -31,7 +31,7 @@ from onion_auth import verify_payload
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_arti,
-    KEYS_DIR, PROPAGATION_DELAY,
+    KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR,
 )
 
 # ---------------------------------------------------------------------------
@@ -515,6 +515,17 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         # Release any active takeover for this content_address
         release_function(conn, content_address, healthcheck_address, force=True)
         conn.close()
+
+        # Write activation flag on first registration — signals the host to start
+        # the heartbeat monitor + takeover Arti container (lazy activation).
+        activate_path = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
+        if not os.path.exists(activate_path):
+            try:
+                with open(activate_path, "w") as f:
+                    f.write(now + "\n")
+                log("First registration received — activation flag written")
+            except OSError as e:
+                log(f"WARNING: could not write activation flag: {e}")
 
         self._send_json(200, {
             "registered": True,
