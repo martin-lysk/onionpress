@@ -591,6 +591,27 @@ function onionpress_settings_fields() {
             'type'        => 'text',
             'placeholder' => 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion',
         ),
+        'ONIONHEAVEN_MAX_SERVICES' => array(
+            'label'       => 'Max Services per Takeover Worker',
+            'description' => 'Maximum onion services each takeover container can handle. Lower values use more containers but are more reliable.',
+            'type'        => 'text',
+            'placeholder' => '50',
+            'show_when'   => 'onionheaven_server',
+        ),
+        'ONIONHEAVEN_PROPAGATION_DELAY' => array(
+            'label'       => 'Takeover Delay (seconds)',
+            'description' => 'Seconds after last heartbeat before triggering takeover. Default 180 (~3 missed heartbeats).',
+            'type'        => 'text',
+            'placeholder' => '180',
+            'show_when'   => 'onionheaven_server',
+        ),
+        'ONIONHEAVEN_HUB_THRESHOLD' => array(
+            'label'       => 'Hub Auto-Promote Threshold',
+            'description' => 'Number of registered sites before auto-promoting to hub mode (10 intro points). Default 5.',
+            'type'        => 'text',
+            'placeholder' => '5',
+            'show_when'   => 'onionheaven_server',
+        ),
     );
 }
 
@@ -656,6 +677,7 @@ function onionpress_settings_page() {
     </style>
     <?php
     $current_platform = isset( $status['platform'] ) ? $status['platform'] : 'macos';
+    $oh_server_active = ! empty( $status['onionheaven']['server_active'] );
     ?>
     <div class="wrap">
         <h1>OnionPress Settings</h1>
@@ -676,6 +698,10 @@ function onionpress_settings_page() {
                 <?php
                 // Skip fields restricted to a different platform
                 if ( ! empty( $field['platform'] ) && $field['platform'] !== $current_platform ) {
+                    continue;
+                }
+                // Skip fields that require OnionHeaven server to be active
+                if ( ! empty( $field['show_when'] ) && $field['show_when'] === 'onionheaven_server' && ! $oh_server_active ) {
                     continue;
                 }
                 // Use config_key if specified (for renamed settings like LAUNCH_ON_LOGIN -> START_ON_BOOT)

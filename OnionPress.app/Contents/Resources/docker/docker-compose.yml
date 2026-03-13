@@ -97,6 +97,8 @@ services:
       - POLLING_ONLY=1
       - ONIONHEAVEN=${ONIONHEAVEN:-0}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
+      - TOR_PROPAGATION_DELAY=${ONIONHEAVEN_PROPAGATION_DELAY:-180}
+      - ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD=${ONIONHEAVEN_MAX_SERVICES:-50}
     volumes:
       - arti-state-polling:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress

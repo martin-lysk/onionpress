@@ -42,9 +42,12 @@ export ONIONPRESS_PROXY_PORT=9077
 # Every OnionPress node is an OnionHeaven server (accepts registrations).
 # The server container is moderate overhead (~20-50MB). Takeover containers
 # only spawn on demand when a registered site goes offline.
-# ONIONHEAVEN_HUB=1 enables 10 intro points (for the high-traffic hub).
+# ONIONHEAVEN_HUB=1 enables 10 intro points (auto-detected by farm monitor).
 export ONIONHEAVEN="1"
 export ONIONHEAVEN_HUB="${ONIONHEAVEN_HUB:-0}"
+export ONIONHEAVEN_MAX_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}"
+export ONIONHEAVEN_PROPAGATION_DELAY="${ONIONHEAVEN_PROPAGATION_DELAY:-180}"
+export ONIONHEAVEN_HUB_THRESHOLD="${ONIONHEAVEN_HUB_THRESHOLD:-5}"
 
 # Read config
 CLOUDFLARE_TUNNEL_TOKEN=""
@@ -60,6 +63,16 @@ START_ON_BOOT=yes
 REGISTER_WITH_ONIONHEAVEN=yes
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 EOF
+fi
+
+# Read OnionHeaven settings from config (override defaults)
+if [ -f "$DATA_DIR/config" ]; then
+    _val=$(grep "^ONIONHEAVEN_MAX_SERVICES=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    [ -n "$_val" ] && export ONIONHEAVEN_MAX_SERVICES="$_val"
+    _val=$(grep "^ONIONHEAVEN_PROPAGATION_DELAY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    [ -n "$_val" ] && export ONIONHEAVEN_PROPAGATION_DELAY="$_val"
+    _val=$(grep "^ONIONHEAVEN_HUB_THRESHOLD=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    [ -n "$_val" ] && export ONIONHEAVEN_HUB_THRESHOLD="$_val"
 fi
 
 # ─── Helper functions ───────────────────────────────────────────────
@@ -1171,7 +1184,7 @@ _start_takeover_worker() {
         -e TZ="${TZ:-UTC}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
-        -e MAX_TAKEOVER_SERVICES=50 \
+        -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}" \
         -v "${vol}:/var/lib/arti/" \
         -v "onionpress-persistent-data:/var/lib/onionpress" \
         --restart unless-stopped \
@@ -1197,9 +1210,9 @@ _onionheaven_farm_monitor() {
     local db="/var/lib/onionpress/onionheaven/registry.db"
     local hub_promoted=false
 
-    # Auto-detect hub mode: if we have 5+ registered sites, bump intro points
+    # Auto-detect hub mode: if we have enough registered sites, bump intro points
     # by restarting the tor container with ONIONHEAVEN_HUB=1. Only done once.
-    local HUB_THRESHOLD=5
+    local HUB_THRESHOLD="${ONIONHEAVEN_HUB_THRESHOLD:-5}"
 
     while true; do
         sleep 30
