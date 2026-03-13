@@ -8,8 +8,15 @@
 set -e
 
 INSTALL_DIR="/opt/onionpress"
-DATA_DIR="$HOME/.onionpress"
 REPO_URL="https://github.com/brewsterkahle/onionpress"
+
+# Resolve real user's home dir (not /root when run via sudo)
+if [ -n "$SUDO_USER" ]; then
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_HOME="$HOME"
+fi
+DATA_DIR="$REAL_HOME/.onionpress"
 
 echo ""
 echo "  OnionPress Installer for Linux"
@@ -193,6 +200,16 @@ echo ""
 echo "  Installing systemd service..."
 
 $SUDO cp "$REPO_DIR/linux/onionpress.service" /etc/systemd/system/onionpress.service
+
+# Set the service to run as the real user (not root) so $HOME resolves correctly
+REAL_USER="${SUDO_USER:-$(whoami)}"
+if [ "$REAL_USER" != "root" ]; then
+    # Insert User= and HOME= after the [Service] line
+    $SUDO sed -i "/^\[Service\]/a User=$REAL_USER\nEnvironment=HOME=$REAL_HOME" \
+        /etc/systemd/system/onionpress.service
+    echo "  Service will run as user: $REAL_USER"
+fi
+
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable onionpress
 echo "  Systemd service installed and enabled (starts on boot)"
