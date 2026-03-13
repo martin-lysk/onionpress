@@ -15,7 +15,7 @@ Endpoints:
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
-ONIONHEAVEN_SERVER_VERSION = "2.4.30"
+ONIONHEAVEN_SERVER_VERSION = "2.4.29"
 
 import base64
 import hashlib
@@ -667,10 +667,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             ).fetchone()
 
         if not entry:
-            # Debug: log the failed lookup so we can diagnose mismatched addresses
-            count = conn.execute("SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL").fetchone()[0]
-            log(f"/online 404: content={content_address}, hc={healthcheck_address}, "
-                f"registry has {count} active entries")
             conn.close()
             self._send_json(404, {"error": "Entry not found"})
             return

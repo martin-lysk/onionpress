@@ -31,6 +31,18 @@ ADDRESS_PREFIX=op2
 #
 INSTALL_IA_PLUGIN=yes
 
+# WP Statistics Plugin
+# Default: "yes" (automatically installs and activates the plugin)
+#
+# WP Statistics provides privacy-friendly traffic analytics for your site.
+# All data stays local — no external tracking services or GeoIP lookups.
+# Traffic stats are displayed on the /onionpress-status page.
+#
+# Set to "no" to disable automatic installation of this plugin.
+# More info: https://wordpress.org/plugins/wp-statistics/
+#
+INSTALL_WP_STATISTICS=yes
+
 # Update Docker Images on Launch
 # Default: "yes" (automatically update on launch)
 #

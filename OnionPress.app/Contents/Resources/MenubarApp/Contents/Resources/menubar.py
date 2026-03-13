@@ -12,7 +12,7 @@ import time
 import json
 import plistlib
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 import AppKit
 import signal
 import socket
@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.28"
+        self.version = "2.4.29"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -720,9 +720,16 @@ class OnionPressApp(rumps.App):
         self._stopping = False                 # True while Stop button is in progress
         self._run_generation = 0               # Incremented on stop/start; stale threads check this
 
+        # Wayback queue state
+        self._wayback_queue = []
+        self._wayback_queue_lock = threading.Lock()
+        self._wayback_last_drain = 0
+        self._wayback_queue_item = rumps.MenuItem("", callback=None)
+
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
+        self.local_site_item = rumps.MenuItem("Open Local Site", callback=self.open_local_site)
         self.onionheaven_alert_item = rumps.MenuItem("OnionHeaven Alerts", callback=self.view_onionheaven_alerts)
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
@@ -731,6 +738,7 @@ class OnionPressApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
             self.browser_menu_item,
+            self.local_site_item,
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
@@ -1885,6 +1893,15 @@ class OnionPressApp(rumps.App):
                 if self.is_ready:
                     self.poll_onionheaven_messages()
 
+                # Poll and drain Wayback queue
+                self.poll_wayback_queue()
+                if self.is_ready:
+                    self.drain_wayback_queue()
+
+                # Write status data and poll for config updates from settings page
+                self._write_status_json()
+                self._poll_config_updates()
+
                 # OnionHeaven: detect onionheaven mode (one-shot)
                 if self.is_ready and not self._onionheaven_checked:
                     self._onionheaven_checked = True
@@ -2051,6 +2068,19 @@ class OnionPressApp(rumps.App):
             if self._quitting:
                 return  # Don't update icon/menu during shutdown
 
+            # Show/hide Wayback queue status
+            with self._wayback_queue_lock:
+                wq_count = len(self._wayback_queue)
+            if wq_count > 0:
+                self._wayback_queue_item.title = f"Pending Wayback Saves ({wq_count})"
+                if self._wayback_queue_item.title not in self.menu:
+                    self.menu.insert_after("Copy Onion Address", self._wayback_queue_item)
+            else:
+                # Remove any existing queue item (title may have changed)
+                for key in list(self.menu.keys()):
+                    if isinstance(key, str) and key.startswith("Pending Wayback Saves"):
+                        del self.menu[key]
+
             if state == "available":
                 self.icon = self.icon_running
                 if self.is_onionheaven:
@@ -2063,34 +2093,34 @@ class OnionPressApp(rumps.App):
                 self.menu["Backup..."].set_callback(self.backup)
                 self.menu["Restore..."].set_callback(self.restore)
                 self.update_browser_menu_title()
-            elif state == "starting":
-                self.icon = self.icon_starting
-                pct = self._last_bootstrap_pct
-                if pct > 0:
-                    self.menu["Starting..."].title = f"Status: Connecting to Tor ({pct}%)..."
-                else:
-                    self.menu["Starting..."].title = "Status: Starting up, please wait..."
+                # Purple: browser opens .onion, local site available as secondary
+                self.browser_menu_item.set_callback(self.open_tor_browser)
+                self.local_site_item.title = f"Open Local Site ({self.local_url})"
+                self.local_site_item.set_callback(self.open_local_site)
+            elif state in ("starting", "offline", "stuck"):
+                if state == "starting":
+                    self.icon = self.icon_starting
+                    pct = self._last_bootstrap_pct
+                    if pct > 0:
+                        self.menu["Starting..."].title = f"Status: Connecting to Tor ({pct}%)..."
+                    else:
+                        self.menu["Starting..."].title = "Status: Starting up, please wait..."
+                elif state == "offline":
+                    self.icon = self.icon_stopped
+                    self.menu["Starting..."].title = "Status: Offline — no internet connection"
+                else:  # stuck
+                    self.icon = self.icon_starting
+                    self.menu["Starting..."].title = "Status: Slow to connect — try Restart"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
                 self.menu["Backup..."].set_callback(self.backup)
                 self.menu["Restore..."].set_callback(self.restore)
-            elif state == "offline":
-                self.icon = self.icon_stopped
-                self.menu["Starting..."].title = "Status: Offline — no internet connection"
-                self.menu["Start"].set_callback(None)
-                self.menu["Stop"].set_callback(self.stop_service)
-                self.menu["Restart"].set_callback(self.restart_service)
-                self.menu["Backup..."].set_callback(self.backup)
-                self.menu["Restore..."].set_callback(self.restore)
-            elif state == "stuck":
-                self.icon = self.icon_starting
-                self.menu["Starting..."].title = "Status: Slow to connect — try Restart"
-                self.menu["Start"].set_callback(None)
-                self.menu["Stop"].set_callback(self.stop_service)
-                self.menu["Restart"].set_callback(self.restart_service)
-                self.menu["Backup..."].set_callback(self.backup)
-                self.menu["Restore..."].set_callback(self.restore)
+                # Gray/Yellow: browser opens local site since .onion isn't reachable
+                self.browser_menu_item.title = f"Open Local Site ({self.local_url})"
+                self.browser_menu_item.set_callback(self.open_local_site)
+                self.local_site_item.title = ""
+                self.local_site_item.set_callback(None)
             else:
                 # Stopped
                 self.icon = self.icon_stopped
@@ -2103,6 +2133,10 @@ class OnionPressApp(rumps.App):
                 self.menu["Restart"].set_callback(None)
                 self.menu["Backup..."].set_callback(None)
                 self.menu["Restore..."].set_callback(None)
+                # Stopped: disable browser items
+                self.browser_menu_item.set_callback(None)
+                self.local_site_item.title = ""
+                self.local_site_item.set_callback(None)
 
         # Execute on main thread
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(do_update)
@@ -2455,6 +2489,11 @@ class OnionPressApp(rumps.App):
         thread = threading.Thread(target=checker, daemon=True)
         thread.start()
 
+    @property
+    def local_url(self):
+        """The local URL for accessing WordPress."""
+        return f"http://localhost:{self.wp_port}"
+
     @rumps.clicked("Copy Onion Address")
     def copy_address(self, _):
         """Copy onion address to clipboard"""
@@ -2466,6 +2505,12 @@ class OnionPressApp(rumps.App):
             )
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
+
+    def open_local_site(self, _):
+        """Open the local WordPress site in the default browser"""
+        url = self.local_url
+        subprocess.run(["open", url])
+        self.log(f"Opened local site: {url}")
 
     def monitor_tor_browser_install(self):
         """Monitor for Tor Browser installation and offer to open site when detected"""
@@ -4422,11 +4467,235 @@ License: AGPL v3"""
         # Run uninstall in background thread to avoid blocking UI
         threading.Thread(target=do_uninstall, daemon=True).start()
 
+    # ── Wayback Queue ──────────────────────────────────────────────
+
+    def poll_wayback_queue(self):
+        """Read the Wayback queue from the WordPress container's shared volume."""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "cat", "/var/lib/onionpress/wayback-queue.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                queue = json.loads(result.stdout.strip())
+                with self._wayback_queue_lock:
+                    self._wayback_queue = queue if isinstance(queue, list) else []
+            else:
+                with self._wayback_queue_lock:
+                    self._wayback_queue = []
+        except Exception:
+            pass  # Container may not be running
+
+    def drain_wayback_queue(self):
+        """Process one item from the Wayback queue (rate-limited to 1 per 30s)."""
+        now = time.time()
+        if now - self._wayback_last_drain < 30:
+            return
+
+        with self._wayback_queue_lock:
+            if not self._wayback_queue:
+                return
+            item = self._wayback_queue[0]
+
+        url = item.get("url", "")
+        if not url:
+            self._remove_wayback_queue_item(url)
+            return
+
+        self._wayback_last_drain = now
+        self.log(f"Wayback queue: archiving {url}")
+
+        try:
+            # Try clearnet endpoint first (faster)
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "30",
+                 "--data-urlencode", f"url={url}",
+                 "https://web.archive.org/save"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=45
+            )
+            http_code = result.stdout.strip()
+
+            if http_code and 200 <= int(http_code) < 500:
+                self.log(f"Wayback queue: archived {url} (HTTP {http_code})")
+                self._remove_wayback_queue_item(url)
+                return
+        except Exception as e:
+            self.log(f"Wayback queue: clearnet failed for {url}: {e}")
+
+        try:
+            # Fall back to .onion endpoint via tor container
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-tor",
+                 "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "30",
+                 "--socks5-hostname", "127.0.0.1:9050",
+                 "--data-urlencode", f"url={url}",
+                 "http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=45
+            )
+            http_code = result.stdout.strip()
+
+            if http_code and 200 <= int(http_code) < 500:
+                self.log(f"Wayback queue: archived {url} via Tor (HTTP {http_code})")
+                self._remove_wayback_queue_item(url)
+            else:
+                self.log(f"Wayback queue: failed for {url} (HTTP {http_code})")
+        except Exception as e:
+            self.log(f"Wayback queue: tor endpoint failed for {url}: {e}")
+
+    def _remove_wayback_queue_item(self, url):
+        """Remove a URL from the Wayback queue in the container."""
+        with self._wayback_queue_lock:
+            self._wayback_queue = [i for i in self._wayback_queue if i.get("url") != url]
+            updated = json.dumps(self._wayback_queue)
+        try:
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/wayback-queue.json"],
+                input=updated, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+        except Exception:
+            pass
+
+    # ── Status & Config Bridge ─────────────────────────────────────
+
+    def _write_status_json(self):
+        """Write status.json and config-current.json to the WordPress shared volume."""
+        try:
+            state = self.display_state
+            # Map display_state to status page states
+            state_map = {
+                "available": "running",
+                "starting": "starting",
+                "stopped": "stopped",
+                "offline": "offline",
+                "stuck": "stuck",
+            }
+            mapped_state = state_map.get(state, state)
+
+            # Get container statuses from last status check
+            container_statuses = {}
+            try:
+                status_json = self.run_command("status")
+                if status_json and status_json != "[]":
+                    statuses = json.loads(status_json)
+                    for s in statuses:
+                        name = s.get("Names", "unknown")
+                        cstate = s.get("State", "unknown").lower()
+                        container_statuses[name] = cstate
+            except Exception:
+                pass
+
+            uptime = int(time.time() - self.startup_time) if self.is_running else 0
+            wayback_count = 0
+            with self._wayback_queue_lock:
+                wayback_count = len(self._wayback_queue)
+
+            status_data = {
+                "version": self.version,
+                "state": mapped_state,
+                "onion_address": self.onion_address if self.onion_address not in ["Starting...", "Not running", "Generating address..."] else "",
+                "uptime_seconds": uptime,
+                "bootstrap_pct": self._last_bootstrap_pct,
+                "containers": container_statuses,
+                "wayback_queue_count": wayback_count,
+                "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+
+            status_json_str = json.dumps(status_data, indent=2)
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/status.json"],
+                input=status_json_str, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+
+            # Write config-current.json with current config values
+            config_keys = [
+                "ADDRESS_PREFIX", "INSTALL_IA_PLUGIN", "INSTALL_WP_STATISTICS",
+                "UPDATE_ON_LAUNCH", "LAUNCH_ON_LOGIN", "PREVENT_SLEEP",
+                "VM_MEMORY", "CLOUDFLARE_TUNNEL_TOKEN", "REGISTER_WITH_ONIONHEAVEN",
+            ]
+            config_data = {}
+            for key in config_keys:
+                config_data[key] = self._read_config_value(key, "")
+
+            config_json_str = json.dumps(config_data, indent=2)
+            subprocess.run(
+                ["docker", "exec", "-i", "onionpress-wordpress",
+                 "tee", "/var/lib/onionpress/config-current.json"],
+                input=config_json_str, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
+            )
+        except Exception:
+            pass  # Container may not be running
+
+    def _poll_config_updates(self):
+        """Check for config updates written by the settings page and merge them."""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "cat", "/var/lib/onionpress/config-updates.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return  # No updates pending
+
+            updates = json.loads(result.stdout.strip())
+            if not isinstance(updates, dict) or not updates:
+                return
+
+            self.log(f"Config update received from settings page: {list(updates.keys())}")
+
+            # Merge each key into ~/.onionpress/config
+            for key, value in updates.items():
+                self.write_config_value(key, value)
+
+            # Delete the updates file
+            subprocess.run(
+                ["docker", "exec", "onionpress-wordpress",
+                 "rm", "-f", "/var/lib/onionpress/config-updates.json"],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5
+            )
+
+            # Update in-memory state for settings that affect runtime behavior
+            if "CLOUDFLARE_TUNNEL_TOKEN" in updates:
+                self.cloudflare_tunnel_enabled = bool(updates["CLOUDFLARE_TUNNEL_TOKEN"])
+            if "PREVENT_SLEEP" in updates:
+                self.stop_caffeinate()
+                self.start_caffeinate()
+
+            self.log("Config updates merged successfully")
+
+        except json.JSONDecodeError:
+            self.log("WARNING: Invalid JSON in config-updates.json")
+            # Delete the bad file
+            try:
+                subprocess.run(
+                    ["docker", "exec", "onionpress-wordpress",
+                     "rm", "-f", "/var/lib/onionpress/config-updates.json"],
+                    capture_output=True, text=True, encoding='utf-8', errors='replace',
+                    timeout=5
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass  # Container may not be running
+
     @rumps.clicked("Quit")
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.28 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.29 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 

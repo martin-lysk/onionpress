@@ -3,10 +3,6 @@ services:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
     container_name: onionpress-tor
-    logging:
-      options:
-        max-size: "10m"
-        max-file: "3"
     ulimits:
       nofile:
         soft: 10000
@@ -15,7 +11,6 @@ services:
       - TZ=${TZ:-UTC}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
       - ONIONHEAVEN=${ONIONHEAVEN:-0}
-      - ONIONHEAVEN_HUB=${ONIONHEAVEN_HUB:-0}
     volumes:
       - arti-state:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress
@@ -75,10 +70,6 @@ services:
     image: ghcr.io/brewsterkahle/onionpress-tor:latest
     build: ./tor
     container_name: onionpress-tor-client
-    logging:
-      options:
-        max-size: "10m"
-        max-file: "3"
     ulimits:
       nofile:
         soft: 10000
@@ -96,10 +87,6 @@ services:
     image: ${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}
     build: ./tor
     container_name: onionheaven
-    logging:
-      options:
-        max-size: "10m"
-        max-file: "3"
     ulimits:
       nofile:
         soft: 10000
@@ -109,8 +96,6 @@ services:
       - POLLING_ONLY=1
       - ONIONHEAVEN=${ONIONHEAVEN:-0}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
-      - TOR_PROPAGATION_DELAY=${ONIONHEAVEN_PROPAGATION_DELAY:-180}
-      - ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD=${ONIONHEAVEN_MAX_SERVICES:-50}
     volumes:
       - arti-state-polling:/var/lib/arti/
       - onionpress-data:/var/lib/onionpress

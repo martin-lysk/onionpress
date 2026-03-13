@@ -1,7 +1,6 @@
 FROM wordpress:latest
 
-# Install python3 (used by settings page for base32 key encoding) and wp-cli
-RUN apt-get update -qq && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+# Install wp-cli for WordPress management (setup guard, plugin activation, etc.)
 RUN curl -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     && chmod +x /usr/local/bin/wp
 

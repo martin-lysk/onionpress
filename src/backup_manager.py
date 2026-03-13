@@ -283,9 +283,8 @@ def restore_from_backup(zip_path, password, log_func):
                     if line.strip().startswith('ADDRESS_PREFIX='):
                         old_prefix = line.strip().split('=', 1)[1]
                         if not addr_base.startswith(old_prefix):
-                            new_prefix = addr_base[:len(old_prefix)] if len(old_prefix) >= 2 else addr_base[:3]
-                            lines[i] = f'ADDRESS_PREFIX={new_prefix}\n'
-                            log_func(f"Restore: updated ADDRESS_PREFIX to {new_prefix}")
+                            lines[i] = f'ADDRESS_PREFIX={addr_base[:3]}\n'
+                            log_func(f"Restore: updated ADDRESS_PREFIX to {addr_base[:3]}")
                         found = True
                         break
                 if not found:
