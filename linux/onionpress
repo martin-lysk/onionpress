@@ -1890,7 +1890,7 @@ except: print('false')
         oh_registered_count=${oh_registered_count:-0}
         oh_online_count=${oh_online_count:-0}
         oh_taken_over_count=${oh_taken_over_count:-0}
-        oh_takeover_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -cE '^onionheaven-takeover-[0-9]+$' || echo 0)
+        oh_takeover_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -cE '^onionheaven-takeover-[0-9]+$' 2>/dev/null || true)
         oh_takeover_containers=${oh_takeover_containers:-0}
     fi
 
