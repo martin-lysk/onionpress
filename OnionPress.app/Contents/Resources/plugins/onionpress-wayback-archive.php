@@ -3,7 +3,7 @@
  * Plugin Name: OnionPress Wayback Archive
  * Description: Automatically archives published posts and the homepage to the
  *              Internet Archive Wayback Machine.
- * Version:     1.2
+ * Version:     1.3
  * Network:     true
  */
 
@@ -122,7 +122,14 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     $auth = onionpress_wayback_auth_header();
 
     $failed_urls = array();
+    $first = true;
     foreach ( $urls as $url ) {
+        // Small delay between requests to avoid SPN rate limits (429)
+        if ( ! $first ) {
+            sleep( 2 );
+        }
+        $first = false;
+
         if ( ! onionpress_wayback_submit( $endpoints, $url, $auth ) ) {
             $failed_urls[] = $url;
         }
@@ -204,9 +211,21 @@ function onionpress_wayback_submit( $endpoints, $url, $auth = '' ) {
             continue;
         }
 
-        // Any non-error response means the endpoint accepted it
-        if ( $http_code >= 200 && $http_code < 500 ) {
+        // Rate-limited — do NOT treat as success; queue for retry
+        if ( $http_code === 429 ) {
+            error_log( '[OnionPress Wayback] Rate-limited (HTTP 429) for ' . $url . ' — will queue for retry' );
+            return false;
+        }
+
+        // Any 2xx/3xx response means the endpoint accepted it
+        if ( $http_code >= 200 && $http_code < 400 ) {
             return true; // Success
+        }
+
+        // 4xx client error (other than auth/rate-limit) — log and try next
+        if ( $http_code >= 400 && $http_code < 500 ) {
+            error_log( '[OnionPress Wayback] Client error (HTTP ' . $http_code . ') for ' . $url . ', trying next endpoint' );
+            continue;
         }
 
         // 5xx: server error, try next endpoint
@@ -268,16 +287,159 @@ function onionpress_wayback_queue_urls( $urls ) {
 }
 
 /**
- * Queue post path for later archiving (when onion address becomes available).
+ * Queue a post path for later archiving (when onion address becomes available).
  *
- * Builds .onion URLs from the path once the address file appears.
- * For now, stores paths so the menubar can construct full URLs later.
+ * Stores the path; the wp_cron drain handler will resolve it to full .onion
+ * (and clearnet) URLs once the onion_address file appears.
  */
 function onionpress_wayback_queue_path( $path ) {
-    // We can't build the full .onion URL yet, so queue paths.
-    // The menubar drainer will skip items without full URLs and
-    // the next poll_wayback_queue after Tor is ready will resolve them.
-    // For simplicity, just queue placeholder URLs — the next publish
-    // after Tor is ready will archive everything properly.
-    error_log( '[OnionPress Wayback] Onion address not available — post at ' . $path . ' will be archived on next publish after Tor is ready' );
+    $queue_file = '/var/lib/onionpress/wayback-queue.json';
+
+    $queue = array();
+    if ( file_exists( $queue_file ) ) {
+        $data = @file_get_contents( $queue_file );
+        if ( $data ) {
+            $decoded = json_decode( $data, true );
+            if ( is_array( $decoded ) ) {
+                $queue = $decoded;
+            }
+        }
+    }
+
+    // Check for duplicate path
+    foreach ( $queue as $item ) {
+        if ( isset( $item['path'] ) && $item['path'] === $path ) {
+            return; // Already queued
+        }
+    }
+
+    $queue[] = array( 'path' => $path, 'queued_at' => gmdate( 'Y-m-d\TH:i:s\Z' ) );
+    @file_put_contents( $queue_file, json_encode( $queue ) );
+    error_log( '[OnionPress Wayback] Queued path ' . $path . ' for archiving once Tor is ready' );
 }
+
+// ── wp_cron queue drain ──────────────────────────────────────────────
+
+/**
+ * Register a 5-minute cron schedule for queue draining.
+ */
+add_filter( 'cron_schedules', function ( $schedules ) {
+    $schedules['onionpress_every_5_minutes'] = array(
+        'interval' => 300,
+        'display'  => 'Every 5 minutes',
+    );
+    return $schedules;
+} );
+
+/**
+ * Ensure the drain event is scheduled.
+ */
+add_action( 'init', function () {
+    if ( ! wp_next_scheduled( 'onionpress_drain_wayback_queue' ) ) {
+        wp_schedule_event( time(), 'onionpress_every_5_minutes', 'onionpress_drain_wayback_queue' );
+    }
+} );
+
+/**
+ * Drain one item from the Wayback queue.
+ *
+ * Processes one URL (or path) per run to stay within SPN rate limits.
+ * Runs every 5 minutes via wp_cron — works on both macOS and Linux.
+ */
+add_action( 'onionpress_drain_wayback_queue', function () {
+    $queue_file = '/var/lib/onionpress/wayback-queue.json';
+
+    if ( ! file_exists( $queue_file ) ) {
+        return;
+    }
+
+    $data = @file_get_contents( $queue_file );
+    if ( ! $data ) {
+        return;
+    }
+
+    $queue = json_decode( $data, true );
+    if ( ! is_array( $queue ) || empty( $queue ) ) {
+        return;
+    }
+
+    $item = $queue[0];
+
+    // Handle path-only items (queued before onion address was available)
+    if ( isset( $item['path'] ) && ! isset( $item['url'] ) ) {
+        $onion_file = '/var/lib/onionpress/onion_address';
+        if ( ! file_exists( $onion_file ) ) {
+            return; // Still no onion address — try again next cycle
+        }
+        $onion_addr = trim( file_get_contents( $onion_file ) );
+        if ( empty( $onion_addr ) ) {
+            return;
+        }
+
+        // Resolve path to full URLs and re-queue them
+        $path = $item['path'];
+        $urls = array( 'http://' . $onion_addr . $path );
+
+        // Also queue homepage and feed if the path isn't already one of them
+        if ( $path !== '/' ) {
+            $urls[] = 'http://' . $onion_addr . '/';
+        }
+        $urls[] = 'http://' . $onion_addr . '/feed/';
+
+        // Add clearnet URLs if available
+        $clearnet_file = '/var/lib/onionpress/clearnet_domain';
+        if ( file_exists( $clearnet_file ) ) {
+            $clearnet_domain = trim( file_get_contents( $clearnet_file ) );
+            if ( ! empty( $clearnet_domain ) ) {
+                $urls[] = 'https://' . $clearnet_domain . $path;
+                if ( $path !== '/' ) {
+                    $urls[] = 'https://' . $clearnet_domain . '/';
+                }
+                $urls[] = 'https://' . $clearnet_domain . '/feed/';
+            }
+        }
+
+        // Remove the path item, queue the resolved URLs
+        array_shift( $queue );
+        @file_put_contents( $queue_file, json_encode( $queue ) );
+        onionpress_wayback_queue_urls( array_unique( $urls ) );
+
+        error_log( '[OnionPress Wayback] Resolved path ' . $path . ' to ' . count( $urls ) . ' URL(s)' );
+        return;
+    }
+
+    // Handle normal URL items
+    $url = isset( $item['url'] ) ? $item['url'] : '';
+    if ( empty( $url ) ) {
+        // Invalid item — remove and move on
+        array_shift( $queue );
+        @file_put_contents( $queue_file, json_encode( $queue ) );
+        return;
+    }
+
+    $endpoints = array(
+        array(
+            'url'   => 'https://web.archive.org/save',
+            'proxy' => null,
+        ),
+        array(
+            'url'   => 'http://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
+            'proxy' => 'socks5h://onionpress-tor:9050',
+        ),
+    );
+
+    $auth = onionpress_wayback_auth_header();
+
+    if ( onionpress_wayback_submit( $endpoints, $url, $auth ) ) {
+        error_log( '[OnionPress Wayback] Queue drain: archived ' . $url );
+        // Remove from queue
+        array_shift( $queue );
+        @file_put_contents( $queue_file, json_encode( $queue ) );
+    } else {
+        error_log( '[OnionPress Wayback] Queue drain: failed to archive ' . $url . ' — will retry next cycle' );
+        // Leave in queue for next cycle. Move to end so other URLs get a chance.
+        $item = array_shift( $queue );
+        $queue[] = $item;
+        @file_put_contents( $queue_file, json_encode( $queue ) );
+    }
+} );
