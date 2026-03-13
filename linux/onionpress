@@ -1887,7 +1887,11 @@ except: print('false')
         oh_registered_count=$(echo "$oh_stats" | cut -d'|' -f1)
         oh_online_count=$(echo "$oh_stats" | cut -d'|' -f2)
         oh_taken_over_count=$(echo "$oh_stats" | cut -d'|' -f3)
+        oh_registered_count=${oh_registered_count:-0}
+        oh_online_count=${oh_online_count:-0}
+        oh_taken_over_count=${oh_taken_over_count:-0}
         oh_takeover_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -cE '^onionheaven-takeover-[0-9]+$' || echo 0)
+        oh_takeover_containers=${oh_takeover_containers:-0}
     fi
 
     # Build status.json
