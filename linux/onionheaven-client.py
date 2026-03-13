@@ -454,6 +454,13 @@ def main():
 
         enabled = new_enabled
 
+        # Retry registration if not yet registered
+        if enabled and not registered:
+            if _content_addr != _current_hub:
+                log.info("Retrying registration with %s...", _current_hub)
+                registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+            continue
+
         # Send heartbeat if registered
         if registered:
             heartbeat(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
