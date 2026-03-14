@@ -1953,6 +1953,58 @@ wait_for_services() {
 }
 
 # Main execution
+# ─── Validate OnionHeaven address ─────────────────────────────────────
+# Returns JSON: {"valid":true/false, "status":"hub"|"site"|"unreachable"|"self"|"invalid_format", "message":"..."}
+# Called by: menubar settings dialog, WordPress settings page
+_validate_oh_address() {
+    local addr="$1"
+
+    # Format check
+    if [ -z "$addr" ] || [ ${#addr} -ne 62 ] || ! echo "$addr" | grep -qE '\.onion$'; then
+        echo '{"valid":false,"status":"invalid_format","message":"Address must be a valid 56-character .onion address."}'
+        return 1
+    fi
+
+    # Self check — compare against our own address
+    local our_address=""
+    if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
+        our_address=$(basename "$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)" 2>/dev/null)
+    fi
+    if [ -z "$our_address" ] || [ "$our_address" = "." ]; then
+        our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
+    fi
+    if [ -n "$our_address" ] && [ "$addr" = "$our_address" ]; then
+        echo '{"valid":false,"status":"self","message":"You cannot use your own onion address as the OnionHeaven hub."}'
+        return 1
+    fi
+
+    # Probe the OnionHeaven API endpoint (:8083/status)
+    local api_result
+    api_result=$(docker exec onionpress-tor-client curl -s --max-time 30 \
+        --socks5-hostname 127.0.0.1:9050 \
+        "http://${addr}:8083/status" 2>/dev/null) || true
+
+    if [ -n "$api_result" ] && echo "$api_result" | grep -q '"version"'; then
+        echo '{"valid":true,"status":"hub","message":"Valid OnionHeaven hub."}'
+        return 0
+    fi
+
+    # API didn't respond — try the base address (port 80)
+    local http_code
+    http_code=$(docker exec onionpress-tor-client curl -s --max-time 30 \
+        -o /dev/null -w "%{http_code}" \
+        --socks5-hostname 127.0.0.1:9050 \
+        "http://${addr}/" 2>/dev/null) || true
+
+    if [ "$http_code" = "200" ] || [ "$http_code" = "301" ] || [ "$http_code" = "302" ]; then
+        echo '{"valid":true,"status":"site","message":"This address is reachable but is not running OnionHeaven yet."}'
+        return 0
+    fi
+
+    echo '{"valid":true,"status":"unreachable","message":"Could not reach this address over Tor. It may be offline or invalid."}'
+    return 0
+}
+
 main() {
     case "${1:-start}" in
         start)
@@ -2091,8 +2143,14 @@ main() {
             open "$APP_BUNDLE"
             ;;
 
+        validate-oh-address)
+            # Validate an OnionHeaven hub address. Returns JSON result.
+            # Used by both the menubar settings dialog and WordPress settings page.
+            _validate_oh_address "$2"
+            ;;
+
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|launch|logs}"
+            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|launch|logs|validate-oh-address}"
             exit 1
             ;;
     esac

@@ -282,6 +282,47 @@ add_action( 'admin_init', function () {
         $updates[ $key ] = $val;
     }
 
+    // Validate OnionHeaven address if changed
+    if ( ! empty( $updates['ONIONHEAVEN_ADDRESS'] ) ) {
+        $oh_addr = $updates['ONIONHEAVEN_ADDRESS'];
+        // Find the onionpress script
+        $script = '/opt/onionpress/onionpress';
+        if ( ! is_executable( $script ) ) {
+            // macOS: not available from inside container, use docker exec from WordPress
+            // Fall back to basic format validation only
+            if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/', $oh_addr ) ) {
+                add_action( 'admin_notices', function () {
+                    echo '<div class="notice notice-error"><p>Invalid OnionHeaven address format. Must be a 56-character .onion address.</p></div>';
+                } );
+                unset( $updates['ONIONHEAVEN_ADDRESS'] );
+            }
+        } else {
+            $output = shell_exec( escapeshellcmd( $script ) . ' validate-oh-address ' . escapeshellarg( $oh_addr ) . ' 2>/dev/null' );
+            $vr = json_decode( trim( $output ), true );
+            if ( is_array( $vr ) ) {
+                $status = $vr['status'] ?? '';
+                $message = $vr['message'] ?? 'Validation failed.';
+                if ( $status === 'invalid_format' || $status === 'self' ) {
+                    $msg = $message;
+                    add_action( 'admin_notices', function () use ( $msg ) {
+                        echo '<div class="notice notice-error"><p>' . esc_html( $msg ) . '</p></div>';
+                    } );
+                    unset( $updates['ONIONHEAVEN_ADDRESS'] );
+                } elseif ( $status === 'site' ) {
+                    $msg = $message;
+                    add_action( 'admin_notices', function () use ( $msg ) {
+                        echo '<div class="notice notice-warning"><p>' . esc_html( $msg ) . ' Address saved anyway.</p></div>';
+                    } );
+                } elseif ( $status === 'unreachable' ) {
+                    $msg = $message;
+                    add_action( 'admin_notices', function () use ( $msg ) {
+                        echo '<div class="notice notice-warning"><p>' . esc_html( $msg ) . ' Address saved anyway.</p></div>';
+                    } );
+                }
+            }
+        }
+    }
+
     // Handle Archive.org credentials — convert account/password to S3 keys via xauthn API
     $ia_account  = isset( $_POST['op_ia_account'] )  ? sanitize_text_field( wp_unslash( $_POST['op_ia_account'] ) )  : '';
     $ia_password = isset( $_POST['op_ia_password'] ) ? wp_unslash( $_POST['op_ia_password'] ) : '';
@@ -580,13 +621,13 @@ function onionpress_settings_fields() {
             'placeholder' => '',
         ),
         'REGISTER_WITH_ONIONHEAVEN' => array(
-            'label'       => 'Register with OnionHeaven',
+            'label'       => 'Register with OnionHeaven (advanced)',
             'description' => 'Register your site with OnionHeaven for Wayback Machine fallback when offline.',
             'type'        => 'select',
             'options'     => array( 'yes' => 'Enabled', 'no' => 'Disabled' ),
         ),
         'ONIONHEAVEN_ADDRESS' => array(
-            'label'       => 'OnionHeaven Hub Address',
+            'label'       => 'OnionHeaven Hub Address (advanced)',
             'description' => 'The .onion address of the OnionHeaven hub to register with for Wayback Machine fallback.',
             'type'        => 'text',
             'placeholder' => 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion',

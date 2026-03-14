@@ -3647,9 +3647,9 @@ class OnionPressApp(rumps.App):
             y -= row_h
             add_check_row(y, "Install IA Plugin", "INSTALL_IA_PLUGIN", form_values["INSTALL_IA_PLUGIN"])
             y -= row_h
-            add_check_row(y, "Register with OnionHeaven", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
+            add_check_row(y, "Register with OnionHeaven (advanced)", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
             y -= row_h
-            oh_addr_field = add_text_row(y, "OnionHeaven Hub:", "ONIONHEAVEN_ADDRESS", form_values["ONIONHEAVEN_ADDRESS"])
+            oh_addr_field = add_text_row(y, "OnionHeaven Hub (advanced):", "ONIONHEAVEN_ADDRESS", form_values["ONIONHEAVEN_ADDRESS"])
             oh_addr_field.setPlaceholderString_("oheavenfhb...onion")
             oh_addr_field.setFrame_(AppKit.NSMakeRect(input_x, oh_addr_field.frame().origin.y, input_w, 24))
             y -= row_h
@@ -3723,6 +3723,58 @@ class OnionPressApp(rumps.App):
                 form_values = new_values
                 form_values["VM_CPU"] = old_values["VM_CPU"]
                 continue
+
+            # -- Validate OnionHeaven address --
+            oh_addr = new_values.get("ONIONHEAVEN_ADDRESS", "").strip()
+            if oh_addr and oh_addr != old_values.get("ONIONHEAVEN_ADDRESS", ""):
+                self.log(f"Validating OnionHeaven address: {oh_addr}")
+                try:
+                    script = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "MacOS", "onionpress")
+                    result = subprocess.run(
+                        [script, "validate-oh-address", oh_addr],
+                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                        timeout=90
+                    )
+                    import json as _json
+                    vr = _json.loads(result.stdout.strip()) if result.stdout.strip() else {}
+                    status = vr.get("status", "")
+                    message = vr.get("message", "")
+
+                    if status == "invalid_format" or status == "self":
+                        _alert("Invalid OnionHeaven Address", message)
+                        form_values = new_values
+                        form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
+                        continue
+                    elif status == "site":
+                        resp = rumps.alert(
+                            title="Not an OnionHeaven Hub",
+                            message=f"{message}\n\nUse it anyway?",
+                            ok="Use Anyway",
+                            cancel="Cancel"
+                        )
+                        if resp != 1:
+                            form_values = new_values
+                            form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
+                            continue
+                        self.log(f"User accepted non-hub address: {oh_addr}")
+                    elif status == "unreachable":
+                        resp = rumps.alert(
+                            title="Address Unreachable",
+                            message=f"{message}\n\nUse it anyway?",
+                            ok="Use Anyway",
+                            cancel="Cancel"
+                        )
+                        if resp != 1:
+                            form_values = new_values
+                            form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
+                            continue
+                        self.log(f"User accepted unreachable address: {oh_addr}")
+                    else:
+                        self.log(f"OnionHeaven hub validated: {oh_addr}")
+                except Exception as e:
+                    self.log(f"OnionHeaven address validation error: {e}")
 
             # Validation passed
             break
