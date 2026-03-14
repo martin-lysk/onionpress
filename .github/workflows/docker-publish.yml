@@ -71,18 +71,17 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
       - name: Create multi-arch manifest
         run: |
-          docker manifest create ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:latest \
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:latest \
             ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64 \
             ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64
-          docker manifest push ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:latest
 
           if [ -n "${{ inputs.version }}" ]; then
-            docker manifest create ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:${{ inputs.version }} \
+            docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:${{ inputs.version }} \
               ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64 \
               ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64
-            docker manifest push ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:${{ inputs.version }}
           fi
 
   # --- WordPress image: amd64 on GitHub, arm64 on self-hosted, then merge ---
@@ -144,16 +143,15 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
       - name: Create multi-arch manifest
         run: |
-          docker manifest create ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:latest \
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:latest \
             ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64 \
             ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64
-          docker manifest push ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:latest
 
           if [ -n "${{ inputs.version }}" ]; then
-            docker manifest create ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:${{ inputs.version }} \
+            docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:${{ inputs.version }} \
               ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64 \
               ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64
-            docker manifest push ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:${{ inputs.version }}
           fi
