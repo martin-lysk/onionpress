@@ -337,6 +337,10 @@ else
     exit 1
 fi
 
+# Remove broken .pyo symlinks — py2app creates these but .pyo files
+# haven't existed since Python 3.5. They break xattr/gatekeeper stripping.
+find "$MENUBAR_APP_DIR" -name '*.pyo' -type l ! -exec test -e {} \; -delete
+
 # Universal binaries in MenubarApp are fine — macOS runs the arm64 slice
 # natively on Apple Silicon without triggering a Rosetta prompt.
 
