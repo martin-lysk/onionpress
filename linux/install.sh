@@ -126,14 +126,24 @@ if [ -d "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" ]; then
     $SUDO cp -r "$REPO_DIR/OnionPress.app/Contents/Resources/scripts" "$INSTALL_DIR/scripts"
 fi
 
+# Copy scripts needed by heartbeat client daemon
+$SUDO mkdir -p "$INSTALL_DIR/scripts"
+$SUDO cp "$REPO_DIR/src/onion_auth.py" "$INSTALL_DIR/scripts/"
+$SUDO cp "$REPO_DIR/src/key_manager.py" "$INSTALL_DIR/scripts/"
+if [ -f "$REPO_DIR/linux/onionpress-heartbeat.py" ]; then
+    $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
+fi
+
 # Bind WordPress and SOCKS ports to 0.0.0.0 for LAN access (Pi is headless,
 # users access from another device). The main compose file uses 127.0.0.1.
 $SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
 $SUDO sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
 
-# Write version file
+# Write version file (VERSION file is the single source of truth)
 VERSION="unknown"
-if [ -f "$REPO_DIR/OnionPress.app/Contents/Info.plist" ] && command -v python3 >/dev/null 2>&1; then
+if [ -f "$REPO_DIR/VERSION" ]; then
+    VERSION=$(cat "$REPO_DIR/VERSION")
+elif [ -f "$REPO_DIR/OnionPress.app/Contents/Info.plist" ] && command -v python3 >/dev/null 2>&1; then
     VERSION=$(python3 -c "
 import xml.etree.ElementTree as ET, sys
 try:
@@ -210,9 +220,24 @@ if [ "$REAL_USER" != "root" ]; then
     echo "  Service will run as user: $REAL_USER"
 fi
 
+# Install heartbeat client service
+$SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.service" /etc/systemd/system/onionpress-heartbeat.service
+if [ "$REAL_USER" != "root" ]; then
+    $SUDO sed -i "/^\[Service\]/a User=$REAL_USER\nEnvironment=HOME=$REAL_HOME" \
+        /etc/systemd/system/onionpress-heartbeat.service
+fi
+
+# Install watcher service (triggered by handle-action)
+$SUDO cp "$REPO_DIR/linux/onionpress-watcher.service" /etc/systemd/system/onionpress-watcher.service
+if [ "$REAL_USER" != "root" ]; then
+    $SUDO sed -i "/^\[Service\]/a User=$REAL_USER" \
+        /etc/systemd/system/onionpress-watcher.service
+fi
+
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable onionpress
-echo "  Systemd service installed and enabled (starts on boot)"
+$SUDO systemctl enable onionpress-heartbeat
+echo "  Systemd services installed and enabled (starts on boot)"
 
 # ─── Start OnionPress ─────────────────────────────────────────────────
 
@@ -222,6 +247,9 @@ echo "  Docker will pull container images for WordPress, MariaDB, and Tor."
 echo ""
 
 $SUDO systemctl start onionpress
+
+# Start heartbeat client (will wait for containers to be ready)
+$SUDO systemctl start onionpress-heartbeat
 
 # Wait for the service to finish starting
 echo "  Waiting for services..."

@@ -1,0 +1,9 @@
+[Unit]
+Description=OnionPress settings watcher
+After=onionpress.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/onionpress/onionpress handle-action
+StandardOutput=journal
+StandardError=journal

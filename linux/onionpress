@@ -2136,15 +2136,30 @@ main() {
 
         stop)
             setup_db_passwords
+            # Stop heartbeat client first (sends /offline before containers go down)
+            if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
+                log "Stopping heartbeat client..."
+                sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
+            fi
             stop_containers
             ;;
 
         restart)
             setup_db_passwords
+            # Stop heartbeat client first (sends /offline before containers go down)
+            if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
+                log "Stopping heartbeat client..."
+                sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
+            fi
             stop_containers
             start_containers
             wait_for_services
             write_status
+            # Restart heartbeat client if service exists
+            if systemctl list-unit-files onionpress-heartbeat.service >/dev/null 2>&1; then
+                log "Starting heartbeat client..."
+                sudo systemctl start onionpress-heartbeat 2>>"$LOG_FILE" || log "WARNING: Failed to start heartbeat client"
+            fi
             ;;
 
         status)
@@ -2287,11 +2302,11 @@ main() {
             if [ -d "$resources_dir/scripts" ]; then
                 sudo cp -r "$resources_dir/scripts" "$INSTALL_DIR/scripts"
             fi
-            # Copy OnionHeaven client scripts
+            # Copy heartbeat client scripts
             sudo mkdir -p "$INSTALL_DIR/scripts"
             sudo cp "$repo_dir/src/onion_auth.py" "$INSTALL_DIR/scripts/"
             sudo cp "$repo_dir/src/key_manager.py" "$INSTALL_DIR/scripts/"
-            sudo cp "$repo_dir/linux/onionheaven-client.py" "$INSTALL_DIR/scripts/"
+            sudo cp "$repo_dir/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
             # Fix docker-compose port bindings for LAN access
             sudo sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
             sudo sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
@@ -2320,9 +2335,9 @@ main() {
             wait_for_services
             write_status
 
-            # Restart OnionHeaven client service if it exists
-            if systemctl list-unit-files onionpress-onionheaven.service >/dev/null 2>&1; then
-                sudo systemctl restart onionpress-onionheaven 2>>"$LOG_FILE" || log "WARNING: Failed to restart OnionHeaven client"
+            # Restart heartbeat client service if it exists
+            if systemctl list-unit-files onionpress-heartbeat.service >/dev/null 2>&1; then
+                sudo systemctl restart onionpress-heartbeat 2>>"$LOG_FILE" || log "WARNING: Failed to restart heartbeat client"
             fi
 
             log "Update complete: $new_version"
