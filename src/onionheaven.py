@@ -119,9 +119,11 @@ def _save_registration_status(app, status):
 
 def register_with_onionheaven(app):
     """
-    Register this instance with OnionHeaven.
-    Sends signed registration with content address, healthcheck address,
-    and Arti key PEM. Called from a background thread.
+    Register this instance with OnionHeaven by starting the heartbeat loop.
+
+    The first heartbeat includes the arti_key_pem, effectively combining
+    registration and heartbeat into a single /online call. Called from a
+    background thread.
     Sets app._onionheaven_registration_succeeded on success;
     clears app._onionheaven_registration_in_flight when done.
     """
@@ -148,103 +150,50 @@ def register_with_onionheaven(app):
         app._onionheaven_registration_in_flight = False
         return
 
-    app.log("Registering with OnionHeaven...")
+    app.log("Registering with OnionHeaven via heartbeat...")
 
     try:
-        # Extract both keys in one docker exec call
-        try:
-            import key_manager
-            import onion_auth
-            secret_key_bytes, public_key_raw = key_manager.extract_keys()
-        except Exception as e:
-            app.log(f"OnionHeaven: failed to extract keys: {e}")
+        # Send initial heartbeat with key (acts as registration)
+        wp_healthy = _check_wordpress_healthy(app)
+        _send_heartbeat(app, wp_healthy)
+
+        if getattr(app, '_onionheaven_registration_succeeded', False):
+            # Start heartbeat loop (runs forever in this thread)
+            _heartbeat_loop(app)
             return
 
-        # Build Arti OpenSSH PEM for OnionHeaven storage (for takeover)
-        arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
-
-        # Sign the registration payload
-        timestamp = onion_auth.make_timestamp()
-        signature = onion_auth.sign_payload(
-            secret_key_bytes, public_key_raw,
-            "register", content_addr, hc_addr, timestamp
-        )
-
-        payload = json.dumps({
-            "content_address": content_addr,
-            "healthcheck_address": hc_addr,
-            "arti_key_pem": base64.b64encode(arti_pem).decode('ascii'),
-            "version": getattr(app, 'version', 'unknown'),
-            "is_onionheaven": getattr(app, 'is_onionheaven', False),
-            "timestamp": timestamp,
-            "signature": signature,
-        })
-
-        # Send via wordpress container's curl through tor SOCKS proxy
-        # (per CLAUDE.md: use docker exec for all Tor communication)
-        # Retry with backoff to handle flaky Tor circuits
+        # First attempt failed — retry with backoff, then start heartbeat loop
         backoff = [10, 30]
-        max_attempts = 4
         last_output = ""
 
-        for attempt in range(max_attempts):
-            ok, output = _run_docker(app, [
-                "exec", "onionpress-wordpress",
-                "curl", "-s", "-X", "POST",
-                "--socks5-hostname", "onionpress-tor:9050",
-                "-H", "Content-Type: application/json",
-                "-d", payload,
-                "--max-time", "60",
-                f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/register"
-            ], timeout=75)
-            last_output = output
+        for attempt, wait in enumerate(backoff):
+            app.log(f"OnionHeaven: registration attempt {attempt + 2} in {wait}s...")
+            time.sleep(wait)
+            wp_healthy = _check_wordpress_healthy(app)
+            _send_heartbeat(app, wp_healthy)
+            if getattr(app, '_onionheaven_registration_succeeded', False):
+                _heartbeat_loop(app)
+                return
 
-            if ok and output:
-                try:
-                    resp = json.loads(output)
-                    if resp.get("registered"):
-                        app.log(f"OnionHeaven: registration successful: {resp}")
-                        _save_registration_status(app, {
-                            "registered": True,
-                            "last_attempt": datetime.now(timezone.utc).isoformat(),
-                            "onionheaven_address": ONIONHEAVEN_ADDRESS,
-                            "content_address": content_addr,
-                        })
-                        app._onionheaven_registration_succeeded = True
-                        return
-                    # Server returned a structured error — don't retry
-                    error_msg = resp.get("error", "unknown error")
-                    app.log(f"OnionHeaven: registration rejected: {error_msg}")
-                    break
-                except json.JSONDecodeError:
-                    pass
+        # Even if registration hasn't succeeded yet, start heartbeat loop —
+        # it will keep trying on each cycle
+        app.log("OnionHeaven: initial registration attempts failed, continuing heartbeat loop")
+        _heartbeat_loop(app)
+        return
 
-            if attempt < max_attempts - 1:
-                delay = backoff[min(attempt, len(backoff) - 1)]
-                app.log(f"OnionHeaven: registration attempt {attempt + 1} failed, retrying in {delay}s...")
-                time.sleep(delay)
-
-        app.log(f"OnionHeaven: registration failed after {max_attempts} attempts (will retry) — last response: {last_output!r}")
-        _save_registration_status(app, {
-            "registered": False,
-            "last_attempt": datetime.now(timezone.utc).isoformat(),
-            "onionheaven_address": ONIONHEAVEN_ADDRESS,
-        })
+    except Exception as e:
+        app.log(f"OnionHeaven: registration error: {e}")
     finally:
         app._onionheaven_registration_in_flight = False
 
 
 def start_registration_thread(app):
-    """Start the registration background thread.
+    """Start the registration + heartbeat background thread.
 
-    On success, also starts the periodic heartbeat loop.
+    Registration happens via the first /online heartbeat (which includes
+    the arti key). Subsequent heartbeats omit the key.
     """
-    def register_then_heartbeat():
-        register_with_onionheaven(app)
-        if app._onionheaven_registration_succeeded:
-            _heartbeat_loop(app)
-
-    thread = threading.Thread(target=register_then_heartbeat, daemon=True)
+    thread = threading.Thread(target=register_with_onionheaven, args=(app,), daemon=True)
     thread.start()
     return thread
 
@@ -300,14 +249,11 @@ def _check_wordpress_healthy(app):
 def _send_heartbeat(app, wordpress_healthy=True):
     """Send a single /online heartbeat to OnionHeaven.
 
-    Similar to _send_onionheaven_notification but adds wordpress_healthy field
-    and uses a single attempt with short timeout.
+    On the first successful call (or if key hasn't been sent yet), includes
+    the arti_key_pem so OnionHeaven can do takeover if needed. Subsequent
+    calls omit the key to save bandwidth.
     """
     if getattr(app, 'is_onionheaven', False):
-        return
-
-    status = _load_registration_status(app)
-    if not status.get("registered"):
         return
 
     content_addr = getattr(app, 'onion_address', None)
@@ -331,14 +277,25 @@ def _send_heartbeat(app, wordpress_healthy=True):
         app.log(f"OnionHeaven: heartbeat sign error: {e}")
         return
 
-    payload = json.dumps({
+    payload_dict = {
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
         "wordpress_healthy": wordpress_healthy,
+        "version": getattr(app, 'version', 'unknown'),
         "is_onionheaven": getattr(app, 'is_onionheaven', False),
         "timestamp": timestamp,
         "signature": signature,
-    })
+    }
+
+    # Include arti key until we've confirmed the server has it
+    if not getattr(app, '_onionheaven_key_sent', False):
+        try:
+            arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
+            payload_dict["arti_key_pem"] = base64.b64encode(arti_pem).decode('ascii')
+        except Exception as e:
+            app.log(f"OnionHeaven: failed to build arti key for heartbeat: {e}")
+
+    payload = json.dumps(payload_dict)
 
     ok, output = _run_docker(app, [
         "exec", "onionpress-wordpress",
@@ -354,6 +311,19 @@ def _send_heartbeat(app, wordpress_healthy=True):
         try:
             resp = json.loads(output)
             if resp.get("online"):
+                # Track that key has been sent successfully
+                if resp.get("arti_key_stored") or getattr(app, '_onionheaven_key_sent', False):
+                    app._onionheaven_key_sent = True
+                # Save registration status on first success
+                if not getattr(app, '_onionheaven_registration_succeeded', False):
+                    app._onionheaven_registration_succeeded = True
+                    _save_registration_status(app, {
+                        "registered": True,
+                        "last_attempt": datetime.now(timezone.utc).isoformat(),
+                        "onionheaven_address": ONIONHEAVEN_ADDRESS,
+                        "content_address": content_addr,
+                    })
+                    app.log(f"OnionHeaven: registered via heartbeat ({content_addr})")
                 return  # success, silent
             app.log(f"OnionHeaven: heartbeat rejected: {resp.get('error', 'unknown')}")
         except json.JSONDecodeError:

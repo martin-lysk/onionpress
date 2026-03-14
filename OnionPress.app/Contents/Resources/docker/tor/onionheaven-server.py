@@ -7,9 +7,9 @@ unregistration, and lifecycle notifications. Runs inside the onionheaven
 container on port 8083, exposed through the main tor container's onion service.
 
 Endpoints:
-  POST /register     — Register an OnionPress instance with OnionHeaven
+  POST /online       — Heartbeat / register (upserts registry entry, optionally stores arti key)
+  POST /register     — Alias for /online (backwards compatibility)
   POST /unregister   — Mark a registration as unregistered (soft delete)
-  POST /online       — Notify OnionHeaven that instance is back online
   POST /offline      — Notify OnionHeaven that instance is going offline
   GET  /status       — Public status summary (no auth)
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
@@ -425,7 +425,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?")[0]
         handlers = {
-            "/register": self._handle_register,
+            "/register": self._handle_online,  # alias — /register and /online are the same
             "/unregister": self._handle_unregister,
             "/online": self._handle_online,
             "/offline": self._handle_offline,
@@ -439,131 +439,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.log_message("ERROR in %s: %s", path, e)
             self._send_json(500, {"error": str(e)})
-
-    # -- POST /register -----------------------------------------------------
-
-    def _handle_register(self):
-        data = self._read_json()
-        if not data:
-            self._send_json(400, {"error": "Invalid JSON"})
-            return
-
-        # Validate required fields
-        for field in ("content_address", "healthcheck_address", "arti_key_pem"):
-            if not data.get(field):
-                self._send_json(400, {"error": f"Missing required field: {field}"})
-                return
-
-        content_address = data["content_address"]
-        healthcheck_address = data["healthcheck_address"]
-        version = data.get("version", "unknown")
-        is_onionheaven = 1 if data.get("is_onionheaven") else 0
-
-        # Validate address format
-        if not ONION_RE.match(content_address):
-            self._send_json(400, {"error": "Invalid content_address format"})
-            return
-        if not ONION_RE.match(healthcheck_address):
-            self._send_json(400, {"error": "Invalid healthcheck_address format"})
-            return
-
-        # Reject self-registration — an OnionHeaven server must never take over its own address
-        own_addr = _get_own_address()
-        if own_addr and content_address == own_addr:
-            log(f"ERROR: Rejected self-registration — {content_address} is this server's own address")
-            self._send_json(403, {"error": "Cannot register with yourself"})
-            return
-
-        # Verify ed25519 signature (proves ownership of content_address)
-        ok, err = _verify_signature(self, data, "register")
-        if not ok:
-            self._send_json(403, {"error": err})
-            return
-
-        # Validate Arti PEM
-        try:
-            arti_pem = base64.b64decode(data["arti_key_pem"])
-        except Exception:
-            self._send_json(400, {"error": "Invalid arti_key_pem base64"})
-            return
-        if not arti_pem.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
-            self._send_json(400, {"error": "Invalid arti_key_pem format"})
-            return
-        # Validate PEM integrity — reject keys with NUL bytes or truncated data
-        if not validate_arti_pem(arti_pem):
-            self._send_json(400, {"error": "Corrupted arti_key_pem: key data failed integrity check"})
-            return
-
-        # Store plaintext PEM key
-        keys_dir = os.path.join(KEYS_DIR, content_address)
-        os.makedirs(keys_dir, mode=0o700, exist_ok=True)
-
-        pem_path = os.path.join(keys_dir, "ks_hs_id.ed25519_expanded_private")
-        with open(pem_path, "wb") as f:
-            f.write(arti_pem)
-        os.chmod(pem_path, 0o600)
-
-        # Write hostname file
-        hostname_path = os.path.join(keys_dir, "hostname")
-        with open(hostname_path, "w") as f:
-            f.write(content_address + "\n")
-        os.chmod(hostname_path, 0o600)
-
-        # Remove old encrypted files if present (migration cleanup)
-        for old_file in ("ks_hs_id.ed25519_expanded_private.enc",
-                         "hs_ed25519_secret_key.enc", "hs_ed25519_public_key.enc",
-                         "hs_ed25519_secret_key", "hs_ed25519_public_key"):
-            old_path = os.path.join(keys_dir, old_file)
-            try:
-                os.unlink(old_path)
-            except FileNotFoundError:
-                pass
-
-        # Upsert into registry (no key_hash — auth is via ed25519 signatures)
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        conn = db_connect()
-        db_ensure_schema(conn)
-
-        existing = conn.execute(
-            "SELECT 1 FROM registry WHERE content_address = ? AND healthcheck_address = ?",
-            (content_address, healthcheck_address)
-        ).fetchone()
-
-        conn.execute("""INSERT INTO registry
-            (content_address, healthcheck_address, registered_at, version,
-             last_healthy, status, is_onionheaven)
-            VALUES (?, ?, ?, ?, ?, 'online', ?)
-            ON CONFLICT(content_address, healthcheck_address) DO UPDATE SET
-                registered_at = excluded.registered_at,
-                version = excluded.version,
-                last_healthy = excluded.last_healthy,
-                status = 'online',
-                is_onionheaven = excluded.is_onionheaven,
-                unregistered_at = NULL,
-                unregistered_reason = NULL""",
-            (content_address, healthcheck_address, now, version, now, is_onionheaven))
-        db_commit_with_retry(conn)
-
-        # Release any active takeover for this content_address
-        release_function(conn, content_address, healthcheck_address, force=True)
-        conn.close()
-
-        # Write activation flag on first registration — signals the host to start
-        # the heartbeat monitor + takeover Arti container (lazy activation).
-        activate_path = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
-        if not os.path.exists(activate_path):
-            try:
-                with open(activate_path, "w") as f:
-                    f.write(now + "\n")
-                log("First registration received — activation flag written")
-            except OSError as e:
-                log(f"WARNING: could not write activation flag: {e}")
-
-        self._send_json(200, {
-            "registered": True,
-            "content_address": content_address,
-            "message": "Registration updated" if existing else "Registration created",
-        })
 
     # -- POST /unregister ---------------------------------------------------
 
@@ -667,9 +542,15 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             "hard_deleted": is_stress,
         })
 
-    # -- POST /online -------------------------------------------------------
+    # -- POST /online (also handles /register) --------------------------------
 
     def _handle_online(self):
+        """Unified handler for /online and /register.
+
+        Always upserts the registry entry. If arti_key_pem is provided,
+        validates and stores it (needed for takeover). Heartbeats can omit
+        the key — only the first call needs it.
+        """
         data = self._read_json()
         if not data:
             self._send_json(400, {"error": "Invalid JSON"})
@@ -688,100 +569,150 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
-        # Verify ed25519 signature
-        ok, err = _verify_signature(self, data, "online")
+        # Reject self-registration — an OnionHeaven server must never take over its own address
+        own_addr = _get_own_address()
+        if own_addr and content_address == own_addr:
+            log(f"ERROR: Rejected self-registration — {content_address} is this server's own address")
+            self._send_json(403, {"error": "Cannot register with yourself"})
+            return
+
+        # Verify ed25519 signature — accept both "online" and "register" actions
+        # for backwards compatibility with older clients
+        endpoint = self.path.split("?")[0].lstrip("/")
+        ok, err = _verify_signature(self, data, endpoint)
         if not ok:
             self._send_json(403, {"error": err})
             return
 
+        # If arti_key_pem is provided, validate and store it
+        arti_key_stored = False
+        if data.get("arti_key_pem"):
+            try:
+                arti_pem = base64.b64decode(data["arti_key_pem"])
+            except Exception:
+                self._send_json(400, {"error": "Invalid arti_key_pem base64"})
+                return
+            if not arti_pem.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
+                self._send_json(400, {"error": "Invalid arti_key_pem format"})
+                return
+            if not validate_arti_pem(arti_pem):
+                self._send_json(400, {"error": "Corrupted arti_key_pem: key data failed integrity check"})
+                return
+
+            # Store plaintext PEM key
+            keys_dir = os.path.join(KEYS_DIR, content_address)
+            os.makedirs(keys_dir, mode=0o700, exist_ok=True)
+
+            pem_path = os.path.join(keys_dir, "ks_hs_id.ed25519_expanded_private")
+            with open(pem_path, "wb") as f:
+                f.write(arti_pem)
+            os.chmod(pem_path, 0o600)
+
+            # Write hostname file
+            hostname_path = os.path.join(keys_dir, "hostname")
+            with open(hostname_path, "w") as f:
+                f.write(content_address + "\n")
+            os.chmod(hostname_path, 0o600)
+
+            # Remove old encrypted files if present (migration cleanup)
+            for old_file in ("ks_hs_id.ed25519_expanded_private.enc",
+                             "hs_ed25519_secret_key.enc", "hs_ed25519_public_key.enc",
+                             "hs_ed25519_secret_key", "hs_ed25519_public_key"):
+                old_path = os.path.join(keys_dir, old_file)
+                try:
+                    os.unlink(old_path)
+                except FileNotFoundError:
+                    pass
+
+            arti_key_stored = True
+
         conn = db_connect()
         db_ensure_schema(conn)
 
-        # Find entry
-        if healthcheck_address:
-            entry = conn.execute(
-                "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
-                (content_address, healthcheck_address)
-            ).fetchone()
-        else:
-            entry = conn.execute(
-                "SELECT * FROM registry WHERE content_address = ? LIMIT 1",
-                (content_address,)
-            ).fetchone()
-
-        if not entry:
-            conn.close()
-            self._send_json(404, {"error": "Entry not found"})
-            return
-
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Accept optional wordpress_healthy from heartbeat
+        # Accept optional fields
         wordpress_healthy = data.get("wordpress_healthy")
         is_onionheaven = data.get("is_onionheaven")
+        version = data.get("version", "unknown")
+        is_oh = 1 if is_onionheaven else 0
 
-        # Update: set last_healthy, clear unregistered fields, store wordpress health
+        created = False
+
         if healthcheck_address:
-            if wordpress_healthy is not None:
-                conn.execute(
-                    "UPDATE registry SET last_healthy = ?, status = 'online', "
-                    "unregistered_at = NULL, unregistered_reason = NULL, "
-                    "wordpress_healthy = ?, wordpress_checked_at = ?, "
-                    "audit_result = NULL, audit_at = NULL "
-                    "WHERE content_address = ? AND healthcheck_address = ?",
-                    (now, 1 if wordpress_healthy else 0, now,
-                     content_address, healthcheck_address)
-                )
-            else:
-                conn.execute(
-                    "UPDATE registry SET last_healthy = ?, status = 'online', "
-                    "unregistered_at = NULL, unregistered_reason = NULL, "
-                    "audit_result = NULL, audit_at = NULL "
-                    "WHERE content_address = ? AND healthcheck_address = ?",
-                    (now, content_address, healthcheck_address)
-                )
+            # Check if entry exists (for logging/response)
+            existing = conn.execute(
+                "SELECT 1 FROM registry WHERE content_address = ? AND healthcheck_address = ?",
+                (content_address, healthcheck_address)
+            ).fetchone()
+
+            # Upsert: create if new, update if exists
+            wp_healthy_val = (1 if wordpress_healthy else 0) if wordpress_healthy is not None else None
+            conn.execute("""INSERT INTO registry
+                (content_address, healthcheck_address, registered_at, version,
+                 last_healthy, status, is_onionheaven, wordpress_healthy, wordpress_checked_at)
+                VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?)
+                ON CONFLICT(content_address, healthcheck_address) DO UPDATE SET
+                    last_healthy = excluded.last_healthy,
+                    status = 'online',
+                    version = CASE WHEN excluded.version != 'unknown' THEN excluded.version ELSE registry.version END,
+                    is_onionheaven = excluded.is_onionheaven,
+                    wordpress_healthy = COALESCE(excluded.wordpress_healthy, registry.wordpress_healthy),
+                    wordpress_checked_at = COALESCE(excluded.wordpress_checked_at, registry.wordpress_checked_at),
+                    unregistered_at = NULL,
+                    unregistered_reason = NULL,
+                    audit_result = NULL,
+                    audit_at = NULL""",
+                (content_address, healthcheck_address, now, version, now, is_oh,
+                 wp_healthy_val, now if wp_healthy_val is not None else None))
             db_commit_with_retry(conn)
             release_function(conn, content_address, healthcheck_address, force=True)
+            if not existing:
+                created = True
+                log(f"New registry entry for {content_address} / {healthcheck_address}")
         else:
-            # Update all rows for this content_address
-            rows = conn.execute(
+            # No healthcheck_address — update all rows for this content_address
+            existing = conn.execute(
                 "SELECT healthcheck_address FROM registry WHERE content_address = ?",
                 (content_address,)
             ).fetchall()
+            if not existing:
+                conn.close()
+                self._send_json(400, {"error": "healthcheck_address required for new entries"})
+                return
             conn.execute(
                 "UPDATE registry SET last_healthy = ?, status = 'online', "
+                "is_onionheaven = ?, "
                 "unregistered_at = NULL, unregistered_reason = NULL, "
                 "audit_result = NULL, audit_at = NULL "
                 "WHERE content_address = ?",
-                (now, content_address)
+                (now, is_oh, content_address)
             )
             db_commit_with_retry(conn)
-            # Release for each row
-            for row in rows:
+            for row in existing:
                 release_function(conn, content_address, row["healthcheck_address"], force=True)
             flush_sighup_arti()
 
-        # Update is_onionheaven flag if provided
-        if is_onionheaven is not None:
-            oh_val = 1 if is_onionheaven else 0
-            if healthcheck_address:
-                conn.execute(
-                    "UPDATE registry SET is_onionheaven = ? "
-                    "WHERE content_address = ? AND healthcheck_address = ?",
-                    (oh_val, content_address, healthcheck_address)
-                )
-            else:
-                conn.execute(
-                    "UPDATE registry SET is_onionheaven = ? WHERE content_address = ?",
-                    (oh_val, content_address)
-                )
-            db_commit_with_retry(conn)
-
         conn.close()
+
+        # Write activation flag on first entry — signals the host to start
+        # the heartbeat monitor + takeover Arti container (lazy activation).
+        if created:
+            activate_path = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
+            if not os.path.exists(activate_path):
+                try:
+                    with open(activate_path, "w") as f:
+                        f.write(now + "\n")
+                    log("First registration received — activation flag written")
+                except OSError as e:
+                    log(f"WARNING: could not write activation flag: {e}")
 
         self._send_json(200, {
             "online": True,
+            "registered": True,  # backwards compat for old clients checking this
             "content_address": content_address,
+            "created": created,
+            "arti_key_stored": arti_key_stored,
         })
 
     # -- POST /offline ------------------------------------------------------
