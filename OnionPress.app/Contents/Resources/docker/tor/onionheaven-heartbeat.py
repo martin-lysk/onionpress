@@ -116,21 +116,71 @@ def startup_reconciliation(conn):
 
     # Re-execute takeovers for entries that were taken-over before restart
     # (Arti config was wiped, so we need to re-add the onion services)
+    # But first: if the content_address has an online sibling, the takeover
+    # is stale (instance re-registered with a new healthcheck) — unregister instead.
     taken_over = conn.execute(
-        "SELECT DISTINCT content_address FROM registry "
+        "SELECT content_address, healthcheck_address FROM registry "
         "WHERE status = 'taken-over' AND unregistered_at IS NULL"
     ).fetchall()
 
+    re_takeover_addrs = []
     if taken_over:
-        addrs = [row[0] for row in taken_over]
-        log(f"startup reconciliation: re-executing {len(addrs)} takeover(s)")
-        for addr in addrs:
+        for row in taken_over:
+            ca, ha = row[0], row[1]
+            sibling_online = conn.execute(
+                "SELECT 1 FROM registry WHERE content_address = ? AND status = 'online' "
+                "AND unregistered_at IS NULL LIMIT 1",
+                (ca,)
+            ).fetchone()
+            if sibling_online:
+                log(f"  startup: {ca} has online sibling — unregistering stale takeover for {ha}")
+                conn.execute(
+                    "UPDATE registry SET unregistered_at = ?, "
+                    "unregistered_reason = 'superseded-by-new-healthcheck', status = 'unregistered' "
+                    "WHERE content_address = ? AND healthcheck_address = ?",
+                    (now, ca, ha)
+                )
+            else:
+                if ca not in re_takeover_addrs:
+                    re_takeover_addrs.append(ca)
+        db_commit_with_retry(conn)
+
+    if re_takeover_addrs:
+        log(f"startup reconciliation: re-executing {len(re_takeover_addrs)} takeover(s)")
+        for addr in re_takeover_addrs:
             try:
                 subprocess.run([TOR_MANAGER, "takeover", "--no-sighup", addr],
                                capture_output=True, text=True, timeout=30)
                 log(f"  re-took-over {addr}")
             except Exception as e:
                 log(f"  failed to re-takeover {addr}: {e}")
+
+    # Clean up duplicate online rows for the same content_address.
+    # Keep the one with the newest last_healthy, unregister the rest.
+    dupes = conn.execute(
+        "SELECT content_address FROM registry "
+        "WHERE status = 'online' AND unregistered_at IS NULL "
+        "GROUP BY content_address HAVING COUNT(*) > 1"
+    ).fetchall()
+    for dupe in dupes:
+        ca = dupe[0]
+        # Keep the row with the most recent last_healthy
+        stale_rows = conn.execute(
+            "SELECT healthcheck_address, last_healthy FROM registry "
+            "WHERE content_address = ? AND status = 'online' AND unregistered_at IS NULL "
+            "ORDER BY last_healthy DESC",
+            (ca,)
+        ).fetchall()
+        for stale in stale_rows[1:]:  # skip the newest
+            log(f"  startup: unregistering duplicate online row for {ca} (hc: {stale[0]})")
+            conn.execute(
+                "UPDATE registry SET unregistered_at = ?, "
+                "unregistered_reason = 'superseded-by-new-healthcheck', status = 'unregistered' "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (now, ca, stale[0])
+            )
+    if dupes:
+        db_commit_with_retry(conn)
 
     # Give online entries a fresh grace period
     conn.execute(
