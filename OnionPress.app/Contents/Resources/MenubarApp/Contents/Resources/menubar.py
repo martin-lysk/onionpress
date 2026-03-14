@@ -556,7 +556,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.31"
+        self.version = "2.4.32"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -593,6 +593,13 @@ class OnionPressApp(rumps.App):
         # Update onion_proxy module globals (already imported with defaults)
         onion_proxy.PROXY_PORT = self.proxy_port
         onion_proxy.PHP_PROXY_PORT = self.wp_port
+
+        # Update OnionHeaven hub address from config
+        oh_addr = self._read_config_value(
+            "ONIONHEAVEN_ADDRESS",
+            "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
+        if oh_addr:
+            onionheaven.ONIONHEAVEN_ADDRESS = oh_addr
 
         # Do slow I/O operations in background after icon appears
         def background_init():
@@ -3388,6 +3395,13 @@ class OnionPressApp(rumps.App):
             "Registers your site with OnionHeaven so it can redirect page "
             "requests to the Wayback Machine as a fallback when your Mac is offline."
         ),
+        "ONIONHEAVEN_ADDRESS": (
+            "OnionHeaven Hub Address\n\n"
+            "The .onion address of the OnionHeaven hub your site registers with. "
+            "When your site goes offline, the hub redirects visitors to the "
+            "Wayback Machine copy.\n\n"
+            "Default: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+        ),
         "CLOUDFLARE_TUNNEL_TOKEN": (
             "Cloudflare Tunnel (Clearnet Access)\n\n"
             "Expose your WordPress site on the regular internet via Cloudflare Tunnel.\n\n"
@@ -3475,6 +3489,7 @@ class OnionPressApp(rumps.App):
             ("UPDATE_ON_LAUNCH", "yes"),
             ("INSTALL_IA_PLUGIN", "yes"),
             ("REGISTER_WITH_ONIONHEAVEN", "yes"),
+            ("ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"),
             ("CLOUDFLARE_TUNNEL_TOKEN", ""),
         ]
         old_values = {}
@@ -3517,7 +3532,8 @@ class OnionPressApp(rumps.App):
         help_keys = [
             "ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU", "PREVENT_SLEEP",
             "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH", "INSTALL_IA_PLUGIN",
-            "REGISTER_WITH_ONIONHEAVEN", "CLOUDFLARE_TUNNEL_TOKEN",
+            "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS",
+            "CLOUDFLARE_TUNNEL_TOKEN",
         ]
         help_target._help_texts = {
             i: self._SETTINGS_HELP[k] for i, k in enumerate(help_keys)
@@ -3633,6 +3649,10 @@ class OnionPressApp(rumps.App):
             y -= row_h
             add_check_row(y, "Register with OnionHeaven", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
             y -= row_h
+            oh_addr_field = add_text_row(y, "OnionHeaven Hub:", "ONIONHEAVEN_ADDRESS", form_values["ONIONHEAVEN_ADDRESS"])
+            oh_addr_field.setPlaceholderString_("oheavenfhb...onion")
+            oh_addr_field.setFrame_(AppKit.NSMakeRect(input_x, oh_addr_field.frame().origin.y, input_w, 24))
+            y -= row_h
             cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"])
             cf_field.setPlaceholderString_("paste tunnel token")
             cf_field.setFrame_(AppKit.NSMakeRect(input_x, cf_field.frame().origin.y, input_w, 24))
@@ -3733,6 +3753,7 @@ class OnionPressApp(rumps.App):
                 "UPDATE_ON_LAUNCH": "Update Docker on Launch",
                 "INSTALL_IA_PLUGIN": "Install IA Plugin",
                 "REGISTER_WITH_ONIONHEAVEN": "Register with OnionHeaven",
+                "ONIONHEAVEN_ADDRESS": "OnionHeaven Hub",
                 "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Token",
             }
             label = labels.get(key, key)
@@ -5170,7 +5191,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.4.31 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.4.32 RUNNING")
         self.log("="*60)
         self._quitting = True  # Prevent _handle_terminate from running again
 

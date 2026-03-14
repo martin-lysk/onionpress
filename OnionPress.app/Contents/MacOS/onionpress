@@ -157,7 +157,9 @@ fi
 export ONIONHEAVEN="0"
 
 detect_onionheaven_mode() {
-    local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+    local onionheaven_address
+    onionheaven_address=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    onionheaven_address="${onionheaven_address:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}"
     local our_address=""
     # Check vanity-keys directory first (works even before containers start)
     if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
@@ -1248,7 +1250,9 @@ install_docker() {
     fi
 
     # Pre-check: if onionheaven key is imported, ensure at least 5GB + 3/4 host CPUs (preserve higher values)
-    local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+    local onionheaven_address
+    onionheaven_address=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    onionheaven_address="${onionheaven_address:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}"
     if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ]; then
         if [ "$VM_MEMORY" -lt 8 ]; then
             log "OnionHeaven key detected — starting VM with 8GB (was ${VM_MEMORY}GB)"
@@ -1967,7 +1971,9 @@ main() {
             trap 'rm -f "$PIDFILE"' EXIT INT TERM HUP
 
             # Pre-check: if onionheaven key is imported, ensure VM has at least 5GB + 3/4 CPUs
-            local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+            local onionheaven_address
+            onionheaven_address=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+            onionheaven_address="${onionheaven_address:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}"
             if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ]; then
                 mkdir -p "$DATA_DIR"
                 local _oh_cores
