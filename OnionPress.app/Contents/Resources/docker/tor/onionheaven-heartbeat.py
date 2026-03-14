@@ -265,6 +265,25 @@ def main():
                         takeover_function(conn, ca, ha, force=False)
 
                 elif entry["status"] == "taken-over":
+                    # If another row for the same content_address is online, release this takeover.
+                    # This happens when an instance re-registers with a new healthcheck address.
+                    sibling_online = conn.execute(
+                        "SELECT 1 FROM registry WHERE content_address = ? AND status = 'online' "
+                        "AND unregistered_at IS NULL LIMIT 1",
+                        (ca,)
+                    ).fetchone()
+                    if sibling_online:
+                        log(f"Content address {ca} has an online sibling — releasing stale takeover for {ha}")
+                        release_function(conn, ca, ha, force=True)
+                        conn.execute(
+                            "UPDATE registry SET unregistered_at = ?, "
+                            "unregistered_reason = 'superseded-by-new-healthcheck', status = 'unregistered' "
+                            "WHERE content_address = ? AND healthcheck_address = ?",
+                            (now_str, ca, ha)
+                        )
+                        db_commit_with_retry(conn)
+                        continue
+
                     # Post-takeover audit: check if healthcheck still responds (false positive)
                     # Only audit within 5 minutes of takeover
                     audit_result = entry.get("audit_result")
