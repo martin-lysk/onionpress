@@ -43,6 +43,24 @@ LISTEN_PORT = 8083
 
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
 
+# Read our own onion address so we can reject self-registration
+OWN_ONION_ADDRESS = None
+_HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
+
+
+def _get_own_address():
+    """Return this server's own .onion address (cached after first read)."""
+    global OWN_ONION_ADDRESS
+    if OWN_ONION_ADDRESS is None:
+        try:
+            with open(_HOSTNAME_PATH) as f:
+                addr = f.read().strip()
+            if ONION_RE.match(addr):
+                OWN_ONION_ADDRESS = addr
+                log(f"Own onion address: {addr}")
+        except FileNotFoundError:
+            pass  # hostname file not written yet, Arti still starting
+    return OWN_ONION_ADDRESS
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +292,10 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             wp_unhealthy = conn.execute(
                 "SELECT COUNT(*) FROM registry WHERE status='online' AND wordpress_healthy = 0"
             ).fetchone()[0]
+            # OnionHeaven peer count (protected from takeover)
+            onionheaven_peers = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE is_onionheaven = 1"
+            ).fetchone()[0]
             # Farm container counts
             try:
                 takeover_containers = conn.execute(
@@ -290,6 +312,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "unregistered": unregistered,
                 "heartbeat_healthy": heartbeat_healthy,
                 "wordpress_unhealthy": wp_unhealthy,
+                "onionheaven_peers": onionheaven_peers,
                 "takeover_containers": takeover_containers,
             })
         except Exception as e:
@@ -434,6 +457,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         content_address = data["content_address"]
         healthcheck_address = data["healthcheck_address"]
         version = data.get("version", "unknown")
+        is_onionheaven = 1 if data.get("is_onionheaven") else 0
 
         # Validate address format
         if not ONION_RE.match(content_address):
@@ -441,6 +465,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             return
         if not ONION_RE.match(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
+            return
+
+        # Reject self-registration — an OnionHeaven server must never take over its own address
+        own_addr = _get_own_address()
+        if own_addr and content_address == own_addr:
+            log(f"ERROR: Rejected self-registration — {content_address} is this server's own address")
+            self._send_json(403, {"error": "Cannot register with yourself"})
             return
 
         # Verify ed25519 signature (proves ownership of content_address)
@@ -500,16 +531,17 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         conn.execute("""INSERT INTO registry
             (content_address, healthcheck_address, registered_at, version,
-             last_healthy, status)
-            VALUES (?, ?, ?, ?, ?, 'online')
+             last_healthy, status, is_onionheaven)
+            VALUES (?, ?, ?, ?, ?, 'online', ?)
             ON CONFLICT(content_address, healthcheck_address) DO UPDATE SET
                 registered_at = excluded.registered_at,
                 version = excluded.version,
                 last_healthy = excluded.last_healthy,
                 status = 'online',
+                is_onionheaven = excluded.is_onionheaven,
                 unregistered_at = NULL,
                 unregistered_reason = NULL""",
-            (content_address, healthcheck_address, now, version, now))
+            (content_address, healthcheck_address, now, version, now, is_onionheaven))
         db_commit_with_retry(conn)
 
         # Release any active takeover for this content_address
@@ -686,6 +718,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         # Accept optional wordpress_healthy from heartbeat
         wordpress_healthy = data.get("wordpress_healthy")
+        is_onionheaven = data.get("is_onionheaven")
 
         # Update: set last_healthy, clear unregistered fields, store wordpress health
         if healthcheck_address:
@@ -727,6 +760,22 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             for row in rows:
                 release_function(conn, content_address, row["healthcheck_address"], force=True)
             flush_sighup_arti()
+
+        # Update is_onionheaven flag if provided
+        if is_onionheaven is not None:
+            oh_val = 1 if is_onionheaven else 0
+            if healthcheck_address:
+                conn.execute(
+                    "UPDATE registry SET is_onionheaven = ? "
+                    "WHERE content_address = ? AND healthcheck_address = ?",
+                    (oh_val, content_address, healthcheck_address)
+                )
+            else:
+                conn.execute(
+                    "UPDATE registry SET is_onionheaven = ? WHERE content_address = ?",
+                    (oh_val, content_address)
+                )
+            db_commit_with_retry(conn)
 
         conn.close()
 

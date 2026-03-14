@@ -175,6 +175,7 @@ def register_with_onionheaven(app):
             "healthcheck_address": hc_addr,
             "arti_key_pem": base64.b64encode(arti_pem).decode('ascii'),
             "version": getattr(app, 'version', 'unknown'),
+            "is_onionheaven": getattr(app, 'is_onionheaven', False),
             "timestamp": timestamp,
             "signature": signature,
         })
@@ -334,6 +335,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
         "wordpress_healthy": wordpress_healthy,
+        "is_onionheaven": getattr(app, 'is_onionheaven', False),
         "timestamp": timestamp,
         "signature": signature,
     })
@@ -503,6 +505,7 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     payload = json.dumps({
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
+        "is_onionheaven": getattr(app, 'is_onionheaven', False),
         "timestamp": timestamp,
         "signature": signature,
     })

@@ -30,7 +30,7 @@ from onionheaven_common import (
     takeover_function, release_function, flush_sighup_arti,
     is_farm_mode, check_farm_scaling, invalidate_farm_cache,
     _check_arti_key_errors,
-    PROPAGATION_DELAY, TOR_MANAGER,
+    PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, TOR_MANAGER,
 )
 
 # SOCKS proxy for post-takeover audit pings
@@ -242,6 +242,24 @@ def main():
                             last_healthy_stale = True
 
                     if last_healthy_stale:
+                        # OnionHeaven peers get a longer grace period before takeover.
+                        # They run OnionHeaven themselves, so restarts take longer and
+                        # a premature takeover would redirect their hosted sites.
+                        if entry.get("is_onionheaven"):
+                            if entry["last_healthy"]:
+                                try:
+                                    lh = datetime.fromisoformat(
+                                        entry["last_healthy"].replace("Z", "+00:00")
+                                    )
+                                    peer_elapsed = (now - lh).total_seconds()
+                                except (ValueError, TypeError):
+                                    peer_elapsed = ONIONHEAVEN_PEER_GRACE + 1
+                            else:
+                                peer_elapsed = ONIONHEAVEN_PEER_GRACE + 1
+                            if peer_elapsed < ONIONHEAVEN_PEER_GRACE:
+                                log(f"Stale heartbeat for {ha} (content: {ca}) — OnionHeaven peer, waiting ({int(peer_elapsed)}s / {ONIONHEAVEN_PEER_GRACE}s grace)")
+                                continue
+                            log(f"Stale heartbeat for {ha} (content: {ca}) — OnionHeaven peer grace period exceeded ({int(peer_elapsed)}s), triggering takeover")
                         stale_count += 1
                         log(f"Stale heartbeat for {ha} (content: {ca}) — triggering takeover")
                         takeover_function(conn, ca, ha, force=False)

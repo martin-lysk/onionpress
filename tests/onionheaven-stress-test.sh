@@ -249,11 +249,15 @@ preflight() {
             log "  WARNING: onionheaven is not running"
         fi
 
+        # API server runs in onionpress-tor (v2.4.31+), fallback to onionheaven for older images
         local status_check
-        status_check=$(docker_cmd exec onionheaven curl -s --max-time 5 http://localhost:8083/status 2>/dev/null || echo "")
+        status_check=$(docker_cmd exec onionpress-tor curl -s --max-time 5 http://localhost:8083/status 2>/dev/null || echo "")
+        if [ -z "$status_check" ]; then
+            status_check=$(docker_cmd exec onionheaven curl -s --max-time 5 http://localhost:8083/status 2>/dev/null || echo "")
+        fi
         if [ -z "$status_check" ]; then
             echo "ERROR: OnionHeaven registration API is not responding"
-            echo "  Check onionheaven container logs"
+            echo "  Check onionpress-tor or onionheaven container logs"
             exit 1
         fi
         log "  OnionHeaven registration API is ready"
@@ -614,6 +618,7 @@ query_onionheaven_status() {
 
     local result=""
     if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
+        result=$(docker_cmd exec onionpress-tor curl -s --max-time 5 http://localhost:8083/status 2>/dev/null) || \
         result=$(docker_cmd exec onionheaven curl -s --max-time 5 http://localhost:8083/status 2>/dev/null) || result=""
     else
         result=$(docker_cmd exec onionpress-tor-client \

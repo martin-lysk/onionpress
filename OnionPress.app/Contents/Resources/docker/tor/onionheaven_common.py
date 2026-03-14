@@ -35,6 +35,11 @@ PROPAGATION_DELAY = int(os.environ.get("TOR_PROPAGATION_DELAY", "180"))
 # With 60s heartbeat interval and 180s PROPAGATION_DELAY, this is ~3 missed beats.
 CONSECUTIVE_FAILS_THRESHOLD = int(os.environ.get("ONIONHEAVEN_CONSECUTIVE_FAILS", "3"))
 
+# Extra grace period (seconds) for OnionHeaven peers before takeover.
+# Peers run OnionHeaven themselves, so a restart is expected to take longer.
+# Default 30 minutes — a peer that's been down 30+ minutes is likely truly dead.
+ONIONHEAVEN_PEER_GRACE = int(os.environ.get("ONIONHEAVEN_PEER_GRACE", "1800"))
+
 # Minimum interval between SIGHUPs to Arti (seconds)
 SIGHUP_MIN_INTERVAL = int(os.environ.get("ONIONHEAVEN_SIGHUP_INTERVAL", "5"))
 
@@ -397,6 +402,7 @@ def db_ensure_schema(conn):
             wordpress_checked_at TEXT,
             audit_result        TEXT,
             audit_at            TEXT,
+            is_onionheaven      INTEGER DEFAULT 0,
             PRIMARY KEY (content_address, healthcheck_address)
         )""")
         db_commit_with_retry(conn)
@@ -415,6 +421,8 @@ def db_ensure_schema(conn):
             conn.execute("ALTER TABLE registry ADD COLUMN consecutive_fails INTEGER DEFAULT 0")
         if "wordpress_healthy" not in cols:
             conn.execute("ALTER TABLE registry ADD COLUMN wordpress_healthy INTEGER")
+        if "is_onionheaven" not in cols:
+            conn.execute("ALTER TABLE registry ADD COLUMN is_onionheaven INTEGER DEFAULT 0")
         db_commit_with_retry(conn)
 
     # Drop old poll_containers table if it exists (no longer needed — heartbeat-based)
