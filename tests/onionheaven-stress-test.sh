@@ -1923,17 +1923,9 @@ run_worker() {
     phase_result "2" "$WAIT_RESULT"
     extract_all_worker_info
 
-    # Nudge Arti to re-publish onion descriptors (works around slow initial publication)
-    # C Tor publishes descriptors promptly on its own — no SIGHUP needed.
-    if [ "$TOR_IMPL" != "tor" ]; then
-        for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
-            local ctr_name="stress-worker-${idx}"
-            docker_cmd exec "$ctr_name" sh -c \
-                'for d in /proc/[0-9]*; do if [ "$(cat $d/comm 2>/dev/null)" = "arti" ]; then kill -HUP $(basename $d); fi; done' \
-                2>/dev/null || true
-        done
-        log "Sent SIGHUP to Arti in all worker containers (descriptor re-publish)"
-    fi
+    # No SIGHUP after registration — both C Tor and Arti publish descriptors
+    # during bootstrap. A SIGHUP forces a full re-publish of all descriptors,
+    # resetting the propagation clock and causing false takeovers at scale.
     echo ""
 
     # If lazy activation is pending, wait for the onionheaven container to come up
