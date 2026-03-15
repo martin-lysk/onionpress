@@ -3402,6 +3402,16 @@ class OnionPressApp(rumps.App):
             "Wayback Machine copy.\n\n"
             "Default: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
         ),
+        "TOR_IMPL": (
+            "Tor Implementation\n\n"
+            "Choose which Tor implementation runs your onion services.\n\n"
+            "Arti: Tor Project's modern Rust implementation (default). "
+            "Native arm64 on Apple Silicon.\n\n"
+            "C Tor: The classic C implementation. Faster onion service releases "
+            "(sends DESTROY cells to intro relays). Available via apt-get.\n\n"
+            "Keys are automatically converted between formats when switching.\n"
+            "Requires restart to take effect."
+        ),
         "CLOUDFLARE_TUNNEL_TOKEN": (
             "Cloudflare Tunnel (Clearnet Access)\n\n"
             "Expose your WordPress site on the regular internet via Cloudflare Tunnel.\n\n"
@@ -3451,6 +3461,10 @@ class OnionPressApp(rumps.App):
             "yes": "Site will register with OnionHeaven.",
             "no": "OnionHeaven registration disabled. Wayback fallback won't work.",
         },
+        "TOR_IMPL": {
+            "arti": "Tor will run using Arti (Rust). Requires restart.",
+            "tor": "Tor will run using C Tor. Faster releases. Requires restart.",
+        },
         "CLOUDFLARE_TUNNEL_TOKEN": {
             "set": (
                 "Your site will be exposed on the clearnet via Cloudflare. "
@@ -3490,6 +3504,7 @@ class OnionPressApp(rumps.App):
             ("INSTALL_IA_PLUGIN", "yes"),
             ("REGISTER_WITH_ONIONHEAVEN", "yes"),
             ("ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"),
+            ("TOR_IMPL", "arti"),
             ("CLOUDFLARE_TUNNEL_TOKEN", ""),
         ]
         old_values = {}
@@ -3514,7 +3529,7 @@ class OnionPressApp(rumps.App):
         input_w = 100
         help_x = 280
         help_w = 25
-        container_h = 9 * row_h + 10
+        container_h = 10 * row_h + 10
 
         def _alert(title, message):
             """Show an alert with the OnionPress icon."""
@@ -3533,7 +3548,7 @@ class OnionPressApp(rumps.App):
             "ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU", "PREVENT_SLEEP",
             "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH", "INSTALL_IA_PLUGIN",
             "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS",
-            "CLOUDFLARE_TUNNEL_TOKEN",
+            "TOR_IMPL", "CLOUDFLARE_TUNNEL_TOKEN",
         ]
         help_target._help_texts = {
             i: self._SETTINGS_HELP[k] for i, k in enumerate(help_keys)
@@ -3653,6 +3668,14 @@ class OnionPressApp(rumps.App):
             oh_addr_field.setPlaceholderString_("oheavenfhb...onion")
             oh_addr_field.setFrame_(AppKit.NSMakeRect(input_x, oh_addr_field.frame().origin.y, input_w, 24))
             y -= row_h
+            tor_impl_val = form_values.get("TOR_IMPL", "arti").lower()
+            if tor_impl_val not in ("arti", "tor"):
+                tor_impl_val = "arti"
+            add_popup_row(y, "Tor Implementation (advanced):", "TOR_IMPL", tor_impl_val, [
+                ("Arti (default)", "arti"),
+                ("C Tor", "tor"),
+            ])
+            y -= row_h
             cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"])
             cf_field.setPlaceholderString_("paste tunnel token")
             cf_field.setFrame_(AppKit.NSMakeRect(input_x, cf_field.frame().origin.y, input_w, 24))
@@ -3673,11 +3696,15 @@ class OnionPressApp(rumps.App):
             # -- Collect new values from form --
             new_values = {}
             sleep_options_map = ["normal", "on-battery", "never"]
+            tor_impl_options_map = ["arti", "tor"]
             for key in [k for k, _ in settings_keys]:
                 widget = fields[key]
                 if key == "PREVENT_SLEEP":
                     idx = widget.indexOfSelectedItem()
                     new_values[key] = sleep_options_map[idx] if 0 <= idx < len(sleep_options_map) else "normal"
+                elif key == "TOR_IMPL":
+                    idx = widget.indexOfSelectedItem()
+                    new_values[key] = tor_impl_options_map[idx] if 0 <= idx < len(tor_impl_options_map) else "arti"
                 elif key in ("LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
                              "INSTALL_IA_PLUGIN", "REGISTER_WITH_ONIONHEAVEN"):
                     new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"
@@ -3806,6 +3833,7 @@ class OnionPressApp(rumps.App):
                 "INSTALL_IA_PLUGIN": "Install IA Plugin",
                 "REGISTER_WITH_ONIONHEAVEN": "Register with OnionHeaven",
                 "ONIONHEAVEN_ADDRESS": "OnionHeaven Hub",
+                "TOR_IMPL": "Tor Implementation",
                 "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Token",
             }
             label = labels.get(key, key)
@@ -4655,6 +4683,7 @@ License: AGPL v3"""
                 'state': state,
                 'version': self.version,
                 'onion_address': onion_addr,
+                'tor_impl': self._read_config_value("TOR_IMPL", "arti"),
                 'uptime_seconds': uptime_seconds,
                 'bootstrap_pct': bootstrap_pct,
                 'containers': containers,

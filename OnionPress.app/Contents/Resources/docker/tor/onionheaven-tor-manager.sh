@@ -1,15 +1,18 @@
 #!/bin/sh
-# OnionHeaven Arti Address Manager
-# Manages dynamic onion service entries in arti.toml for address takeover/release.
+# OnionHeaven Tor Address Manager
+# Manages dynamic onion service entries for address takeover/release.
+# Supports both Arti (arti.toml + keystore) and C Tor (torrc + HiddenServiceDir).
 #
 # Usage:
 #   onionheaven-tor-manager.sh takeover <content_address>
 #   onionheaven-tor-manager.sh release <content_address>
+#   onionheaven-tor-manager.sh sighup
 #
-# On takeover: copies plaintext Arti PEM key from OnionHeaven storage into Arti keystore,
-#              appends service config to arti.toml, signals Arti to reload.
-# On release: removes service config from arti.toml, cleans up keystore directory,
-#              signals Arti to reload.
+# On takeover: installs key + config, signals Tor to reload.
+# On release: removes config + keys, signals Tor to reload.
+
+# Which Tor implementation are we managing?
+TOR_IMPL="${TOR_IMPL:-arti}"
 
 # Detect config: onionheaven/takeover-worker containers use arti-onionheaven.toml, main tor uses arti.toml
 if [ "${NO_ONION_SERVICE}" = "1" ] || [ "${TAKEOVER_WORKER}" = "1" ]; then
@@ -18,17 +21,30 @@ else
     ARTI_TOML="/etc/arti/arti.toml"
 fi
 ARTI_KEYSTORE="/var/lib/arti/state/keystore/hss"
+CTOR_TORRC="/etc/tor/torrc"
+CTOR_HS_DIR="/var/lib/tor/hidden_service"
 ONIONHEAVEN_KEYS_DIR="/var/lib/onionpress/onionheaven/keys"
 REDIRECT_PORT=8082
 
 send_sighup() {
-    local arti_pid
-    arti_pid=$(pidof arti 2>/dev/null || ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1)
-    if [ -n "$arti_pid" ]; then
-        kill -HUP "$arti_pid"
-        echo "Sent SIGHUP to Arti (pid $arti_pid)"
+    if [ "$TOR_IMPL" = "tor" ]; then
+        local tor_pid
+        tor_pid=$(pidof tor 2>/dev/null || ps aux | grep '[/]usr/bin/tor' | awk '{print $2}' | head -1)
+        if [ -n "$tor_pid" ]; then
+            kill -HUP "$tor_pid"
+            echo "Sent SIGHUP to C Tor (pid $tor_pid)"
+        else
+            echo "WARNING: C Tor process not found, cannot send SIGHUP"
+        fi
     else
-        echo "WARNING: Arti process not found, cannot send SIGHUP"
+        local arti_pid
+        arti_pid=$(pidof arti 2>/dev/null || ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1)
+        if [ -n "$arti_pid" ]; then
+            kill -HUP "$arti_pid"
+            echo "Sent SIGHUP to Arti (pid $arti_pid)"
+        else
+            echo "WARNING: Arti process not found, cannot send SIGHUP"
+        fi
     fi
 }
 
@@ -74,10 +90,14 @@ fi
 ADDR_PREFIX=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//' | cut -c1-16)
 NICKNAME="onionheaven_${ADDR_PREFIX}"
 
-# Keystore directory for this service
+# Keystore directory for this service (Arti)
 KEYSTORE_DIR="${ARTI_KEYSTORE}/${NICKNAME}"
+# Hidden service directory for this service (C Tor)
+HS_SERVICE_DIR="${CTOR_HS_DIR}/${NICKNAME}"
 
-do_takeover() {
+# ==================== Arti takeover/release ====================
+
+do_takeover_arti() {
     local keys_src="${ONIONHEAVEN_KEYS_DIR}/${CONTENT_ADDRESS}"
     local key_file="${keys_src}/ks_hs_id.ed25519_expanded_private"
 
@@ -142,23 +162,14 @@ EOF
         echo "Added onion service config for ${CONTENT_ADDRESS}"
     fi
 
-    # Signal Arti to reload configuration (unless --no-sighup)
-    if [ "$NO_SIGHUP" -eq 0 ]; then
-        send_sighup
-    else
-        echo "Skipping SIGHUP (--no-sighup)"
-    fi
-
-    echo "Takeover complete for ${CONTENT_ADDRESS}"
+    echo "Takeover complete for ${CONTENT_ADDRESS} (Arti)"
 }
 
-do_release() {
+do_release_arti() {
     # Remove onion service config from arti.toml
     local marker="# onionheaven:${CONTENT_ADDRESS}"
     if grep -q "$marker" "$ARTI_TOML"; then
         # Remove the marker line and the 3 config lines that follow it
-        # (section header, enabled, proxy_ports)
-        # Also remove the blank line before the marker if present
         local tmp_toml="${ARTI_TOML}.tmp"
         awk -v marker="$marker" '
         BEGIN { skip = 0 }
@@ -181,14 +192,116 @@ do_release() {
         echo "Removed keystore directory for ${CONTENT_ADDRESS}"
     fi
 
-    # Signal Arti to reload configuration (unless --no-sighup)
+    echo "Release complete for ${CONTENT_ADDRESS} (Arti)"
+}
+
+# ==================== C Tor takeover/release ====================
+
+do_takeover_ctor() {
+    local keys_src="${ONIONHEAVEN_KEYS_DIR}/${CONTENT_ADDRESS}"
+    local key_file="${keys_src}/ks_hs_id.ed25519_expanded_private"
+
+    # Check for key (Arti PEM format — we convert it)
+    if [ ! -f "$key_file" ]; then
+        echo "ERROR: No key found for ${CONTENT_ADDRESS}"
+        exit 1
+    fi
+    if [ ! -s "$key_file" ]; then
+        echo "ERROR: Empty key file for ${CONTENT_ADDRESS}"
+        exit 1
+    fi
+
+    # Create hidden service directory for this address
+    mkdir -p "$HS_SERVICE_DIR"
+
+    # Convert Arti PEM key to C Tor format
+    if ! python3 /key-convert.py arti-to-ctor "$key_file" "$HS_SERVICE_DIR"; then
+        echo "ERROR: Key conversion failed for ${CONTENT_ADDRESS}"
+        rm -rf "$HS_SERVICE_DIR"
+        exit 1
+    fi
+
+    # Set correct ownership and permissions (C Tor is strict)
+    chown -R debian-tor:debian-tor "$HS_SERVICE_DIR" 2>/dev/null || chown -R tor:tor "$HS_SERVICE_DIR" 2>/dev/null || true
+    chmod 700 "$HS_SERVICE_DIR"
+
+    # Add hidden service config to torrc if not already present
+    local marker="# onionheaven:${CONTENT_ADDRESS}"
+    if grep -q "$marker" "$CTOR_TORRC"; then
+        echo "Service config already exists for ${CONTENT_ADDRESS}"
+    else
+        cat >> "$CTOR_TORRC" << EOF
+
+${marker}
+HiddenServiceDir ${HS_SERVICE_DIR}
+HiddenServicePort 80 127.0.0.1:${REDIRECT_PORT}
+EOF
+        echo "Added hidden service config for ${CONTENT_ADDRESS}"
+    fi
+
+    echo "Takeover complete for ${CONTENT_ADDRESS} (C Tor)"
+}
+
+do_release_ctor() {
+    # Remove hidden service config from torrc
+    local marker="# onionheaven:${CONTENT_ADDRESS}"
+    if grep -q "$marker" "$CTOR_TORRC"; then
+        # Remove the marker line and the 2 config lines that follow it
+        # (HiddenServiceDir, HiddenServicePort)
+        local tmp_torrc="${CTOR_TORRC}.tmp"
+        awk -v marker="$marker" '
+        BEGIN { skip = 0 }
+        $0 == marker { skip = 2; next }
+        skip > 0 { skip--; next }
+        { print }
+        ' "$CTOR_TORRC" > "$tmp_torrc"
+
+        sed -i '/^$/N;/^\n$/d' "$tmp_torrc" 2>/dev/null || true
+        mv "$tmp_torrc" "$CTOR_TORRC"
+        echo "Removed hidden service config for ${CONTENT_ADDRESS}"
+    else
+        echo "No service config found for ${CONTENT_ADDRESS}"
+    fi
+
+    # Remove the hidden service directory
+    if [ -d "$HS_SERVICE_DIR" ]; then
+        rm -rf "$HS_SERVICE_DIR"
+        echo "Removed hidden service directory for ${CONTENT_ADDRESS}"
+    fi
+
+    echo "Release complete for ${CONTENT_ADDRESS} (C Tor)"
+}
+
+# ==================== Dispatch ====================
+
+do_takeover() {
+    if [ "$TOR_IMPL" = "tor" ]; then
+        do_takeover_ctor
+    else
+        do_takeover_arti
+    fi
+
+    # Signal Tor to reload configuration (unless --no-sighup)
     if [ "$NO_SIGHUP" -eq 0 ]; then
         send_sighup
     else
         echo "Skipping SIGHUP (--no-sighup)"
     fi
+}
 
-    echo "Release complete for ${CONTENT_ADDRESS}"
+do_release() {
+    if [ "$TOR_IMPL" = "tor" ]; then
+        do_release_ctor
+    else
+        do_release_arti
+    fi
+
+    # Signal Tor to reload configuration (unless --no-sighup)
+    if [ "$NO_SIGHUP" -eq 0 ]; then
+        send_sighup
+    else
+        echo "Skipping SIGHUP (--no-sighup)"
+    fi
 }
 
 case "$ACTION" in

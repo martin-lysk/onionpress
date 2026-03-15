@@ -145,6 +145,17 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export CLOUDFLARE_TUNNEL_TOKEN
 
+# Tor implementation: "arti" (default) or "tor" (C Tor)
+# Read from config file, default to arti
+TOR_IMPL="arti"
+if [ -f "$DATA_DIR/config" ]; then
+    _tor_impl=$(grep "^TOR_IMPL=" "$DATA_DIR/config" | cut -d= -f2)
+    if [ "$_tor_impl" = "tor" ] || [ "$_tor_impl" = "arti" ]; then
+        TOR_IMPL="$_tor_impl"
+    fi
+fi
+export TOR_IMPL
+
 # Build compose flags — include cloudflare override file only when token is set
 if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
     CF_COMPOSE="-f docker-compose.yml -f docker-compose.cloudflare.yml"
@@ -152,149 +163,17 @@ else
     CF_COMPOSE=""
 fi
 
-# OnionHeaven mode detection — check if our .onion address matches the onionheaven address
-# This env var is passed to docker-compose and controls OnionHeaven-specific behavior
+# OnionHeaven — lazy activation only. Any OnionPress instance becomes an
+# OnionHeaven node when it receives its first registration/heartbeat.
+# The API server runs in onionpress-tor unconditionally; the watcher below
+# bootstraps the onionheaven container + farm when registrations arrive.
 export ONIONHEAVEN="0"
-
-detect_onionheaven_mode() {
-    local onionheaven_address
-    onionheaven_address=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-    onionheaven_address="${onionheaven_address:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}"
-    local our_address=""
-    # Check vanity-keys directory first (works even before containers start)
-    if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-        our_address=$(basename "$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)" 2>/dev/null)
-    fi
-    # Fall back to reading from the tor container if vanity-keys didn't work
-    if [ -z "$our_address" ] || [ "$our_address" = "." ]; then
-        our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-        our_address=$(echo "$our_address" | tr -d '\n\r ')
-    fi
-    if [ "$our_address" = "$onionheaven_address" ]; then
-        export ONIONHEAVEN="1"
-        log "OnionHeaven mode activated (address: $our_address)"
-
-        # OnionHeaven needs more memory and CPUs for polling, takeover services, etc.
-        # If VM_MEMORY is below 5GB, bump to 5GB (preserve higher values).
-        # If VM_CPU is below 3/4 of host cores, bump it.
-        local current_mem
-        current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-        current_mem="${current_mem:-1}"
-        local oh_target_cpus
-        oh_target_cpus=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
-        oh_target_cpus=$(( oh_target_cpus * 3 / 4 ))
-        [ "$oh_target_cpus" -lt 2 ] && oh_target_cpus=2
-        local current_cpu
-        current_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-        current_cpu="${current_cpu:-2}"
-        if [ "$current_cpu" -lt "$oh_target_cpus" ] 2>/dev/null; then
-            log "OnionHeaven: VM_CPU is ${current_cpu}, increasing to ${oh_target_cpus} (3/4 of host cores)"
-            if grep -q "^VM_CPU=" "$DATA_DIR/config" 2>/dev/null; then
-                sed -i.bak "s/^VM_CPU=.*/VM_CPU=${oh_target_cpus}/" "$DATA_DIR/config"
-            else
-                echo "VM_CPU=${oh_target_cpus}" >> "$DATA_DIR/config"
-            fi
-        fi
-        if [ "$current_mem" -lt 8 ] 2>/dev/null; then
-            log "OnionHeaven: VM_MEMORY is ${current_mem}GB, increasing to 8GB for OnionHeaven workload"
-            if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
-                sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=8/" "$DATA_DIR/config"
-            else
-                echo "VM_MEMORY=8" >> "$DATA_DIR/config"
-            fi
-        fi
-
-        # Check if the running VM needs a restart for memory or CPU changes
-        local _oh_need_restart=false
-        local vm_mem_kb
-        vm_mem_kb=$(docker compose exec -T tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
-        vm_mem_kb="${vm_mem_kb:-0}"
-        if [ "$vm_mem_kb" -gt 0 ] 2>/dev/null && [ "$vm_mem_kb" -lt 7500000 ] 2>/dev/null; then
-            log "OnionHeaven: VM memory too low ($(( vm_mem_kb / 1024 ))MB)"
-            _oh_need_restart=true
-        fi
-        local vm_cpus
-        vm_cpus=$(docker compose exec -T tor nproc 2>/dev/null | tr -d ' \n\r')
-        vm_cpus="${vm_cpus:-0}"
-        if [ "$vm_cpus" -gt 0 ] 2>/dev/null && [ "$vm_cpus" -lt "$oh_target_cpus" ] 2>/dev/null; then
-            log "OnionHeaven: VM CPUs too low (${vm_cpus}, need ${oh_target_cpus})"
-            _oh_need_restart=true
-        fi
-        if [ "$_oh_need_restart" = true ]; then
-            log "OnionHeaven: restarting VM with ${oh_target_cpus} CPUs, 8GB RAM..."
-            cd "$DOCKER_DIR"
-            docker compose $CF_COMPOSE --profile onionheaven down >> "$LOG_FILE" 2>&1
-            "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
-            "$BIN_DIR/colima" start \
-                --mount "$DATA_DIR/shared:w" \
-                --cpu "$oh_target_cpus" \
-                --memory 8 \
-                >> "$LOG_FILE" 2>&1
-            if [ $? -eq 0 ]; then
-                log "OnionHeaven: VM restarted with ${oh_target_cpus} CPUs, 8GB"
-                # Bring containers back up (start_containers will re-call detect_onionheaven_mode,
-                # but this time the VM will have correct resources so no loop)
-                docker compose up -d --pull always wordpress db >> "$LOG_FILE" 2>&1
-                # Wait for WordPress to be ready
-                local oh_wp_wait=0
-                while [ $oh_wp_wait -lt 60 ]; do
-                    if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT:-8080}" >/dev/null 2>&1; then
-                        break
-                    fi
-                    sleep 2
-                    oh_wp_wait=$((oh_wp_wait + 2))
-                done
-                docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1
-            else
-                log "OnionHeaven: ERROR — VM restart failed"
-            fi
-        fi
-        # Build OnionHeaven-aware tor image (layers new files on top of pre-built image)
-        # This is fast (<5s) since the base image is already pulled and we only add scripts
-        local tor_dir
-        tor_dir="$(cd "$(dirname "$0")/../Resources/docker/tor" && pwd)"
-        log "OnionHeaven: building tor image with onionheaven poller..."
-        # Use a local-only tag so 'docker compose --pull always' for other services
-        # doesn't overwrite the rebuilt image with the upstream base
-        export ONIONHEAVEN_IMAGE="onionpress-tor:onionheaven"
-        docker build -t "$ONIONHEAVEN_IMAGE" \
-            -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'ONIONHEAVEN_DOCKERFILE'
-FROM ghcr.io/brewsterkahle/onionpress-tor:latest
-COPY entrypoint.sh /entrypoint.sh
-COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
-COPY onion_auth.py /onion_auth.py
-COPY onionheaven_common.py /onionheaven_common.py
-COPY onionheaven-heartbeat.py /onionheaven-heartbeat.py
-COPY onionheaven-server.py /onionheaven-server.py
-COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
-COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
-COPY onionheaven-redirect.sh /onionheaven-redirect.sh
-RUN chmod +x /entrypoint.sh /onionheaven-heartbeat.py /onionheaven-server.py /onionheaven-tor-manager.sh /onionheaven-takeover-worker.py /onionheaven-redirect.sh
-ONIONHEAVEN_DOCKERFILE
-        # Remove old tor-polling container if it exists (renamed to onionheaven)
-        if docker inspect onionpress-tor-polling >/dev/null 2>&1; then
-            log "OnionHeaven: removing old onionpress-tor-polling container..."
-            docker stop onionpress-tor-polling >> "$LOG_FILE" 2>&1 || true
-            docker rm onionpress-tor-polling >> "$LOG_FILE" 2>&1 || true
-        fi
-
-        # Start onionheaven container (ONIONHEAVEN_IMAGE env var tells compose to use our local tag)
-        # No --pull for onionheaven — we just built it locally
-        if docker compose --profile onionheaven up -d onionheaven >> "$LOG_FILE" 2>&1; then
-            log "OnionHeaven: started onionheaven container"
-        else
-            log "WARNING: Failed to start onionheaven container"
-        fi
-        return 0
-    fi
-    return 1
-}
 
 # OnionHeaven farm — takeover worker containers
 # Each gets its own Arti instance (own guard pool) to prevent circuit exhaustion.
 # Starts with 2, scales up by 2 when threshold is hit.
 # Poll workers are no longer needed — heartbeat-based monitoring scans DB timestamps.
-# ONIONHEAVEN_IMAGE is set by detect_onionheaven_mode() to the locally-built tag
+# ONIONHEAVEN_IMAGE is set by _watch_onionheaven_activate() to the locally-built tag
 ONIONHEAVEN_FARM_MONITOR_PID=""
 
 # Start a single takeover worker container
@@ -325,9 +204,6 @@ _start_takeover_worker() {
 }
 
 start_onionheaven_farm() {
-    if [ "$ONIONHEAVEN" != "1" ]; then
-        return
-    fi
     log "OnionHeaven farm: starting initial 2 takeover workers..."
 
     _start_takeover_worker 0
@@ -415,6 +291,63 @@ stop_onionheaven_farm() {
         docker stop "$container" >> "$LOG_FILE" 2>&1 || true
         docker rm "$container" >> "$LOG_FILE" 2>&1 || true
         log "OnionHeaven farm: stopped $container"
+    done
+}
+
+# Lazy OnionHeaven activation — watches for the activate flag written by
+# onionheaven-server.py when the first /register arrives. Bootstraps the
+# onionheaven container, takeover farm, and scaling monitor so any fresh
+# OnionPress instance can become an OnionHeaven node without pre-configuration.
+_watch_onionheaven_activate() {
+    while true; do
+        sleep 10
+        # Check if any registrations have arrived by querying the API server
+        local total
+        total=$(docker exec onionpress-tor curl -s --max-time 3 http://localhost:8083/status 2>/dev/null \
+            | sed 's/.*"total"[[:space:]]*:[[:space:]]*//' | sed 's/[^0-9].*//' | tr -d ' \n\r')
+        [ "${total:-0}" -gt 0 ] || continue
+
+        # Already running? Keep watching but don't re-bootstrap
+        if docker inspect --format='{{.State.Running}}' onionheaven 2>/dev/null | grep -q true; then
+            continue
+        fi
+
+        log "OnionHeaven: activate — $total registrations detected, bootstrapping..."
+
+        # Build the OnionHeaven image
+        local tor_dir
+        tor_dir="$(cd "$(dirname "$0")/../Resources/docker/tor" && pwd)"
+        export ONIONHEAVEN_IMAGE="onionpress-tor:onionheaven"
+        docker build -t "$ONIONHEAVEN_IMAGE" \
+            -f - "$tor_dir" >> "$LOG_FILE" 2>&1 <<'ACTIVATE_DOCKERFILE'
+FROM ghcr.io/brewsterkahle/onionpress-tor:latest
+COPY entrypoint.sh /entrypoint.sh
+COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
+COPY onion_auth.py /onion_auth.py
+COPY onionheaven_common.py /onionheaven_common.py
+COPY onionheaven-heartbeat.py /onionheaven-heartbeat.py
+COPY onionheaven-server.py /onionheaven-server.py
+COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
+COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
+COPY onionheaven-redirect.sh /onionheaven-redirect.sh
+RUN chmod +x /entrypoint.sh /onionheaven-heartbeat.py /onionheaven-server.py /onionheaven-tor-manager.sh /onionheaven-takeover-worker.py /onionheaven-redirect.sh
+ACTIVATE_DOCKERFILE
+
+        # Start the onionheaven container
+        export ONIONHEAVEN="1"
+        cd "$DOCKER_DIR"
+        if docker compose --profile onionheaven up -d onionheaven >> "$LOG_FILE" 2>&1; then
+            log "OnionHeaven: started onionheaven container"
+        else
+            log "WARNING: Failed to start onionheaven container"
+            continue
+        fi
+
+        # Start the farm (takeover workers + scaling monitor)
+        start_onionheaven_farm
+
+        log "OnionHeaven: lazy activation complete"
+        # Keep looping — will re-bootstrap if container dies
     done
 }
 
@@ -1249,25 +1182,6 @@ install_docker() {
         fi
     fi
 
-    # Pre-check: if onionheaven key is imported, ensure at least 5GB + 3/4 host CPUs (preserve higher values)
-    local onionheaven_address
-    onionheaven_address=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-    onionheaven_address="${onionheaven_address:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}"
-    if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ]; then
-        if [ "$VM_MEMORY" -lt 8 ]; then
-            log "OnionHeaven key detected — starting VM with 8GB (was ${VM_MEMORY}GB)"
-            VM_MEMORY=8
-        fi
-        local host_cores
-        host_cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
-        local oh_cpus=$(( host_cores * 3 / 4 ))
-        [ "$oh_cpus" -lt 2 ] && oh_cpus=2
-        if [ "$VM_CPU" -lt "$oh_cpus" ]; then
-            log "OnionHeaven key detected — starting VM with ${oh_cpus} CPUs (was ${VM_CPU}, host has ${host_cores})"
-            VM_CPU="$oh_cpus"
-        fi
-    fi
-
     # Should not happen if launcher worked, but handle it
     if [ "$VM_ARCH" = "aarch64" ]; then
         # Apple Silicon: use VZ backend (Virtualization.framework)
@@ -1548,27 +1462,6 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 # Function to set up OnionHeaven (onionheaven mode only)
 # Registration API now runs in the onionheaven container (onionheaven-server.py),
 # which creates its own data directories on the shared volume at startup.
-install_onionheaven_plugin() {
-    if [ "$ONIONHEAVEN" != "1" ]; then
-        return 0
-    fi
-
-    # Clean up old PHP mu-plugins if they exist (migrated to onionheaven-server.py)
-    docker exec onionpress-wordpress sh -c '
-        rm -f /var/www/html/wp-content/mu-plugins/onionheaven-register.php \
-              /var/www/html/wp-content/mu-plugins/onionheaven-crypto.php \
-              /var/www/html/wp-content/mu-plugins/onionheaven-db.php
-    ' >> "$LOG_FILE" 2>&1 || true
-
-    # Clean up old crypto artifacts from shared volume (encryption dropped)
-    docker exec onionpress-wordpress sh -c '
-        rm -f /var/lib/onionpress/onionheaven/.master-key-unlocked \
-              /var/lib/onionpress/onionheaven/master-key.json
-    ' >> "$LOG_FILE" 2>&1 || true
-
-    return 0
-}
-
 # Function to start containers
 start_containers() {
     log "Starting OnionPress containers..."
@@ -1738,7 +1631,7 @@ start_containers() {
 
     # Pull pre-built images from GHCR (avoids local build when both image: and build: are set)
     log "Pulling pre-built images..."
-    docker compose --profile onionheaven pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
+    docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
 
     # Always start WordPress and DB first
     local max_attempts=3
@@ -1781,11 +1674,6 @@ start_containers() {
         wp_check=$((wp_check + 1))
     done
 
-    # Detect onionheaven mode BEFORE starting Tor so ONIONHEAVEN env var
-    # is set when docker-compose creates the tor container (exposes port 8083)
-    cd "$DOCKER_DIR"
-    detect_onionheaven_mode || true
-
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
         docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
@@ -1814,13 +1702,9 @@ start_containers() {
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
 
-    # Install OnionHeaven plugin if applicable
-    cd "$DOCKER_DIR"
-    install_onionheaven_plugin
-
-    # Start OnionHeaven farm workers (poll + takeover containers)
-    cd "$DOCKER_DIR"
-    start_onionheaven_farm
+    # OnionHeaven lazy activation: watch for registrations and bootstrap
+    # the onionheaven container + takeover farm when they arrive.
+    _watch_onionheaven_activate &
 
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
@@ -2022,40 +1906,6 @@ main() {
             echo $$ > "$PIDFILE"
             trap 'rm -f "$PIDFILE"' EXIT INT TERM HUP
 
-            # Pre-check: if onionheaven key is imported, ensure VM has at least 5GB + 3/4 CPUs
-            local onionheaven_address
-            onionheaven_address=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-            onionheaven_address="${onionheaven_address:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}"
-            if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ]; then
-                mkdir -p "$DATA_DIR"
-                local _oh_cores
-                _oh_cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
-                _oh_cores=$(( _oh_cores * 3 / 4 ))
-                [ "$_oh_cores" -lt 2 ] && _oh_cores=2
-
-                local _cfg_changed=false
-                local current_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-                if [ -z "$current_mem" ] || [ "$current_mem" -lt 8 ] 2>/dev/null; then
-                    log "OnionHeaven key detected — setting VM_MEMORY to 8GB (was ${current_mem:-unset})"
-                    if grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
-                        sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=8/" "$DATA_DIR/config"
-                    else
-                        echo "VM_MEMORY=8" >> "$DATA_DIR/config"
-                    fi
-                    _cfg_changed=true
-                fi
-                local current_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-                if [ -z "$current_cpu" ] || [ "$current_cpu" -lt "$_oh_cores" ] 2>/dev/null; then
-                    log "OnionHeaven key detected — setting VM_CPU to ${_oh_cores} (was ${current_cpu:-unset})"
-                    if grep -q "^VM_CPU=" "$DATA_DIR/config" 2>/dev/null; then
-                        sed -i.bak "s/^VM_CPU=.*/VM_CPU=${_oh_cores}/" "$DATA_DIR/config"
-                    else
-                        echo "VM_CPU=${_oh_cores}" >> "$DATA_DIR/config"
-                    fi
-                    _cfg_changed=true
-                fi
-            fi
-
             # Detect container runtime
             if ! RUNTIME=$(detect_container_runtime); then
                 install_docker
@@ -2119,9 +1969,6 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
-            # Detect onionheaven mode BEFORE starting Tor so ONIONHEAVEN env var
-            # is set when docker-compose creates the tor container (exposes port 8083)
-            detect_onionheaven_mode || true
             docker compose up -d --pull always tor tor-client >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
             log "Tor containers started"
             ;;

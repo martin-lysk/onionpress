@@ -124,3 +124,18 @@ CLOUDFLARE_TUNNEL_TOKEN=
 # Machine as a fallback when your Mac is offline. Set to "no" to opt out.
 #
 REGISTER_WITH_ONIONHEAVEN=yes
+
+# Tor Implementation
+# Default: "arti" (Tor Project's Rust implementation)
+#
+# Choose which Tor implementation to use for onion services:
+#
+#   arti  - Tor Project's modern Rust implementation (default). Native arm64
+#           on Apple Silicon, but lacks intro circuit teardown on release.
+#   tor   - Classic C Tor. Faster onion service releases (sends DESTROY cells
+#           to intro relays), available via apt-get (no compilation needed).
+#
+# Keys are automatically converted between formats when switching.
+# Requires restart to take effect.
+#
+TOR_IMPL=arti

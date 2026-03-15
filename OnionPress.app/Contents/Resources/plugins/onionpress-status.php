@@ -198,6 +198,14 @@ function onionpress_render_status_page( $status, $wp_stats ) {
         <span class="label">Bootstrap</span>
         <span class="value"><?php echo (int) $bootstrap; ?>%</span>
     </div>
+    <?php
+    $tor_impl = $status['tor_impl'] ?? 'arti';
+    $tor_impl_label = $tor_impl === 'tor' ? 'C Tor' : 'Arti';
+    ?>
+    <div class="row">
+        <span class="label">Tor Implementation</span>
+        <span class="value"><?php echo esc_html( $tor_impl_label ); ?></span>
+    </div>
     <?php if ( $wayback_queue > 0 ) : ?>
     <div class="row">
         <span class="label">Wayback Queue</span>

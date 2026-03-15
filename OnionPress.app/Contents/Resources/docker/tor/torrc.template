@@ -1,0 +1,24 @@
+# OnionPress C Tor configuration (generated from torrc.template)
+# Equivalent of arti.toml for C Tor
+
+SocksPort 0.0.0.0:9050
+
+DataDirectory /var/lib/tor
+
+# Logging
+Log notice file /var/lib/tor/tor.log
+Log notice stdout
+
+# === Main onion services (populated by entrypoint.sh) ===
+
+# WordPress onion service
+HiddenServiceDir /var/lib/tor/hidden_service/wordpress
+HiddenServicePort 80 127.0.0.1:8080
+# OnionHeaven API port (added by entrypoint.sh if needed)
+# __WORDPRESS_API_PORT__
+
+# Healthcheck onion service
+HiddenServiceDir /var/lib/tor/hidden_service/healthcheck
+HiddenServicePort 80 127.0.0.1:8081
+
+# === OnionHeaven takeover services (appended dynamically) ===

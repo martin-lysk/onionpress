@@ -1,7 +1,11 @@
 #!/bin/sh
-# OnionPress Arti entrypoint
-# Creates state directories, starts healthcheck server, launches Arti,
+# OnionPress Tor entrypoint
+# Supports both Arti (default) and C Tor via TOR_IMPL env var.
+# Creates state directories, starts healthcheck server, launches Tor,
 # and writes compat hostname files for existing scripts to read.
+
+# Which Tor implementation to use: "arti" (default) or "tor" (C Tor)
+TOR_IMPL="${TOR_IMPL:-arti}"
 
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
@@ -38,7 +42,7 @@ chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
 # Takeover worker mode — runs in onionheaven-takeover-N containers
 if [ "${TAKEOVER_WORKER}" = "1" ]; then
-    echo "Takeover worker mode: starting Arti (SOCKS + keystore), redirect service, and takeover worker..."
+    echo "Takeover worker mode: starting ${TOR_IMPL} (SOCKS + keystore), redirect service, and takeover worker..."
     CONTAINER_NAME="${CONTAINER_NAME:-onionheaven-takeover-unknown}"
 
     # Start OnionHeaven redirect service in background (port 8082)
@@ -49,12 +53,30 @@ if [ "${TAKEOVER_WORKER}" = "1" ]; then
         echo "ERROR: onionheaven-redirect.sh failed to start"
     fi
 
-    # Start Arti with OnionHeaven config (SOCKS + keystore for takeover services)
-    su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
-    ARTI_PID=$!
-    sleep 2
-    if ! kill -0 $ARTI_PID 2>/dev/null; then
-        echo "ERROR: Arti failed to start — check config at /etc/arti/arti-onionheaven.toml"
+    if [ "$TOR_IMPL" = "tor" ]; then
+        # C Tor with SOCKS + dynamic hidden services
+        mkdir -p /var/lib/tor
+        chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || chown -R tor:tor /var/lib/tor 2>/dev/null || true
+        chmod 700 /var/lib/tor
+        cat > /etc/tor/torrc << TORRC_EOF
+SocksPort 0.0.0.0:9050
+DataDirectory /var/lib/tor
+Log notice stdout
+TORRC_EOF
+        tor -f /etc/tor/torrc &
+        TOR_PID=$!
+        sleep 2
+        if ! kill -0 $TOR_PID 2>/dev/null; then
+            echo "ERROR: C Tor failed to start"
+        fi
+    else
+        # Start Arti with OnionHeaven config (SOCKS + keystore for takeover services)
+        su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
+        TOR_PID=$!
+        sleep 2
+        if ! kill -0 $TOR_PID 2>/dev/null; then
+            echo "ERROR: Arti failed to start — check config at /etc/arti/arti-onionheaven.toml"
+        fi
     fi
 
     # Start takeover worker (log to shared volume)
@@ -66,18 +88,18 @@ if [ "${TAKEOVER_WORKER}" = "1" ]; then
         echo "ERROR: onionheaven-takeover-worker.py failed to start"
     fi
 
-    # Wait on Arti (main process)
-    wait $ARTI_PID
+    # Wait on Tor (main process)
+    wait $TOR_PID
     exit $?
 fi
 
 # No-onion-service mode (tor-client = SOCKS only, onionheaven = heartbeat/takeover)
 if [ "${NO_ONION_SERVICE}" = "1" ]; then
     if [ "${ONIONHEAVEN}" = "1" ]; then
-        # OnionHeaven heartbeat/takeover mode: Arti with takeover keystore +
+        # OnionHeaven heartbeat/takeover mode: Tor with takeover keystore +
         # heartbeat monitor + redirect. The API server runs in the main tor
         # container — this container only handles monitoring and takeover duties.
-        echo "OnionHeaven mode: starting Arti (SOCKS + keystore), redirect service, and heartbeat monitor..."
+        echo "OnionHeaven mode: starting ${TOR_IMPL} (SOCKS + keystore), redirect service, and heartbeat monitor..."
 
         # Start OnionHeaven redirect service in background (port 8082)
         /onionheaven-redirect.sh &
@@ -87,12 +109,31 @@ if [ "${NO_ONION_SERVICE}" = "1" ]; then
             echo "ERROR: onionheaven-redirect.sh failed to start"
         fi
 
-        # Start Arti with OnionHeaven config (SOCKS + keystore)
-        su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
-        ARTI_PID=$!
-        sleep 2
-        if ! kill -0 $ARTI_PID 2>/dev/null; then
-            echo "ERROR: Arti failed to start — check config at /etc/arti/arti-onionheaven.toml"
+        if [ "$TOR_IMPL" = "tor" ]; then
+            # C Tor with OnionHeaven config (SOCKS + hidden service dirs for takeover)
+            mkdir -p /var/lib/tor
+            chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || chown -R tor:tor /var/lib/tor 2>/dev/null || true
+            chmod 700 /var/lib/tor
+            # Minimal torrc for SOCKS + dynamic hidden services (added by tor-manager)
+            cat > /etc/tor/torrc << TORRC_EOF
+SocksPort 0.0.0.0:9050
+DataDirectory /var/lib/tor
+Log notice stdout
+TORRC_EOF
+            tor -f /etc/tor/torrc &
+            TOR_PID=$!
+            sleep 2
+            if ! kill -0 $TOR_PID 2>/dev/null; then
+                echo "ERROR: C Tor failed to start"
+            fi
+        else
+            # Start Arti with OnionHeaven config (SOCKS + keystore)
+            su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
+            TOR_PID=$!
+            sleep 2
+            if ! kill -0 $TOR_PID 2>/dev/null; then
+                echo "ERROR: Arti failed to start — check config at /etc/arti/arti-onionheaven.toml"
+            fi
         fi
 
         # Start onionheaven heartbeat monitor in background (log to shared volume)
@@ -103,13 +144,27 @@ if [ "${NO_ONION_SERVICE}" = "1" ]; then
             echo "ERROR: onionheaven-heartbeat.py failed to start"
         fi
 
-        # Wait on Arti (main process)
-        wait $ARTI_PID
+        # Wait on Tor process (main process)
+        wait $TOR_PID
         exit $?
     else
         # SOCKS-only mode (tor-client): just a proxy, no onion services
-        echo "SOCKS-only mode: starting Arti SOCKS proxy (no onion services)..."
-        su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml" 2>&1 | tee -a "$ARTI_LOG"
+        if [ "$TOR_IMPL" = "tor" ]; then
+            echo "SOCKS-only mode: starting C Tor SOCKS proxy (no onion services)..."
+            mkdir -p /var/lib/tor
+            chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || chown -R tor:tor /var/lib/tor 2>/dev/null || true
+            chmod 700 /var/lib/tor
+            # Minimal torrc for SOCKS-only
+            cat > /etc/tor/torrc << TORRC_EOF
+SocksPort 0.0.0.0:9050
+DataDirectory /var/lib/tor
+Log notice stdout
+TORRC_EOF
+            tor -f /etc/tor/torrc
+        else
+            echo "SOCKS-only mode: starting Arti SOCKS proxy (no onion services)..."
+            su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml" 2>&1 | tee -a "$ARTI_LOG"
+        fi
     fi
 fi
 
@@ -120,7 +175,7 @@ mkdir -p /var/lib/tor/hidden_service/healthcheck
 # Write version for healthcheck server
 echo "${ONIONPRESS_VERSION:-unknown}" > /var/lib/tor/healthcheck-version
 
-# Forward 127.0.0.1:8080 → wordpress:80 (Arti requires IP, not hostname)
+# Forward 127.0.0.1:8080 → wordpress:80 (both Arti and C Tor need IP targets)
 socat TCP-LISTEN:8080,reuseaddr,fork TCP:wordpress:80 &
 SOCAT_PID=$!
 sleep 1
@@ -138,12 +193,6 @@ sleep 1
 if ! kill -0 $ONIONHEAVEN_SERVER_PID 2>/dev/null; then
     echo "ERROR: onionheaven-server.py failed to start"
 fi
-# Expose port 8083 through the onion service so other nodes can reach the API
-sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
-if [ "${ONIONHEAVEN}" = "1" ]; then
-    # Dedicated OnionHeaven node: use max intro points to handle all heartbeat traffic
-    sed -i 's/num_intro_points = 3/num_intro_points = 10/' /etc/arti/arti.toml
-fi
 
 # Start healthcheck HTTP server in background (port 8081)
 /healthcheck-server.sh &
@@ -153,32 +202,108 @@ if ! kill -0 $HC_PID 2>/dev/null; then
     echo "ERROR: healthcheck-server.sh failed to start"
 fi
 
-# Start Arti in background (log to persistent file + docker logs)
-su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" 2>&1 | tee -a "$ARTI_LOG" &
-ARTI_PID=$!
-sleep 2
-if ! kill -0 $ARTI_PID 2>/dev/null; then
-    echo "ERROR: Arti failed to start — check config at /etc/arti/arti.toml"
-fi
+if [ "$TOR_IMPL" = "tor" ]; then
+    # ==================== C Tor mode ====================
+    echo "Starting C Tor (TOR_IMPL=tor)..."
 
-# Wait for Arti to generate keys, then write compat hostname files
-# so existing scripts (healthcheck-server.sh, launcher, menubar.py)
-# can read onion addresses from the same paths as before.
-write_compat_hostnames() {
+    # Create C Tor data directory
+    mkdir -p /var/lib/tor
+    chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || chown -R tor:tor /var/lib/tor 2>/dev/null || true
+    chmod 700 /var/lib/tor
+
+    # Convert Arti keys to C Tor format if Arti keystore exists but C Tor keys don't
     for nickname in wordpress healthcheck; do
-        while true; do
-            # --nickname must come before the subcommand; run as arti user (not root)
-            addr=$(su -s /bin/sh arti -c "arti hss --nickname $nickname onion-address -c /etc/arti/arti.toml" 2>/dev/null)
-            if [ -n "$addr" ]; then
-                echo "$addr" > "/var/lib/tor/hidden_service/$nickname/hostname"
-                echo "Onion address for $nickname: $addr"
-                break
-            fi
-            sleep 2
-        done
+        ARTI_KEY="/var/lib/arti/state/keystore/hss/${nickname}/ks_hs_id.ed25519_expanded_private"
+        CTOR_DIR="/var/lib/tor/hidden_service/${nickname}"
+        CTOR_SECRET="${CTOR_DIR}/hs_ed25519_secret_key"
+        if [ -f "$ARTI_KEY" ] && [ ! -f "$CTOR_SECRET" ]; then
+            echo "Converting Arti key for $nickname to C Tor format..."
+            python3 /key-convert.py arti-to-ctor "$ARTI_KEY" "$CTOR_DIR"
+        fi
     done
-}
-write_compat_hostnames &
 
-# Wait for Arti process
-wait $ARTI_PID
+    # Set ownership on hidden service dirs (C Tor is strict about this)
+    for dir in /var/lib/tor/hidden_service/wordpress /var/lib/tor/hidden_service/healthcheck; do
+        chown -R debian-tor:debian-tor "$dir" 2>/dev/null || chown -R tor:tor "$dir" 2>/dev/null || true
+        chmod 700 "$dir"
+    done
+
+    # Generate torrc from template
+    cp /etc/tor/torrc.template /etc/tor/torrc
+
+    # Add OnionHeaven API port to WordPress service
+    sed -i 's/# __WORDPRESS_API_PORT__/HiddenServicePort 8083 127.0.0.1:8083/' /etc/tor/torrc
+
+    # Start C Tor (log to persistent file + docker logs)
+    TOR_LOG="/var/lib/tor/tor.log"
+    tor -f /etc/tor/torrc 2>&1 | tee -a "$TOR_LOG" &
+    TOR_PID=$!
+    sleep 2
+    if ! kill -0 $TOR_PID 2>/dev/null; then
+        echo "ERROR: C Tor failed to start — check config at /etc/tor/torrc"
+    fi
+
+    # C Tor writes hostname files directly — wait for them, then log
+    write_ctor_hostnames() {
+        for nickname in wordpress healthcheck; do
+            local hfile="/var/lib/tor/hidden_service/${nickname}/hostname"
+            while [ ! -f "$hfile" ] || [ ! -s "$hfile" ]; do
+                sleep 2
+            done
+            echo "Onion address for $nickname: $(cat "$hfile")"
+        done
+    }
+    write_ctor_hostnames &
+
+    # Wait for C Tor process
+    wait $TOR_PID
+else
+    # ==================== Arti mode (default) ====================
+
+    # Expose port 8083 through the onion service so other nodes can reach the API
+    sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
+
+    # Convert C Tor keys to Arti format if switching back from C Tor
+    for nickname in wordpress healthcheck; do
+        CTOR_SECRET="/var/lib/tor/hidden_service/${nickname}/hs_ed25519_secret_key"
+        ARTI_KEY="/var/lib/arti/state/keystore/hss/${nickname}/ks_hs_id.ed25519_expanded_private"
+        if [ -f "$CTOR_SECRET" ] && [ ! -f "$ARTI_KEY" ]; then
+            echo "Converting C Tor key for $nickname to Arti format..."
+            mkdir -p "/var/lib/arti/state/keystore/hss/${nickname}"
+            python3 /key-convert.py ctor-to-arti "$CTOR_SECRET" "$ARTI_KEY"
+            chown -R arti:arti "/var/lib/arti/state/keystore/hss/${nickname}"
+            chmod 700 "/var/lib/arti/state/keystore/hss/${nickname}"
+            chmod 600 "$ARTI_KEY"
+        fi
+    done
+
+    # Start Arti in background (log to persistent file + docker logs)
+    su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" 2>&1 | tee -a "$ARTI_LOG" &
+    ARTI_PID=$!
+    sleep 2
+    if ! kill -0 $ARTI_PID 2>/dev/null; then
+        echo "ERROR: Arti failed to start — check config at /etc/arti/arti.toml"
+    fi
+
+    # Wait for Arti to generate keys, then write compat hostname files
+    # so existing scripts (healthcheck-server.sh, launcher, menubar.py)
+    # can read onion addresses from the same paths as before.
+    write_compat_hostnames() {
+        for nickname in wordpress healthcheck; do
+            while true; do
+                # --nickname must come before the subcommand; run as arti user (not root)
+                addr=$(su -s /bin/sh arti -c "arti hss --nickname $nickname onion-address -c /etc/arti/arti.toml" 2>/dev/null)
+                if [ -n "$addr" ]; then
+                    echo "$addr" > "/var/lib/tor/hidden_service/$nickname/hostname"
+                    echo "Onion address for $nickname: $addr"
+                    break
+                fi
+                sleep 2
+            done
+        done
+    }
+    write_compat_hostnames &
+
+    # Wait for Arti process
+    wait $ARTI_PID
+fi

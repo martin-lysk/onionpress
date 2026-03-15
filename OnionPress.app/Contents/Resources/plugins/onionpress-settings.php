@@ -350,7 +350,7 @@ add_action( 'admin_init', function () {
 
     // Check if a restart is actually needed (must read old values before writing updates)
     $needs_restart = false;
-    $restart_keys = array( 'ADDRESS_PREFIX', 'CLOUDFLARE_TUNNEL_TOKEN', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS' );
+    $restart_keys = array( 'ADDRESS_PREFIX', 'CLOUDFLARE_TUNNEL_TOKEN', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS', 'TOR_IMPL' );
     if ( ! empty( $updates ) ) {
         $old_values = array();
         $config_file = '/var/lib/onionpress/config-current.json';
@@ -613,6 +613,12 @@ function onionpress_settings_fields() {
             'type'        => 'text',
             'placeholder' => '1',
             'platform'    => 'macos',
+        ),
+        'TOR_IMPL' => array(
+            'label'       => 'Tor Implementation (advanced)',
+            'description' => 'Choose between Arti (default, Rust) or C Tor. C Tor has faster onion service releases. Requires restart.',
+            'type'        => 'select',
+            'options'     => array( 'arti' => 'Arti (default)', 'tor' => 'C Tor' ),
         ),
         'CLOUDFLARE_TUNNEL_TOKEN' => array(
             'label'       => 'Cloudflare Tunnel Token',
