@@ -63,7 +63,8 @@ SocksPort 0.0.0.0:9050
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
-        tor -f /etc/tor/torrc &
+        chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+        su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
         TOR_PID=$!
         sleep 2
         if ! kill -0 $TOR_PID 2>/dev/null; then
@@ -120,7 +121,8 @@ SocksPort 0.0.0.0:9050
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
-            tor -f /etc/tor/torrc &
+            chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+        su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
             TOR_PID=$!
             sleep 2
             if ! kill -0 $TOR_PID 2>/dev/null; then
@@ -160,7 +162,8 @@ SocksPort 0.0.0.0:9050
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
-            tor -f /etc/tor/torrc
+            chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+            su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc"
         else
             echo "SOCKS-only mode: starting Arti SOCKS proxy (no onion services)..."
             su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml" 2>&1 | tee -a "$ARTI_LOG"
@@ -234,9 +237,12 @@ if [ "$TOR_IMPL" = "tor" ]; then
     # Add OnionHeaven API port to WordPress service
     sed -i 's/# __WORDPRESS_API_PORT__/HiddenServicePort 8083 127.0.0.1:8083/' /etc/tor/torrc
 
-    # Start C Tor (log to persistent file + docker logs)
+    # Ensure all of /var/lib/tor is owned by debian-tor (C Tor checks this)
+    chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+
+    # Start C Tor as debian-tor user (log to persistent file + docker logs)
     TOR_LOG="/var/lib/tor/tor.log"
-    tor -f /etc/tor/torrc 2>&1 | tee -a "$TOR_LOG" &
+    su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" 2>&1 | tee -a "$TOR_LOG" &
     TOR_PID=$!
     sleep 2
     if ! kill -0 $TOR_PID 2>/dev/null; then
