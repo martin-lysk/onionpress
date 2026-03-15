@@ -397,9 +397,33 @@ start_worker_container() {
     # Remove leftover
     docker_cmd rm -f "$ctr_name" 2>/dev/null || true
 
-    # Generate arti.toml for this container
-    local arti_conf="${OUTPUT_DIR}/${ctr_name}-arti.toml"
-    cat > "$arti_conf" << 'TOML_HEAD'
+    if [ "$TOR_IMPL" = "tor" ]; then
+        # ── C Tor: generate torrc ──
+        local torrc="${OUTPUT_DIR}/${ctr_name}-torrc"
+        cat > "$torrc" << 'TORRC_HEAD'
+SocksPort 127.0.0.1:9050
+DataDirectory /var/lib/tor
+Log notice stdout
+TORRC_HEAD
+
+        for i in $(seq 0 $((workers_in_ctr - 1))); do
+            local cp=$((BASE_PORT + i * 2))
+            local hp=$((BASE_PORT + i * 2 + 1))
+            cat >> "$torrc" << EOF
+HiddenServiceDir /var/lib/tor/hidden_service/w${idx}_${i}_content
+HiddenServicePort 80 127.0.0.1:${cp}
+EOF
+            if [ "$NO_HEALTHCHECK" != true ]; then
+                cat >> "$torrc" << EOF
+HiddenServiceDir /var/lib/tor/hidden_service/w${idx}_${i}_hc
+HiddenServicePort 80 127.0.0.1:${hp}
+EOF
+            fi
+        done
+    else
+        # ── Arti: generate arti.toml ──
+        local arti_conf="${OUTPUT_DIR}/${ctr_name}-arti.toml"
+        cat > "$arti_conf" << 'TOML_HEAD'
 [proxy]
 socks_listen = "127.0.0.1:9050"
 
@@ -425,24 +449,25 @@ path = "/var/lib/arti/arti.log"
 filter = "info,tor_hsservice=debug,tor_circmgr=debug,arti=debug"
 TOML_HEAD
 
-    for i in $(seq 0 $((workers_in_ctr - 1))); do
-        local cp=$((BASE_PORT + i * 2))
-        local hp=$((BASE_PORT + i * 2 + 1))
-        cat >> "$arti_conf" << EOF
+        for i in $(seq 0 $((workers_in_ctr - 1))); do
+            local cp=$((BASE_PORT + i * 2))
+            local hp=$((BASE_PORT + i * 2 + 1))
+            cat >> "$arti_conf" << EOF
 
 [onion_services."w${idx}_${i}_content"]
 enabled = true
 proxy_ports = [["80", "127.0.0.1:${cp}"]]
 EOF
-        if [ "$NO_HEALTHCHECK" != true ]; then
-            cat >> "$arti_conf" << EOF
+            if [ "$NO_HEALTHCHECK" != true ]; then
+                cat >> "$arti_conf" << EOF
 
 [onion_services."w${idx}_${i}_hc"]
 enabled = true
 proxy_ports = [["80", "127.0.0.1:${hp}"]]
 EOF
-        fi
-    done
+            fi
+        done
+    fi
 
     # Start container with sleep (we'll exec the real startup after copying files)
     docker_cmd run -d \
@@ -454,14 +479,48 @@ EOF
         -c "sleep infinity" >/dev/null 2>&1
 
     # Copy files into container
-    docker_cmd cp "$arti_conf" "${ctr_name}:/etc/arti/arti.toml"
     docker_cmd cp "${SCRIPT_DIR}/stress/worker-server.py" "${ctr_name}:/worker-server.py"
     docker_cmd cp "${SCRIPT_DIR}/stress/worker-bootstrap.py" "${ctr_name}:/worker-bootstrap.py"
     docker_cmd cp "${SCRIPT_DIR}/../src/onion_auth.py" "${ctr_name}:/onion_auth.py"
+    if [ "$TOR_IMPL" = "tor" ]; then
+        docker_cmd cp "$torrc" "${ctr_name}:/etc/tor/torrc"
+    else
+        docker_cmd cp "$arti_conf" "${ctr_name}:/etc/arti/arti.toml"
+    fi
 
     # Generate startup script
     local startup="${OUTPUT_DIR}/${ctr_name}-start.sh"
-    cat > "$startup" << STARTEOF
+    if [ "$TOR_IMPL" = "tor" ]; then
+        cat > "$startup" << STARTEOF
+#!/bin/sh
+set -e
+
+# Install Python + curl
+apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
+
+# Prepare C Tor data dirs
+mkdir -p /var/lib/tor
+for i in \$(seq 0 $((workers_in_ctr - 1))); do
+    mkdir -p /var/lib/tor/hidden_service/w${idx}_\${i}_content
+    chmod 700 /var/lib/tor/hidden_service/w${idx}_\${i}_content
+done
+chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+chmod 700 /var/lib/tor
+
+# Start Python HTTP server
+python3 /worker-server.py ${BASE_PORT} ${workers_in_ctr} &
+
+# Start C Tor
+su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
+TOR_PID=\$!
+
+# Wait for keys, then self-register with OnionHeaven over Tor
+STRESS_VERSION="${STRESS_VERSION}" NO_HEALTHCHECK="${NO_HEALTHCHECK}" TOR_IMPL=tor python3 -u /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} > /bootstrap.log 2>&1 &
+
+wait \$TOR_PID
+STARTEOF
+    else
+        cat > "$startup" << STARTEOF
 #!/bin/sh
 set -e
 
@@ -489,6 +548,7 @@ STRESS_VERSION="${STRESS_VERSION}" NO_HEALTHCHECK="${NO_HEALTHCHECK}" python3 -u
 
 wait \$ARTI_PID
 STARTEOF
+    fi
     chmod +x "$startup"
     docker_cmd cp "$startup" "${ctr_name}:/start.sh"
 

@@ -28,24 +28,36 @@ BASE_PORT = int(sys.argv[4]) if len(sys.argv) > 4 else 9100
 KEYSTORE_BASE = "/var/lib/arti/state/keystore/hss"
 ARTI_TOML = "/etc/arti/arti.toml"
 NO_HEALTHCHECK = os.environ.get("NO_HEALTHCHECK", "false").lower() == "true"
+USE_CTOR = os.environ.get("TOR_IMPL", "arti").lower() == "tor"
+CTOR_HS_BASE = "/var/lib/tor/hidden_service"
 
 
 def get_onion_address(nickname):
-    """Get .onion address from Arti CLI. Retries until available."""
-    for attempt in range(180):  # up to 6 minutes
-        try:
-            result = subprocess.run(
-                ["su", "-s", "/bin/sh", "arti", "-c",
-                 f"arti hss --nickname {nickname} onion-address -c {ARTI_TOML}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            addr = result.stdout.strip()
-            if addr and addr.endswith(".onion"):
-                return addr
-        except Exception:
-            pass
-        time.sleep(2)
-    return None
+    """Get .onion address. Uses hostname file for C Tor, Arti CLI for Arti."""
+    if USE_CTOR:
+        hostname_file = f"{CTOR_HS_BASE}/{nickname}/hostname"
+        for attempt in range(180):  # up to 6 minutes
+            if os.path.exists(hostname_file):
+                addr = open(hostname_file).read().strip()
+                if addr and addr.endswith(".onion"):
+                    return addr
+            time.sleep(2)
+        return None
+    else:
+        for attempt in range(180):  # up to 6 minutes
+            try:
+                result = subprocess.run(
+                    ["su", "-s", "/bin/sh", "arti", "-c",
+                     f"arti hss --nickname {nickname} onion-address -c {ARTI_TOML}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                addr = result.stdout.strip()
+                if addr and addr.endswith(".onion"):
+                    return addr
+            except Exception:
+                pass
+            time.sleep(2)
+        return None
 
 
 def parse_openssh_pem(path):
@@ -192,20 +204,51 @@ def bootstrap_one_worker(i):
 
     print(f"[worker {i}] content={content_addr} hc={hc_addr}", flush=True)
 
-    pem_path = f"{KEYSTORE_BASE}/{content_nick}/ks_hs_id.ed25519_expanded_private"
-    for _ in range(30):
-        if os.path.exists(pem_path):
-            break
-        time.sleep(1)
-
-    if not os.path.exists(pem_path):
-        print(f"[worker {i}] ERROR: PEM not found at {pem_path}", flush=True)
-        return {
-            "global_index": global_idx, "local_index": i,
-            "container": CONTAINER_IDX,
-            "content_address": content_addr, "healthcheck_address": hc_addr,
-            "registered": False, "error": "pem_not_found",
-        }
+    if USE_CTOR:
+        # C Tor: read key from hs_ed25519_secret_key, convert to Arti PEM for registration
+        secret_path = f"{CTOR_HS_BASE}/{content_nick}/hs_ed25519_secret_key"
+        for _ in range(30):
+            if os.path.exists(secret_path):
+                break
+            time.sleep(1)
+        if not os.path.exists(secret_path):
+            print(f"[worker {i}] ERROR: C Tor secret key not found at {secret_path}", flush=True)
+            return {
+                "global_index": global_idx, "local_index": i,
+                "container": CONTAINER_IDX,
+                "content_address": content_addr, "healthcheck_address": hc_addr,
+                "registered": False, "error": "ctor_key_not_found",
+            }
+        # Convert C Tor key to Arti PEM using key-convert.py
+        pem_path = f"/tmp/{content_nick}.pem"
+        try:
+            subprocess.run(
+                ["python3", "/key-convert.py", "ctor-to-arti", secret_path, pem_path],
+                capture_output=True, text=True, timeout=10, check=True,
+            )
+        except Exception as e:
+            print(f"[worker {i}] ERROR: key conversion failed: {e}", flush=True)
+            return {
+                "global_index": global_idx, "local_index": i,
+                "container": CONTAINER_IDX,
+                "content_address": content_addr, "healthcheck_address": hc_addr,
+                "registered": False, "error": f"key_convert: {e}",
+            }
+    else:
+        # Arti: read PEM directly
+        pem_path = f"{KEYSTORE_BASE}/{content_nick}/ks_hs_id.ed25519_expanded_private"
+        for _ in range(30):
+            if os.path.exists(pem_path):
+                break
+            time.sleep(1)
+        if not os.path.exists(pem_path):
+            print(f"[worker {i}] ERROR: PEM not found at {pem_path}", flush=True)
+            return {
+                "global_index": global_idx, "local_index": i,
+                "container": CONTAINER_IDX,
+                "content_address": content_addr, "healthcheck_address": hc_addr,
+                "registered": False, "error": "pem_not_found",
+            }
 
     try:
         pubkey, privkey = parse_openssh_pem(pem_path)
