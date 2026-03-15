@@ -1875,14 +1875,16 @@ run_worker() {
     phase_result "2" "$WAIT_RESULT"
     extract_all_worker_info
 
-    # Nudge Arti to re-publish onion descriptors (works around slow initial publication)
+    # Nudge Tor to re-publish onion descriptors (works around slow initial publication)
+    local tor_proc_name="arti"
+    [ "$TOR_IMPL" = "tor" ] && tor_proc_name="tor"
     for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
         local ctr_name="stress-worker-${idx}"
         docker_cmd exec "$ctr_name" sh -c \
-            'for d in /proc/[0-9]*; do if [ "$(cat $d/comm 2>/dev/null)" = "arti" ]; then kill -HUP $(basename $d); fi; done' \
+            "for d in /proc/[0-9]*; do if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"${tor_proc_name}\" ]; then kill -HUP \$(basename \$d); fi; done" \
             2>/dev/null || true
     done
-    log "Sent SIGHUP to Arti in all worker containers (descriptor re-publish)"
+    log "Sent SIGHUP to ${TOR_LABEL} in all worker containers (descriptor re-publish)"
     echo ""
 
     # If lazy activation is pending, wait for the onionheaven container to come up
