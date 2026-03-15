@@ -1755,7 +1755,14 @@ run_worker() {
     write_phase_header
     open_phase_log_window
 
-    log "=== OnionHeaven Stress Test (Arti) ==="
+    # Detect Tor implementation from running container
+    TOR_IMPL=$(docker exec onionpress-tor sh -c 'echo ${TOR_IMPL:-arti}' 2>/dev/null || echo "arti")
+    if [ "$TOR_IMPL" = "tor" ]; then
+        TOR_LABEL="C Tor"
+    else
+        TOR_LABEL="Arti"
+    fi
+    log "=== OnionHeaven Stress Test (${TOR_LABEL}) ==="
     log "OnionHeaven: ${ONIONHEAVEN_ADDR}"
     log "Workers: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
     log "Stress-worker containers: ${NUM_CONTAINERS} × ${PER_CTR} workers/container"
@@ -1958,9 +1965,14 @@ run_worker() {
     docker_cmd exec onionheaven sqlite3 "$ONIONHEAVEN_DB_PATH" \
         "SELECT takeover_container, COUNT(*) FROM registry WHERE status='taken-over' GROUP BY 1 ORDER BY 1;" 2>/dev/null \
         | while IFS='|' read -r ctr cnt; do
-            local toml_count
-            toml_count=$(docker_cmd exec "$ctr" grep -c '\[onion_services' /etc/arti/arti-onionheaven.toml 2>/dev/null || echo "?")
-            log "  ${ctr}: ${cnt} DB entries, ${toml_count} Arti services"
+            local svc_count
+            if [ "$TOR_IMPL" = "tor" ]; then
+                svc_count=$(docker_cmd exec "$ctr" grep -c '^HiddenServiceDir.*/onionheaven_' /etc/tor/torrc 2>/dev/null || echo "?")
+                log "  ${ctr}: ${cnt} DB entries, ${svc_count} C Tor services"
+            else
+                svc_count=$(docker_cmd exec "$ctr" grep -c '\[onion_services' /etc/arti/arti-onionheaven.toml 2>/dev/null || echo "?")
+                log "  ${ctr}: ${cnt} DB entries, ${svc_count} Arti services"
+            fi
         done
 
     # C.2: Sustained 302 verification — check every 60s for 5 rounds
