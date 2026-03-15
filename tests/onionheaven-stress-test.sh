@@ -34,6 +34,9 @@
 #   # Test against a specific OnionHeaven node (e.g. a Pi)
 #   ./onionheaven-stress-test.sh --total 5 --onionheaven-addr op2pie...ad.onion
 #
+#   # Fast bootstrap — skip healthcheck onion services (halves circuit load)
+#   ./onionheaven-stress-test.sh --total 5 --no-healthcheck
+#
 #   # Clean up only stale stress tests (no activity in 2+ hours)
 #   ./onionheaven-stress-test.sh --cleanup-stale
 #   ./onionheaven-stress-test.sh --cleanup-stale --stale-hours 1
@@ -55,6 +58,7 @@ BATCH_SIZE=0      # 0 = start all containers at once
 STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
 BASE_PORT=9100    # port range start inside each container
 IS_ONIONHEAVEN_HOST=false  # auto-detected in preflight
+NO_HEALTHCHECK=false  # skip healthcheck onion services (halves circuit load)
 
 DATA_DIR="$HOME/.onionpress"
 DOCKER_HOST_SOCK=""
@@ -74,6 +78,7 @@ while [ $# -gt 0 ]; do
         --onionheaven-addr) ONIONHEAVEN_ADDR="$2"; shift 2 ;;
         --output-dir)  OUTPUT_DIR="$2"; shift 2 ;;
         --batch-size)  BATCH_SIZE="$2"; shift 2 ;;
+        --no-healthcheck) NO_HEALTHCHECK=true; shift ;;
         --cleanup)     CLEANUP=true; shift ;;
         --cleanup-stale) CLEANUP_STALE=true; shift ;;
         --stale-hours)   STALE_HOURS="$2"; shift 2 ;;
@@ -428,11 +433,15 @@ TOML_HEAD
 [onion_services."w${idx}_${i}_content"]
 enabled = true
 proxy_ports = [["80", "127.0.0.1:${cp}"]]
+EOF
+        if [ "$NO_HEALTHCHECK" != true ]; then
+            cat >> "$arti_conf" << EOF
 
 [onion_services."w${idx}_${i}_hc"]
 enabled = true
 proxy_ports = [["80", "127.0.0.1:${hp}"]]
 EOF
+        fi
     done
 
     # Start container with sleep (we'll exec the real startup after copying files)
@@ -476,7 +485,7 @@ su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" &
 ARTI_PID=\$!
 
 # Wait for Arti keys, then self-register with OnionHeaven over Tor
-STRESS_VERSION="${STRESS_VERSION}" python3 -u /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} > /bootstrap.log 2>&1 &
+STRESS_VERSION="${STRESS_VERSION}" NO_HEALTHCHECK="${NO_HEALTHCHECK}" python3 -u /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} > /bootstrap.log 2>&1 &
 
 wait \$ARTI_PID
 STARTEOF

@@ -27,6 +27,7 @@ BASE_PORT = int(sys.argv[4]) if len(sys.argv) > 4 else 9100
 
 KEYSTORE_BASE = "/var/lib/arti/state/keystore/hss"
 ARTI_TOML = "/etc/arti/arti.toml"
+NO_HEALTHCHECK = os.environ.get("NO_HEALTHCHECK", "false").lower() == "true"
 
 
 def get_onion_address(nickname):
@@ -175,7 +176,11 @@ def bootstrap_one_worker(i):
 
     print(f"[worker {i}] Waiting for Arti addresses...", flush=True)
     content_addr = get_onion_address(content_nick)
-    hc_addr = get_onion_address(hc_nick)
+    if NO_HEALTHCHECK:
+        # Generate a dummy healthcheck address (not published as onion service)
+        hc_addr = content_addr.replace(content_addr[:8], "hc" + content_addr[2:8])
+    else:
+        hc_addr = get_onion_address(hc_nick)
 
     if not content_addr or not hc_addr:
         print(f"[worker {i}] ERROR: timed out waiting for addresses", flush=True)
