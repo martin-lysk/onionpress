@@ -312,17 +312,16 @@ preflight() {
 
     # Detect OnionHeaven host by checking if local onion address matches the target
     detect_onionheaven_addr
-    local content_addr
-    content_addr=$(docker_cmd exec onionpress-tor \
-        su -s /bin/sh arti -c "arti hss --nickname wordpress onion-address -c /etc/arti/arti.toml" 2>/dev/null) || true
-    if [ -n "$content_addr" ] && [ "$content_addr" = "$ONIONHEAVEN_ADDR" ]; then
+    LOCAL_ONION_ADDR=$(docker_cmd exec onionpress-tor \
+        cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null) || true
+    if [ -n "$LOCAL_ONION_ADDR" ] && [ "$LOCAL_ONION_ADDR" = "$ONIONHEAVEN_ADDR" ]; then
         IS_ONIONHEAVEN_HOST=true
         log "  Detected OnionHeaven host (content address matches)"
     else
         IS_ONIONHEAVEN_HOST=false
         log "  Not OnionHeaven host — workers will register over Tor"
-        if [ -n "$content_addr" ]; then
-            log "  Local address: $content_addr"
+        if [ -n "$LOCAL_ONION_ADDR" ]; then
+            log "  Local address: $LOCAL_ONION_ADDR"
         fi
     fi
 
@@ -1843,6 +1842,7 @@ run_worker() {
     fi
     log "=== OnionHeaven Stress Test (${TOR_LABEL}) ==="
     log "OnionHeaven: ${ONIONHEAVEN_ADDR}"
+    [ -n "$LOCAL_ONION_ADDR" ] && log "This machine: ${LOCAL_ONION_ADDR}" || true
     log "Workers: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
     log "Stress-worker containers: ${NUM_CONTAINERS} × ${PER_CTR} workers/container"
     if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
@@ -2219,7 +2219,7 @@ run_cleanup() {
     detect_onionheaven_addr
     local content_addr
     content_addr=$(docker_cmd exec onionpress-tor \
-        su -s /bin/sh arti -c "arti hss --nickname wordpress onion-address -c /etc/arti/arti.toml" 2>/dev/null) || true
+        cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null) || true
     if [ -n "$content_addr" ] && [ "$content_addr" = "$ONIONHEAVEN_ADDR" ]; then
         IS_ONIONHEAVEN_HOST=true
     else
@@ -2320,7 +2320,7 @@ run_cleanup_stale() {
     detect_onionheaven_addr
     local content_addr
     content_addr=$(docker_cmd exec onionpress-tor \
-        su -s /bin/sh arti -c "arti hss --nickname wordpress onion-address -c /etc/arti/arti.toml" 2>/dev/null) || true
+        cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null) || true
     if [ -z "$content_addr" ] || [ "$content_addr" != "$ONIONHEAVEN_ADDR" ]; then
         echo "ERROR: --cleanup-stale must run on the OnionHeaven host (need DB access)"
         echo "NOTE:  Stale stress-test entries are auto-cleaned by the heartbeat monitor after 2h."
