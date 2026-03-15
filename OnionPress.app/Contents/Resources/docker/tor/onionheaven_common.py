@@ -71,11 +71,11 @@ _last_sighup_time = 0.0
 _sighup_pending = False
 
 
-def sighup_arti():
-    """Send SIGHUP to Arti if at least SIGHUP_MIN_INTERVAL seconds have passed.
+def sighup_tor():
+    """Send SIGHUP to Tor if at least SIGHUP_MIN_INTERVAL seconds have passed.
 
     If called too soon after the last SIGHUP, marks it as pending.
-    Call flush_sighup_arti() at the end of a batch to ensure the
+    Call flush_sighup_tor() at the end of a batch to ensure the
     final SIGHUP is sent.
     """
     global _last_sighup_time, _sighup_pending
@@ -91,11 +91,11 @@ def sighup_arti():
         _sighup_pending = True
 
 
-def flush_sighup_arti(force=False):
+def flush_sighup_tor(force=False):
     """Send a final SIGHUP if one is pending or forced.
 
     Call after a batch of changes. Use force=True when the batch used
-    no_sighup=True (which bypasses sighup_arti() entirely, so the
+    no_sighup=True (which bypasses sighup_tor(), so the
     pending flag was never set).
     """
     global _sighup_pending, _last_sighup_time
@@ -107,10 +107,10 @@ def flush_sighup_arti(force=False):
 
 
 def _do_sighup():
-    """Send SIGHUP to Arti via tor-manager, then check for corrupted key errors.
+    """Send SIGHUP to Tor (Arti or C Tor) via tor-manager, then check for corrupted key errors.
 
-    Sanitizes the toml BEFORE sending SIGHUP to prevent stale fragments
-    (e.g., bare [["80", ...]] lines from buggy cleanup) from blocking reload.
+    Sanitizes the config BEFORE sending SIGHUP to prevent stale fragments
+    from blocking reload.
     """
     _sanitize_arti_toml()
 
@@ -707,7 +707,7 @@ def _takeover_local(content_address, no_sighup=False):
     """Execute takeover via local tor-manager (legacy/worker mode).
 
     If no_sighup=True, skips the SIGHUP — caller is responsible for
-    calling flush_sighup_arti() after a batch of takeovers.
+    calling flush_sighup_tor() after a batch of takeovers.
     """
     log(f"Taking over {content_address} via Arti (local)")
     try:
@@ -723,7 +723,7 @@ def _takeover_local(content_address, no_sighup=False):
         log(f"Arti takeover error for {content_address}: {e}")
 
     if not no_sighup:
-        sighup_arti()
+        sighup_tor()
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +782,7 @@ def _release_local(content_address, no_sighup=False):
     """Execute release via local tor-manager (legacy/worker mode).
 
     If no_sighup=True, skips the SIGHUP — caller is responsible for
-    calling flush_sighup_arti() after a batch of releases.
+    calling flush_sighup_tor() after a batch of releases.
     """
     log(f"Releasing {content_address} via Arti (local)")
     try:
@@ -798,4 +798,4 @@ def _release_local(content_address, no_sighup=False):
         log(f"Arti release error for {content_address}: {e}")
 
     if not no_sighup:
-        sighup_arti()
+        sighup_tor()

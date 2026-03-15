@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    takeover_function, release_function, flush_sighup_arti,
+    takeover_function, release_function, flush_sighup_tor,
     is_farm_mode, check_farm_scaling, invalidate_farm_cache,
     _check_arti_key_errors,
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, TOR_MANAGER,
@@ -396,7 +396,7 @@ def main():
 
             # Flush pending SIGHUPs
             if not is_farm_mode(conn):
-                flush_sighup_arti()
+                flush_sighup_tor()
 
             # Check farm scaling (takeover workers only — no more poll workers)
             check_farm_scaling(conn, len(entries))

@@ -30,7 +30,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from onion_auth import verify_payload
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    takeover_function, release_function, flush_sighup_arti,
+    takeover_function, release_function, flush_sighup_tor,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR,
 )
 
@@ -691,7 +691,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             db_commit_with_retry(conn)
             for row in existing:
                 release_function(conn, content_address, row["healthcheck_address"], force=True)
-            flush_sighup_arti()
+            flush_sighup_tor()
 
         conn.close()
 
@@ -754,7 +754,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             ).fetchall()
             for row in rows:
                 takeover_function(conn, content_address, row["healthcheck_address"], force=True)
-        flush_sighup_arti()
+        flush_sighup_tor()
 
         conn.close()
 

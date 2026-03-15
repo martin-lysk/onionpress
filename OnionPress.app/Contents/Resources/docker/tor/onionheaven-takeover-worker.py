@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    _takeover_local, _release_local, flush_sighup_arti,
+    _takeover_local, _release_local, flush_sighup_tor,
     TOR_MANAGER, ONIONHEAVEN_DATA_DIR,
 )
 
@@ -164,7 +164,7 @@ def _clean_orphaned_services(conn):
     # After tor-manager release, also do a line-by-line cleanup to catch
     # any fragments that tor-manager's awk might have missed
     _sanitize_toml(toml_path)
-    flush_sighup_arti()
+    flush_sighup_tor()
 
 
 def _sanitize_toml(toml_path):
@@ -272,7 +272,7 @@ def process_takeovers(conn):
 
     if count > 0:
         log(f"takeover-worker: batch SIGHUP for {count} takeover(s)")
-        flush_sighup_arti(force=True)
+        flush_sighup_tor(force=True)
         update_active_count(conn)
     return count
 
@@ -306,7 +306,7 @@ def process_releases(conn):
 
     if count > 0:
         log(f"takeover-worker: batch SIGHUP for {count} release(s)")
-        flush_sighup_arti()
+        flush_sighup_tor()
         update_active_count(conn)
     return count
 
