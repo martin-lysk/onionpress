@@ -99,19 +99,22 @@ step() {
     printf "${YELLOW}━━━ Step %s: %s ━━━${NC}\n" "$1" "$2"
 }
 
-# Call the OnionHeaven API via docker exec
+# Call the OnionHeaven API via Tor (through tor-client SOCKS proxy)
 oh_api() {
     local method="$1"
     local path="$2"
     local data="${3:-}"
 
     if [ "$method" = "GET" ]; then
-        docker exec "$TOR_CONTAINER" curl -s "http://127.0.0.1:8083${path}" 2>/dev/null
+        docker exec onionpress-tor-client curl -s --max-time 30 \
+            --socks5-hostname 127.0.0.1:9050 \
+            "http://${ONION_ADDR}:8083${path}" 2>/dev/null
     else
-        docker exec "$TOR_CONTAINER" curl -s -X POST \
-            -H "Content-Type: application/json" \
+        docker exec onionpress-tor-client curl -s --max-time 30 \
+            --socks5-hostname 127.0.0.1:9050 \
+            -X POST -H "Content-Type: application/json" \
             -d "$data" \
-            "http://127.0.0.1:8083${path}" 2>/dev/null
+            "http://${ONION_ADDR}:8083${path}" 2>/dev/null
     fi
 }
 
@@ -153,21 +156,21 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${TOR_CONTAINER}$"; then
 fi
 pass "$TOR_CONTAINER container running"
 
-# Check OnionHeaven API is responding (runs on every node since v2.4.33+)
-if ! oh_api GET /status >/dev/null 2>&1; then
-    fail "OnionHeaven API not responding on port 8083"
-    log "  The tor container image may need updating: docker pull ghcr.io/brewsterkahle/onionpress-tor:latest"
-    exit 1
-fi
-pass "OnionHeaven API responding"
-
-# Read the local onion address
+# Read the local onion address (needed by oh_api which goes through Tor)
 ONION_ADDR=$(docker exec "$TOR_CONTAINER" cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
 if [ -z "$ONION_ADDR" ]; then
     fail "Could not read local onion address from tor container"
     exit 1
 fi
 log "Local onion address: $ONION_ADDR"
+
+# Check OnionHeaven API is responding via Tor (runs on every node since v2.4.33+)
+if ! oh_api GET /status >/dev/null 2>&1; then
+    fail "OnionHeaven API not responding on port 8083 via Tor"
+    log "  The tor container image may need updating: docker pull ghcr.io/brewsterkahle/onionpress-tor:latest"
+    exit 1
+fi
+pass "OnionHeaven API responding"
 
 # Verify WordPress is responding locally
 WP_STATUS=$(docker exec "$TOR_CONTAINER" curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://wordpress:80/" 2>/dev/null || echo "000")
