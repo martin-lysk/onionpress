@@ -449,15 +449,29 @@ fi
 # Wait for Tor descriptor to expire, then verify the address no longer serves a 302
 # This can resolve in seconds or take up to 3 hours depending on Arti's behavior.
 # We poll for 30 minutes. This is the key measurement — how long does release take?
+#
+# IMPORTANT: We must keep sending heartbeats during polling, otherwise the heartbeat
+# monitor will see the entry go stale and re-take-over the address (defeating the test).
 log "Waiting for Tor descriptor to expire after release (polling up to 30 minutes)..."
+log "  (Sending periodic heartbeats to prevent re-takeover)"
 RELEASE_CONFIRMED=false
 REL_START=$(date +%s)
+LAST_HEARTBEAT=$(date +%s)
 
 for i in $(seq 1 180); do
     sleep 10
     REL_ELAPSED=$(( $(date +%s) - REL_START ))
     REL_MINS=$((REL_ELAPSED / 60))
     REL_SECS=$((REL_ELAPSED % 60))
+
+    # Send a heartbeat every 60s to keep the entry "online" and prevent re-takeover
+    SINCE_HEARTBEAT=$(( $(date +%s) - LAST_HEARTBEAT ))
+    if [ "$SINCE_HEARTBEAT" -ge 60 ]; then
+        sign_payload sign-online "$IDENTITY" > "$PAYLOAD"
+        oh_api POST /online "$(cat "$PAYLOAD")" >/dev/null 2>&1
+        LAST_HEARTBEAT=$(date +%s)
+    fi
+
     RELEASE_CODE=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
     log "  [${REL_MINS}m ${REL_SECS}s] HTTP $RELEASE_CODE"
     if [ "$RELEASE_CODE" != "302" ]; then
