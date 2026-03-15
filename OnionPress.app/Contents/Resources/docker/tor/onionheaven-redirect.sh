@@ -45,6 +45,28 @@ handle_request() {
         return
     fi
 
+    # Circuit breaker: if this address has been released (status=online),
+    # drop the connection immediately. The stale Arti descriptor may still
+    # route traffic here after release — closing the TCP connection forces
+    # the Tor client to mark the circuit as failed and rebuild, which may
+    # cause it to fetch a fresh descriptor and reach the real service.
+    # See: https://github.com/brewsterkahle/onionpress/issues/114
+    if command -v sqlite3 >/dev/null 2>&1; then
+        safe=$(printf '%s' "$host" | LC_ALL=C tr -d 'a-z2-7.')
+        if [ -z "$safe" ]; then
+            case "$host" in
+                *.onion)
+                    status=$(sqlite3 /var/lib/onionpress/onionheaven/registry.db \
+                        "SELECT status FROM registry WHERE content_address='${host}' LIMIT 1" 2>/dev/null || echo "")
+                    if [ "$status" = "online" ]; then
+                        # Address has been released — drop connection (circuit breaker)
+                        exit 0
+                    fi
+                    ;;
+            esac
+        fi
+    fi
+
     # Build Wayback Machine URL: http://<wayback-onion>/web/http://<host><path>
     local wayback_url="http://${WAYBACK_ONION}/web/http://${host}${path}"
 
