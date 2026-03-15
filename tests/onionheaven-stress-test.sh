@@ -1901,6 +1901,9 @@ run_worker() {
         echo ""
     fi
 
+    # Flush tor-client descriptor cache so it discovers new worker onion services faster
+    flush_client_descriptor_cache
+
     # Phase 3: Wait for onionheaven heartbeat monitor to confirm workers are healthy
     phase_start "3" "Waiting for heartbeat monitor to confirm all ${TOTAL} workers are healthy (est. 1m)"
     if ! wait_for_healthy "$TOTAL" "Phase 3" 600; then
