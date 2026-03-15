@@ -968,9 +968,13 @@ wait_for_healthy() {
     local reachable=0
     local prev_reachable=0
 
-    # Get all our healthcheck addresses
+    # Get addresses to check — content addresses if no healthcheck, otherwise healthcheck
     local hc_addrs
-    hc_addrs=$(get_worker_hc_addrs 0 "$TOTAL")
+    if [ "$NO_HEALTHCHECK" = true ]; then
+        hc_addrs=$(get_worker_content_addrs 0 "$TOTAL")
+    else
+        hc_addrs=$(get_worker_hc_addrs 0 "$TOTAL")
+    fi
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         parallel_check_addrs "$hc_addrs" "200"
