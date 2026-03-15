@@ -122,6 +122,7 @@ docker_cmd() {
 # ── Logging ───────────────────────────────────────────────────────────────────
 log() {
     echo "[$(date '+%H:%M:%S')] $*"
+    [ -n "$PHASE_LOG" ] && echo "[$(date '+%H:%M:%S')] $*" >> "$PHASE_LOG"
 }
 
 log_json() {
