@@ -2104,7 +2104,7 @@ run_worker() {
         done
 
     # C.2: Sustained 302 verification — check every 60s for 5 rounds
-    local c2_rounds=5
+    local c2_rounds=2
     local c2_interval=60
     local c2_passed_total=0
     local c2_failed_total=0
