@@ -1514,7 +1514,7 @@ for p in payloads:
     local notified
     if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
         # Local: send directly over Docker network (fast, reliable — no Tor latency)
-        notified=$(echo "$payloads" | docker_cmd exec -i onionheaven sh -c '
+        notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor sh -c '
             n=0; tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
