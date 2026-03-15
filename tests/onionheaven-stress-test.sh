@@ -398,6 +398,11 @@ start_worker_container() {
 [proxy]
 socks_listen = "127.0.0.1:9050"
 
+[path_rules]
+# Restrict to IPv4 only — Colima/Docker has no IPv6 routes,
+# so IPv6 relay connections fail with "Network unreachable"
+reachable_addrs = ["0.0.0.0/0:*"]
+
 [storage]
 cache_dir = "/var/lib/arti/cache"
 state_dir = "/var/lib/arti/state"
