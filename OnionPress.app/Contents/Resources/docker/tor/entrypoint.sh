@@ -128,23 +128,20 @@ if ! kill -0 $SOCAT_PID 2>/dev/null; then
     echo "ERROR: socat (port 8080 forward) failed to start"
 fi
 
-# OnionHeaven API server — runs directly in the tor container so every node
-# can accept registrations without a separate onionheaven container.
-# The onionheaven container (heartbeat monitor + takeover Arti) starts lazily
-# when the first registration arrives.
+# OnionHeaven API server — runs on EVERY node so any OnionPress instance
+# can accept registrations. The onionheaven container (heartbeat monitor +
+# takeover Arti) starts lazily when the first registration arrives.
+mkdir -p /var/lib/onionpress/onionheaven/keys
+python3 /onionheaven-server.py &
+ONIONHEAVEN_SERVER_PID=$!
+sleep 1
+if ! kill -0 $ONIONHEAVEN_SERVER_PID 2>/dev/null; then
+    echo "ERROR: onionheaven-server.py failed to start"
+fi
+# Expose port 8083 through the onion service so other nodes can reach the API
+sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
 if [ "${ONIONHEAVEN}" = "1" ]; then
-    # Ensure data directories exist for the API server's SQLite DB and keys
-    mkdir -p /var/lib/onionpress/onionheaven/keys
-    # Start the registration API server (port 8083) directly in this container
-    python3 /onionheaven-server.py &
-    ONIONHEAVEN_SERVER_PID=$!
-    sleep 1
-    if ! kill -0 $ONIONHEAVEN_SERVER_PID 2>/dev/null; then
-        echo "ERROR: onionheaven-server.py failed to start"
-    fi
-    # Add port 8083 to the wordpress onion service proxy_ports
-    sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
-    # OnionHeaven receives all heartbeats on this address — use max intro points (10)
+    # Dedicated OnionHeaven node: use max intro points to handle all heartbeat traffic
     sed -i 's/num_intro_points = 3/num_intro_points = 10/' /etc/arti/arti.toml
 fi
 
