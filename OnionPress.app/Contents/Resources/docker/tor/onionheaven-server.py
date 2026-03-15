@@ -695,17 +695,16 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         conn.close()
 
-        # Write activation flag on first entry — signals the host to start
-        # the heartbeat monitor + takeover Arti container (lazy activation).
-        if created:
-            activate_path = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
-            if not os.path.exists(activate_path):
-                try:
-                    with open(activate_path, "w") as f:
-                        f.write(now + "\n")
-                    log("First registration received — activation flag written")
-                except OSError as e:
-                    log(f"WARNING: could not write activation flag: {e}")
+        # Write activation flag — signals the host to start the heartbeat
+        # monitor + takeover Arti container.  Written on every registration
+        # (not just the first) so the host watcher can restart the container
+        # if it was stopped externally.
+        activate_path = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
+        try:
+            with open(activate_path, "w") as f:
+                f.write(now + "\n")
+        except OSError as e:
+            log(f"WARNING: could not write activation flag: {e}")
 
         self._send_json(200, {
             "online": True,

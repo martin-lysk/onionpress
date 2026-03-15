@@ -1306,7 +1306,6 @@ start_onionheaven_activation_watcher() {
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
         log "OnionHeaven container already running — starting farm monitor"
         start_onionheaven_farm
-        return
     fi
 
     # If the activation flag already exists (previous registration), start immediately.
@@ -1315,25 +1314,32 @@ start_onionheaven_activation_watcher() {
     if [ -n "$activate_flag" ]; then
         log "OnionHeaven activation flag found — starting heartbeat container"
         _activate_onionheaven
-        return
     fi
 
-    log "OnionHeaven API server running in tor container — waiting for first registration to activate heartbeat monitor"
+    if [ -z "$activate_flag" ]; then
+        log "OnionHeaven API server running in tor container — waiting for first registration to activate heartbeat monitor"
+    fi
+
+    # Start persistent watcher — monitors the activation flag and restarts
+    # the onionheaven container if it goes down while registrations exist.
     _onionheaven_activation_watcher &
     ONIONHEAVEN_WATCHER_PID=$!
 }
 
 _onionheaven_activation_watcher() {
-    # Poll for the activation flag file every 30s. Written by onionheaven-server.py
-    # on the first /register call (inside the tor container, on the shared volume).
+    # Persistent loop: poll for the activation flag every 30s.
+    # If the flag exists but the onionheaven container is not running,
+    # restart it.  This handles the case where the container was stopped
+    # externally (e.g., by a test cleanup) and a new registration arrives.
     while true; do
         sleep 30
         local flag
         flag=$(docker exec onionpress-tor cat /var/lib/onionpress/onionheaven/activate 2>/dev/null) || true
         if [ -n "$flag" ]; then
-            log "OnionHeaven activation flag detected — starting heartbeat container"
-            _activate_onionheaven
-            return
+            if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
+                log "OnionHeaven activation flag detected — starting heartbeat container"
+                _activate_onionheaven
+            fi
         fi
     done
 }
