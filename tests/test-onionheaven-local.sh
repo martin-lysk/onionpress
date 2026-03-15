@@ -448,27 +448,27 @@ fi
 
 # Wait for Tor descriptor to expire, then verify the address no longer serves a 302
 # This can resolve in seconds or take up to 3 hours depending on Arti's behavior.
-# We poll for 5 minutes — if still reachable, log it as a known Arti limitation
-# (issue #114) rather than failing the test.
-log "Waiting for Tor descriptor to expire after release..."
+# We poll for 30 minutes. This is the key measurement — how long does release take?
+log "Waiting for Tor descriptor to expire after release (polling up to 30 minutes)..."
 RELEASE_CONFIRMED=false
 REL_START=$(date +%s)
 
-for i in $(seq 1 30); do
+for i in $(seq 1 180); do
     sleep 10
     REL_ELAPSED=$(( $(date +%s) - REL_START ))
+    REL_MINS=$((REL_ELAPSED / 60))
+    REL_SECS=$((REL_ELAPSED % 60))
     RELEASE_CODE=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
-    log "  [${REL_ELAPSED}s] HTTP $RELEASE_CODE"
+    log "  [${REL_MINS}m ${REL_SECS}s] HTTP $RELEASE_CODE"
     if [ "$RELEASE_CODE" != "302" ]; then
         RELEASE_CONFIRMED=true
-        pass "Address no longer returns 302 after ${REL_ELAPSED}s (HTTP $RELEASE_CODE)"
+        pass "Address no longer returns 302 after ${REL_MINS}m ${REL_SECS}s (HTTP $RELEASE_CODE)"
         break
     fi
 done
 
 if [ "$RELEASE_CONFIRMED" = false ]; then
-    log "  Address still returning 302 after 300s — known Arti descriptor caching (issue #114)"
-    log "  Descriptor may persist on HSDirs for up to 3 hours after release"
+    fail "Address still returning 302 after 30 minutes — Arti descriptor caching (issue #114)"
 fi
 
 # ---------------------------------------------------------------------------
