@@ -189,6 +189,7 @@ _start_takeover_worker() {
         --network onionpress-network \
         --ulimit nofile=10000:10000 \
         -e TZ="${TZ:-UTC}" \
+        -e TOR_IMPL="${TOR_IMPL:-arti}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES=3 \
@@ -330,7 +331,9 @@ COPY onionheaven-server.py /onionheaven-server.py
 COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
 COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
 COPY onionheaven-redirect.sh /onionheaven-redirect.sh
-RUN chmod +x /entrypoint.sh /onionheaven-heartbeat.py /onionheaven-server.py /onionheaven-tor-manager.sh /onionheaven-takeover-worker.py /onionheaven-redirect.sh
+COPY key-convert.py /key-convert.py
+COPY torrc.template /etc/tor/torrc.template
+RUN chmod +x /entrypoint.sh /onionheaven-heartbeat.py /onionheaven-server.py /onionheaven-tor-manager.sh /onionheaven-takeover-worker.py /onionheaven-redirect.sh /key-convert.py
 ACTIVATE_DOCKERFILE
 
         # Start the onionheaven container
