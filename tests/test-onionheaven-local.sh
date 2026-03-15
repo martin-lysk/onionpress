@@ -164,13 +164,23 @@ if [ -z "$ONION_ADDR" ]; then
 fi
 log "Local onion address: $ONION_ADDR"
 
-# Check OnionHeaven API is responding via Tor (runs on every node since v2.4.33+)
-if ! oh_api GET /status >/dev/null 2>&1; then
-    fail "OnionHeaven API not responding on port 8083 via Tor"
+# Check OnionHeaven API is responding via Tor (may need retries for descriptor propagation)
+log "Checking onion address reachability via Tor (may take a moment)..."
+OH_API_OK=false
+for attempt in $(seq 1 12); do
+    if oh_api GET /status >/dev/null 2>&1; then
+        OH_API_OK=true
+        break
+    fi
+    [ "$attempt" -lt 12 ] && sleep 10
+done
+if [ "$OH_API_OK" = true ]; then
+    pass "OnionHeaven API responding via Tor"
+else
+    fail "OnionHeaven API not responding on port 8083 via Tor after 2 minutes"
     log "  The tor container image may need updating: docker pull ghcr.io/brewsterkahle/onionpress-tor:latest"
     exit 1
 fi
-pass "OnionHeaven API responding"
 
 # Verify WordPress is responding locally
 WP_STATUS=$(docker exec "$TOR_CONTAINER" curl -s -o /dev/null -w "%{http_code}" --max-time 10 "http://wordpress:80/" 2>/dev/null || echo "000")
@@ -181,13 +191,21 @@ else
     exit 1
 fi
 
-# Verify the onion address is reachable via Tor
+# Verify the onion address is reachable via Tor (retry for descriptor propagation)
 log "Checking onion address reachability via Tor (may take a moment)..."
-TOR_STATUS=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${ONION_ADDR}/" 2>/dev/null || echo "000")
-if [ "$TOR_STATUS" = "200" ] || [ "$TOR_STATUS" = "301" ] || [ "$TOR_STATUS" = "302" ]; then
+TOR_REACHABLE=false
+for attempt in $(seq 1 12); do
+    TOR_STATUS=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${ONION_ADDR}/" 2>/dev/null || echo "000")
+    if [ "$TOR_STATUS" = "200" ] || [ "$TOR_STATUS" = "301" ] || [ "$TOR_STATUS" = "302" ]; then
+        TOR_REACHABLE=true
+        break
+    fi
+    [ "$attempt" -lt 12 ] && sleep 10
+done
+if [ "$TOR_REACHABLE" = true ]; then
     pass "Onion address reachable via Tor (HTTP $TOR_STATUS)"
 else
-    fail "Onion address not reachable via Tor (HTTP $TOR_STATUS)"
+    fail "Onion address not reachable via Tor after 2 minutes (HTTP $TOR_STATUS)"
     exit 1
 fi
 
