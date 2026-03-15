@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -r -m -s /bin/false arti
 COPY --from=builder /usr/local/cargo/bin/arti /usr/local/bin/arti
 
+# Cache-bust: changing this value forces rebuild of all COPY layers below
+ARG CACHEBUST=2026-03-15
 COPY arti.toml /etc/arti/arti.toml
 COPY arti-polling.toml /etc/arti/arti-polling.toml
 COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
