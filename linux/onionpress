@@ -2644,12 +2644,59 @@ main() {
             esac
             ;;
 
+        reset)
+            # Wipe WordPress, database, and Tor state but keep onion keys and config.
+            # After reset, run 'onionpress setup' to re-initialize WordPress.
+            echo ""
+            echo "  This will ERASE your WordPress site, database, and Tor state."
+            echo "  Your onion address keys and config will be preserved."
+            echo ""
+            echo "  Press Enter to continue or Ctrl+C to cancel..."
+            read -r
+
+            log "Resetting OnionPress (keeping keys and config)..."
+
+            # Stop everything
+            setup_db_passwords 2>/dev/null || true
+            if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
+                log "Stopping heartbeat client..."
+                sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
+            fi
+            stop_containers 2>/dev/null || true
+
+            # Remove all Docker volumes
+            cd "$DOCKER_DIR"
+            log "Removing Docker volumes..."
+            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
+                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 && log "Removed volume: $vol" || log "WARNING: Failed to remove volume: $vol"
+            done
+
+            # Remove secrets (will be regenerated on next start) and logs
+            rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
+            log "Removed secrets and logs"
+
+            # Preserved: shared/vanity-keys/, config, onionheaven-registration.json
+
+            echo ""
+            echo "  Reset complete. Preserved:"
+            echo "    - Onion address keys ($(find "$DATA_DIR/shared/vanity-keys" -name hostname -exec cat {} \; 2>/dev/null | head -1 || echo 'none'))"
+            echo "    - Config ($DATA_DIR/config)"
+            if [ -f "$DATA_DIR/onionheaven-registration.json" ]; then
+                echo "    - OnionHeaven registration"
+            fi
+            echo ""
+            echo "  To finish reinstall:"
+            echo "    sudo systemctl start onionpress"
+            echo "    onionpress setup"
+            echo ""
+            ;;
+
         validate-oh-address)
             _validate_oh_address "$2"
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|import-key|backup|restore|update|logs|write-status|apply-config|handle-action|validate-oh-address}"
+            echo "Usage: $0 {start|stop|restart|status|address|setup|reset|import-key|backup|restore|update|logs|write-status|apply-config|handle-action|validate-oh-address}"
             exit 1
             ;;
     esac

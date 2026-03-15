@@ -1,38 +1,43 @@
 #!/bin/bash
 #
-# Arti Onion Service Release Timing Test
+# Arti Onion Service Takeover & Release Timing Test
 # https://github.com/brewsterkahle/onionpress/issues/114
 #
 # Standalone test — only requires Docker. No OnionPress needed.
-# Runs its own Arti containers, generates a faux onion service,
-# publishes it, then removes it and measures how long until clients
-# can no longer reach it.
+# Runs two Arti containers (service + client), generates a throwaway
+# onion service, and measures:
 #
-# Steps:
-#   1. Start two Arti containers: one to host the service, one as a client
-#   2. Generate a faux ed25519 key, install it, and start the service
-#   3. Wait for the address to become reachable via Tor
-#   4. Remove the service config and keystore, SIGHUP Arti (release)
-#   5. Poll until the address becomes unreachable, recording elapsed time
+#   1. TAKEOVER TIME  — how long from key install + SIGHUP until the
+#      address is reachable through the Tor network
+#   2. RELEASE TIME   — how long from config removal + SIGHUP until
+#      the address is no longer reachable
 #
-# Expected result with C Tor: seconds (DESTROY cells tear down intro circuits)
-# Observed result with Arti: 3+ hours (descriptor cached on HSDirs, intro alive)
+# Expected with C Tor:  takeover ~30s-5min, release ~seconds
+#   (C Tor sends DESTROY cells to tear down intro point circuits)
+# Observed with Arti:   takeover ~30s-5min, release 3+ HOURS
+#   (Arti leaves intro circuits alive; descriptor cached on HSDirs)
 #
 # Usage:
-#   ./test-arti-release-timing.sh
+#   ./test-arti-release-timing.sh                              # official image (amd64 only)
+#   ARTI_IMAGE=ghcr.io/brewsterkahle/onionpress-tor:latest \
+#     ./test-arti-release-timing.sh                            # OnionPress image (amd64+arm64)
 #
-# Cleanup:
+# Cleanup (if interrupted):
 #   docker rm -f arti-release-test-service arti-release-test-client 2>/dev/null
+#   docker network rm arti-release-test-net 2>/dev/null
 #
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEST_START=$(date +%s)
 TMPDIR_TEST=$(mktemp -d)
 NETWORK_NAME="arti-release-test-net"
 SERVICE_CONTAINER="arti-release-test-service"
 CLIENT_CONTAINER="arti-release-test-client"
+
+# Default: official Tor Project Arti image (amd64 only)
+# Override with ARTI_IMAGE env var for arm64 or custom builds
+ARTI_IMAGE="${ARTI_IMAGE:-containers.torproject.org/tpo/onion-services/onimages/arti:alpine}"
 
 # Max polling time: 4 hours (descriptor lifetime is 3 hours)
 MAX_POLL_SECONDS=14400
@@ -64,11 +69,35 @@ step() {
 
 # ---------------------------------------------------------------------------
 echo ""
-printf "${YELLOW}Arti Onion Service Release Timing Test${NC}\n"
-printf "${YELLOW}=======================================${NC}\n"
-printf "Measures how long a released Arti onion service remains reachable.\n"
+printf "${YELLOW}Arti Onion Service Takeover & Release Timing Test${NC}\n"
+printf "${YELLOW}==================================================${NC}\n"
+printf "Measures how long it takes to take over an onion address,\n"
+printf "and how long the address remains reachable after release.\n"
 printf "See: https://github.com/brewsterkahle/onionpress/issues/114\n"
 echo ""
+
+# ---------------------------------------------------------------------------
+# Image-specific paths
+# ---------------------------------------------------------------------------
+# The official Tor Project image uses /home/arti for data.
+# The OnionPress image uses /var/lib/arti.
+# We detect which layout to use based on the image name.
+
+if echo "$ARTI_IMAGE" | grep -q "onionpress"; then
+    DATA_DIR="/var/lib/arti"
+    STATE_DIR="/var/lib/arti/state"
+    CACHE_DIR="/var/lib/arti/cache"
+    KEYSTORE_BASE="/var/lib/arti/state/keystore"
+    ARTI_USER="arti"
+    IMAGE_TYPE="onionpress"
+else
+    DATA_DIR="/home/arti"
+    STATE_DIR="/home/arti/state"
+    CACHE_DIR="/home/arti/cache"
+    KEYSTORE_BASE="/home/arti/keystore"
+    ARTI_USER="arti"
+    IMAGE_TYPE="official"
+fi
 
 # ---------------------------------------------------------------------------
 # Pre-flight
@@ -82,9 +111,9 @@ if ! docker info >/dev/null 2>&1; then
 fi
 log "Docker accessible"
 
-# Check architecture
 ARCH=$(uname -m)
 log "Architecture: $ARCH"
+log "Image: $ARTI_IMAGE ($IMAGE_TYPE layout)"
 
 # ---------------------------------------------------------------------------
 step 1 "Start Arti containers"
@@ -94,15 +123,15 @@ step 1 "Start Arti containers"
 docker rm -f "$SERVICE_CONTAINER" "$CLIENT_CONTAINER" 2>/dev/null || true
 docker network rm "$NETWORK_NAME" 2>/dev/null || true
 
-# Create isolated network
-docker network create "$NETWORK_NAME" >/dev/null
-log "Created network: $NETWORK_NAME"
+# Create isolated network (Arti needs --subnet for IP-based proxy_ports)
+docker network create --subnet=10.99.0.0/24 "$NETWORK_NAME" >/dev/null
+log "Created network: $NETWORK_NAME (10.99.0.0/24)"
 
 # Write Arti configs
 SERVICE_TOML="$TMPDIR_TEST/arti-service.toml"
 CLIENT_TOML="$TMPDIR_TEST/arti-client.toml"
 
-cat > "$SERVICE_TOML" << 'EOF'
+cat > "$SERVICE_TOML" << EOF
 [logging]
 console = "info,tor_hsservice=debug"
 
@@ -110,8 +139,8 @@ console = "info,tor_hsservice=debug"
 socks_listen = "0.0.0.0:9050"
 
 [storage]
-cache_dir = "/var/lib/arti/cache"
-state_dir = "/var/lib/arti/state"
+cache_dir = "$CACHE_DIR"
+state_dir = "$STATE_DIR"
 
 [storage.keystore]
 enabled = true
@@ -120,7 +149,7 @@ enabled = true
 mode = "disabled"
 EOF
 
-cat > "$CLIENT_TOML" << 'EOF'
+cat > "$CLIENT_TOML" << EOF
 [logging]
 console = "info"
 
@@ -128,75 +157,85 @@ console = "info"
 socks_listen = "0.0.0.0:9050"
 
 [storage]
-cache_dir = "/var/lib/arti/cache"
-state_dir = "/var/lib/arti/state"
+cache_dir = "$CACHE_DIR"
+state_dir = "$STATE_DIR"
 
 [address_filter]
 allow_onion_addrs = true
 EOF
 
-# Write a minimal HTTP server that returns 200 (the "service" we're publishing)
-HTTPD_SCRIPT="$TMPDIR_TEST/httpd.sh"
-cat > "$HTTPD_SCRIPT" << 'HTTPEOF'
-#!/bin/sh
-# Minimal HTTP server on port 8080 using socat
-echo "HTTP test server starting on port 8080..."
-socat TCP-LISTEN:8080,reuseaddr,fork SYSTEM:'echo "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\nConnection: close\r\n\r\nrelease-test!" '
-HTTPEOF
-chmod +x "$HTTPD_SCRIPT"
+# Pull the Arti image
+log "Pulling Arti image..."
+if ! docker pull "$ARTI_IMAGE" 2>&1 | tail -1; then
+    printf "${RED}Cannot pull image: $ARTI_IMAGE${NC}\n"
+    printf "On arm64, try: ARTI_IMAGE=ghcr.io/brewsterkahle/onionpress-tor:latest\n"
+    exit 1
+fi
 
-# Pull the Arti image (use Tor Project's official or build from OnionPress)
-ARTI_IMAGE="ghcr.io/brewsterkahle/onionpress-tor:latest"
-log "Pulling Arti image: $ARTI_IMAGE"
-docker pull "$ARTI_IMAGE" >/dev/null 2>&1 || {
-    # Fallback: try building from the OnionPress Dockerfile if available
-    if [ -f "$SCRIPT_DIR/../OnionPress.app/Contents/Resources/docker/tor/Dockerfile" ]; then
-        log "Pull failed, building from local Dockerfile..."
-        docker build -t "$ARTI_IMAGE" "$SCRIPT_DIR/../OnionPress.app/Contents/Resources/docker/tor/" >/dev/null 2>&1
-    else
-        printf "${RED}Cannot pull or build Arti image${NC}\n"
-        exit 1
-    fi
-}
+# Config path inside container — must be writable (we append onion service config later)
+CONTAINER_SERVICE_TOML="/etc/arti/arti-service.toml"
+CONTAINER_CLIENT_TOML="/etc/arti/arti-client.toml"
 
-# Start the service container (Arti + HTTP server)
+# Both images have entrypoints that run their own Arti — override with --entrypoint
+# to get a clean shell where we control everything.
+
+# Start the service container
 log "Starting service container..."
 docker run -d --name "$SERVICE_CONTAINER" \
-    --network "$NETWORK_NAME" \
-    -v "$SERVICE_TOML:/etc/arti/arti-service.toml:ro" \
-    -v "$HTTPD_SCRIPT:/httpd.sh:ro" \
-    "$ARTI_IMAGE" sh -c "
-        mkdir -p /var/lib/arti/cache /var/lib/arti/state
-        chown -R arti:arti /var/lib/arti
-        chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
-        # Start HTTP test server
+    --network "$NETWORK_NAME" --ip 10.99.0.10 \
+    --entrypoint sh \
+    "$ARTI_IMAGE" -c "
+        mkdir -p '$CACHE_DIR' '$STATE_DIR' /etc/arti
+        chown -R $ARTI_USER:$ARTI_USER '$DATA_DIR'
+        chmod 700 '$DATA_DIR' '$CACHE_DIR' '$STATE_DIR'
+        # Install curl + socat if missing (Alpine)
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache curl socat >/dev/null 2>&1 || true
+        fi
+        # Minimal HTTP server on port 8080 (the 'service' behind the onion)
         socat TCP-LISTEN:8080,reuseaddr,fork SYSTEM:'printf \"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\nConnection: close\r\n\r\nrelease-test!\"' &
-        # Start Arti
-        su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti-service.toml'
+        # Wait for config to be copied in
+        while [ ! -f '$CONTAINER_SERVICE_TOML' ]; do sleep 0.2; done
+        # Start Arti as arti user
+        su -s /bin/sh $ARTI_USER -c 'arti proxy -c $CONTAINER_SERVICE_TOML'
     " >/dev/null
+sleep 1
+# Copy config into running container (writable, not bind-mounted)
+docker cp "$SERVICE_TOML" "${SERVICE_CONTAINER}:${CONTAINER_SERVICE_TOML}"
+docker exec "$SERVICE_CONTAINER" chown "$ARTI_USER:$ARTI_USER" "$CONTAINER_SERVICE_TOML"
 sleep 3
 if docker ps --format '{{.Names}}' | grep -q "^${SERVICE_CONTAINER}$"; then
-    log "Service container running"
+    log "Service container running (10.99.0.10)"
 else
     printf "${RED}Service container failed to start${NC}\n"
     docker logs "$SERVICE_CONTAINER" 2>&1 | tail -20
     exit 1
 fi
 
-# Start the client container (Arti SOCKS proxy only)
+# Start the client container (SOCKS proxy only)
 log "Starting client container..."
 docker run -d --name "$CLIENT_CONTAINER" \
-    --network "$NETWORK_NAME" \
-    -v "$CLIENT_TOML:/etc/arti/arti-client.toml:ro" \
-    "$ARTI_IMAGE" sh -c "
-        mkdir -p /var/lib/arti/cache /var/lib/arti/state
-        chown -R arti:arti /var/lib/arti
-        chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
-        su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti-client.toml'
+    --network "$NETWORK_NAME" --ip 10.99.0.20 \
+    --entrypoint sh \
+    "$ARTI_IMAGE" -c "
+        mkdir -p '$CACHE_DIR' '$STATE_DIR' /etc/arti
+        chown -R $ARTI_USER:$ARTI_USER '$DATA_DIR'
+        chmod 700 '$DATA_DIR' '$CACHE_DIR' '$STATE_DIR'
+        # Install curl if missing (Alpine)
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache curl >/dev/null 2>&1 || true
+        fi
+        # Wait for config to be copied in
+        while [ ! -f '$CONTAINER_CLIENT_TOML' ]; do sleep 0.2; done
+        su -s /bin/sh $ARTI_USER -c 'arti proxy -c $CONTAINER_CLIENT_TOML'
     " >/dev/null
+sleep 1
+# Copy config into running container
+docker cp "$CLIENT_TOML" "${CLIENT_CONTAINER}:${CONTAINER_CLIENT_TOML}"
+docker exec "$CLIENT_CONTAINER" chown "$ARTI_USER:$ARTI_USER" "$CONTAINER_CLIENT_TOML"
 sleep 3
 if docker ps --format '{{.Names}}' | grep -q "^${CLIENT_CONTAINER}$"; then
-    log "Client container running"
+    log "Client container running (10.99.0.20)"
 else
     printf "${RED}Client container failed to start${NC}\n"
     docker logs "$CLIENT_CONTAINER" 2>&1 | tail -20
@@ -211,13 +250,13 @@ log "Arti version: $ARTI_VERSION"
 log "Waiting for Arti to bootstrap (up to 120s)..."
 for i in $(seq 1 24); do
     sleep 5
-    # Check if SOCKS proxy is responding
     if docker exec "$SERVICE_CONTAINER" curl -s --max-time 3 --socks5-hostname 127.0.0.1:9050 http://www.example.com/ >/dev/null 2>&1; then
         log "Service Arti bootstrapped"
         break
     fi
     if [ "$i" -eq 24 ]; then
         printf "${RED}Service Arti failed to bootstrap after 120s${NC}\n"
+        docker logs "$SERVICE_CONTAINER" 2>&1 | tail -10
         exit 1
     fi
 done
@@ -230,23 +269,23 @@ for i in $(seq 1 24); do
     fi
     if [ "$i" -eq 24 ]; then
         printf "${RED}Client Arti failed to bootstrap after 120s${NC}\n"
+        docker logs "$CLIENT_CONTAINER" 2>&1 | tail -10
         exit 1
     fi
 done
 
 # ---------------------------------------------------------------------------
-step 2 "Generate faux key and install onion service"
+step 2 "Generate throwaway key and install onion service (TAKEOVER)"
 # ---------------------------------------------------------------------------
 
+TAKEOVER_START=$(date +%s)
+
 # Generate ed25519 keypair using Python (inline, no external dependencies)
-log "Generating faux ed25519 keypair..."
+log "Generating throwaway ed25519 keypair..."
 KEYGEN_OUTPUT=$(python3 -c "
 import hashlib, os, struct, base64
 
 # Pure-Python ed25519 scalar mult (minimal, for key generation only)
-# We only need to derive public key from seed — no signing needed here.
-# Use Python's pow() for modular arithmetic on Curve25519.
-
 p = 2**255 - 19
 d = -121665 * pow(121666, p-2, p) % p
 I = pow(2, (p-1)//4, p)
@@ -285,7 +324,7 @@ def encode_point(P):
     bs[31] |= (x & 1) << 7
     return bytes(bs)
 
-# Generate expanded key
+# Generate expanded key from random seed
 seed = os.urandom(32)
 h = hashlib.sha512(seed).digest()
 a_bytes = bytearray(h[:32])
@@ -296,12 +335,11 @@ A = scalar_mult(a, B)
 pub = encode_point(A)
 
 # Derive .onion address (v3)
-import hashlib as hl
 version = b'\x03'
-checksum = hl.sha3_256(b'.onion checksum' + pub + version).digest()[:2]
+checksum = hashlib.sha3_256(b'.onion checksum' + pub + version).digest()[:2]
 addr = base64.b32encode(pub + checksum + version).decode().lower() + '.onion'
 
-# Build Arti PEM
+# Build OpenSSH-format key for Arti keystore
 KEY_TYPE = b'ed25519-expanded@spec.torproject.org'
 def pack(data): return struct.pack('>I', len(data)) + data
 pub_blob = pack(KEY_TYPE) + pack(pub)
@@ -319,59 +357,56 @@ print(f'ADDR={addr}')
 print(f'PEM_B64={base64.b64encode(pem.encode()).decode()}')
 ")
 
-CONTENT_ADDR=$(echo "$KEYGEN_OUTPUT" | grep '^ADDR=' | cut -d= -f2)
+ONION_ADDR=$(echo "$KEYGEN_OUTPUT" | grep '^ADDR=' | cut -d= -f2)
 PEM_B64=$(echo "$KEYGEN_OUTPUT" | grep '^PEM_B64=' | cut -d= -f2)
-log "Faux address: $CONTENT_ADDR"
+log "Throwaway address: $ONION_ADDR"
 
 # Install key in service container's Arti keystore
-ADDR_PREFIX=$(echo "$CONTENT_ADDR" | sed 's/\.onion$//' | cut -c1-16)
-NICKNAME="release_test_${ADDR_PREFIX}"
-KEYSTORE_DIR="/var/lib/arti/state/keystore/hss/${NICKNAME}"
-ARTI_TOML="/etc/arti/arti-service.toml"
-MARKER="# release-test:${CONTENT_ADDR}"
+NICKNAME="release_timing_test"
+KEYSTORE_DIR="${KEYSTORE_BASE}/hss/${NICKNAME}"
+MARKER="# release-test:${ONION_ADDR}"
 
 log "Installing key in Arti keystore..."
 docker exec "$SERVICE_CONTAINER" mkdir -p "$KEYSTORE_DIR"
 docker exec "$SERVICE_CONTAINER" sh -c "echo '$PEM_B64' | base64 -d > ${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"
-docker exec "$SERVICE_CONTAINER" chown -R arti:arti "$KEYSTORE_DIR"
+docker exec "$SERVICE_CONTAINER" chown -R "$ARTI_USER:$ARTI_USER" "$KEYSTORE_DIR"
 docker exec "$SERVICE_CONTAINER" chmod 700 "$KEYSTORE_DIR"
 docker exec "$SERVICE_CONTAINER" chmod 600 "${KEYSTORE_DIR}/ks_hs_id.ed25519_expanded_private"
 log "Key installed"
 
-# Add onion service config
-docker exec "$SERVICE_CONTAINER" sh -c "cat >> $ARTI_TOML << SEOF
+# Append onion service config
+docker exec "$SERVICE_CONTAINER" sh -c "cat >> $CONTAINER_SERVICE_TOML << SEOF
 
 ${MARKER}
 [onion_services.\"${NICKNAME}\"]
 enabled = true
 proxy_ports = [[\"80\", \"127.0.0.1:8080\"]]
 SEOF"
-log "Service config added to $ARTI_TOML"
+docker exec "$SERVICE_CONTAINER" chown "$ARTI_USER:$ARTI_USER" "$CONTAINER_SERVICE_TOML"
+log "Service config appended"
 
-# SIGHUP Arti
+# SIGHUP Arti to pick up new config
 ARTI_PID=$(docker exec "$SERVICE_CONTAINER" pidof arti 2>/dev/null)
 docker exec "$SERVICE_CONTAINER" kill -HUP "$ARTI_PID"
-log "Sent SIGHUP to Arti (pid $ARTI_PID)"
+log "Sent SIGHUP to Arti (pid $ARTI_PID) — takeover started"
 
 # ---------------------------------------------------------------------------
-step 3 "Wait for address to become reachable via Tor"
+step 3 "Measure TAKEOVER TIME (until address is reachable via Tor)"
 # ---------------------------------------------------------------------------
 
-log "Polling faux address through client's SOCKS proxy..."
+log "Polling through client SOCKS proxy..."
 log "Descriptor propagation typically takes 30s-10min"
 
 REACHABLE=false
-PROP_START=$(date +%s)
-
 for i in $(seq 1 60); do
     sleep 10
-    ELAPSED=$(( $(date +%s) - PROP_START ))
-    CODE=$(docker exec "$CLIENT_CONTAINER" curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
+    ELAPSED=$(( $(date +%s) - TAKEOVER_START ))
+    CODE=$(docker exec "$CLIENT_CONTAINER" curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${ONION_ADDR}/" 2>/dev/null) || true
     log "  [${ELAPSED}s] HTTP $CODE"
     if [ "$CODE" = "200" ]; then
         REACHABLE=true
-        PROPAGATION_TIME=$ELAPSED
-        printf "${GREEN}Address reachable via Tor after ${ELAPSED}s (HTTP $CODE)${NC}\n"
+        TAKEOVER_TIME=$ELAPSED
+        printf "${GREEN}  TAKEOVER COMPLETE — address reachable after ${ELAPSED}s${NC}\n"
         break
     fi
 done
@@ -381,9 +416,9 @@ if [ "$REACHABLE" = false ]; then
     exit 1
 fi
 
-# Confirm with a second request
+# Confirm reachability
 sleep 5
-CODE2=$(docker exec "$CLIENT_CONTAINER" curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
+CODE2=$(docker exec "$CLIENT_CONTAINER" curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${ONION_ADDR}/" 2>/dev/null) || true
 log "Confirmation: HTTP $CODE2"
 
 # ---------------------------------------------------------------------------
@@ -394,8 +429,12 @@ RELEASE_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 RELEASE_EPOCH=$(date +%s)
 log "Release timestamp: $RELEASE_TIME"
 
-# Remove service config
-docker exec "$SERVICE_CONTAINER" sh -c "awk -v m='$MARKER' 'BEGIN{s=0} \$0==m{s=3;next} s>0{s--;next} {print}' $ARTI_TOML > ${ARTI_TOML}.tmp && mv ${ARTI_TOML}.tmp $ARTI_TOML"
+# Remove onion service config (the marker + 3 lines after it)
+docker exec "$SERVICE_CONTAINER" sh -c "
+    awk -v m='$MARKER' 'BEGIN{s=0} \$0==m{s=3;next} s>0{s--;next} {print}' \
+    $CONTAINER_SERVICE_TOML > ${CONTAINER_SERVICE_TOML}.tmp && \
+    mv ${CONTAINER_SERVICE_TOML}.tmp $CONTAINER_SERVICE_TOML"
+docker exec "$SERVICE_CONTAINER" chown "$ARTI_USER:$ARTI_USER" "$CONTAINER_SERVICE_TOML"
 log "Removed service config"
 
 # Remove keystore
@@ -405,10 +444,10 @@ log "Removed keystore"
 # SIGHUP Arti
 ARTI_PID=$(docker exec "$SERVICE_CONTAINER" pidof arti 2>/dev/null)
 docker exec "$SERVICE_CONTAINER" kill -HUP "$ARTI_PID"
-log "Sent SIGHUP to Arti (pid $ARTI_PID)"
+log "Sent SIGHUP to Arti (pid $ARTI_PID) — release started"
 
 # ---------------------------------------------------------------------------
-step 5 "Poll until address becomes unreachable"
+step 5 "Measure RELEASE TIME (until address is unreachable)"
 # ---------------------------------------------------------------------------
 
 log "Polling every 30s for up to 4 hours..."
@@ -425,15 +464,15 @@ for i in $(seq 1 $POLL_COUNT); do
     ELAPSED=$(( $(date +%s) - RELEASE_EPOCH ))
     MINS=$((ELAPSED / 60))
     SECS=$((ELAPSED % 60))
-    CODE=$(docker exec "$CLIENT_CONTAINER" curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
+    CODE=$(docker exec "$CLIENT_CONTAINER" curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${ONION_ADDR}/" 2>/dev/null) || true
 
-    if [ "$CODE" = "000" ]; then
+    if [ "$CODE" != "200" ]; then
         CONSECUTIVE_FAIL=$((CONSECUTIVE_FAIL + 1))
         log "  [${MINS}m ${SECS}s] UNREACHABLE (${CONSECUTIVE_FAIL}/3 consecutive)"
         if [ "$CONSECUTIVE_FAIL" -ge 3 ]; then
             UNREACHABLE=true
-            RELEASE_DURATION=$((ELAPSED - 60))
-            printf "\n${GREEN}Address became unreachable after ~${MINS}m${NC}\n"
+            RELEASE_DURATION=$((ELAPSED - 60))  # subtract the 3x30s confirmation window
+            printf "\n${GREEN}  RELEASED — address unreachable after ~${MINS}m${NC}\n"
             break
         fi
     else
@@ -450,25 +489,34 @@ printf "${YELLOW}━━━━━━━━━━━━━━━━━━━━━
 echo ""
 printf "  Arti version:          $ARTI_VERSION\n"
 printf "  Architecture:          $ARCH\n"
-printf "  Propagation time:      ${PROPAGATION_TIME}s (address became reachable)\n"
-printf "  Release method:        remove config + keystore, SIGHUP\n"
+printf "  Image:                 $ARTI_IMAGE\n"
+printf "  Address:               $ONION_ADDR\n"
+echo ""
+printf "  TAKEOVER TIME:         ${TAKEOVER_TIME}s (key install + SIGHUP → reachable)\n"
 
 if [ "$UNREACHABLE" = true ]; then
     RELEASE_MINS=$((RELEASE_DURATION / 60))
-    printf "  ${GREEN}Release duration:      ~${RELEASE_MINS} minutes${NC}\n"
-    printf "\n  Address became unreachable ~${RELEASE_MINS} minutes after release.\n"
+    printf "  RELEASE TIME:          ~${RELEASE_MINS} minutes (config remove + SIGHUP → unreachable)\n"
 else
     TOTAL_MINS=$((MAX_POLL_SECONDS / 60))
-    printf "  ${RED}Release duration:      >${TOTAL_MINS} minutes (still reachable!)${NC}\n"
-    printf "\n  The address was STILL reachable after ${TOTAL_MINS} minutes.\n"
-    printf "  Descriptors cached on HSDirs have a 3-hour lifetime.\n"
+    printf "  ${RED}RELEASE TIME:          >${TOTAL_MINS} minutes — STILL REACHABLE!${NC}\n"
+    printf "\n  The address was STILL reachable ${TOTAL_MINS} minutes after release.\n"
+    printf "  This means an attacker who obtains the key can serve content\n"
+    printf "  indefinitely — the legitimate operator cannot revoke it.\n"
 fi
 
 echo ""
-printf "  For comparison, C Tor sends DESTROY cells to introduction point\n"
-printf "  relays on service removal. The relay removes the circuit from its\n"
-printf "  map and NACKs subsequent INTRODUCE1 cells with UNKNOWN_ID.\n"
-printf "  Clients fail within seconds, even though the descriptor persists.\n"
+printf "  ┌─────────────────────────────────────────────────────────┐\n"
+printf "  │ C Tor sends DESTROY cells to introduction point relays │\n"
+printf "  │ on service removal. The relay tears down the circuit    │\n"
+printf "  │ and NACKs subsequent INTRODUCE1 cells. Clients fail    │\n"
+printf "  │ within seconds, even though the descriptor persists    │\n"
+printf "  │ on HSDirs for up to 3 hours.                           │\n"
+printf "  │                                                        │\n"
+printf "  │ Arti does not appear to send DESTROY cells on release. │\n"
+printf "  │ The intro circuits stay alive, and the service remains │\n"
+printf "  │ reachable until the descriptor naturally expires.      │\n"
+printf "  └─────────────────────────────────────────────────────────┘\n"
 echo ""
 printf "  See: https://github.com/brewsterkahle/onionpress/issues/114\n"
 echo ""

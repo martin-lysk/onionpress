@@ -33,8 +33,13 @@ TEST_START=$(date +%s)
 PASS_COUNT=0
 FAIL_COUNT=0
 
-# Use DOCKER_HOST if set (Colima), otherwise default
-export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.onionpress/colima/docker.sock}"
+# Use DOCKER_HOST if set, otherwise Colima socket on macOS, system default on Linux
+if [ -z "${DOCKER_HOST:-}" ]; then
+    if [ -S "$HOME/.onionpress/colima/docker.sock" ]; then
+        export DOCKER_HOST="unix://$HOME/.onionpress/colima/docker.sock"
+    fi
+    # On Linux, leave DOCKER_HOST unset to use /var/run/docker.sock
+fi
 
 # Container name
 TOR_CONTAINER="onionpress-tor"
