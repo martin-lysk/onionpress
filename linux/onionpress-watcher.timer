@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll for OnionPress settings changes every 10s
+
+[Timer]
+OnActiveSec=10
+OnUnitActiveSec=10
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

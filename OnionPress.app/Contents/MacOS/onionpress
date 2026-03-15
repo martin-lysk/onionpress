@@ -188,6 +188,8 @@ _start_takeover_worker() {
         --name "$name" \
         --network onionpress-network \
         --ulimit nofile=10000:10000 \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         -e TZ="${TZ:-UTC}" \
         -e TOR_IMPL="${TOR_IMPL:-arti}" \
         -e TAKEOVER_WORKER=1 \

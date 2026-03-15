@@ -94,6 +94,13 @@ if ! command -v python3 >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq python3
 fi
 
+# Ensure unzip and zip are available (needed for plugin installs and backups)
+if ! command -v unzip >/dev/null 2>&1 || ! command -v zip >/dev/null 2>&1; then
+    echo "  Installing zip/unzip..."
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq zip unzip
+fi
+
 # ─── Install OnionPress files ────────────────────────────────────────
 
 echo ""
@@ -113,6 +120,13 @@ else
     TMPDIR=$(mktemp -d)
     git clone --depth 1 "$REPO_URL" "$TMPDIR/onionpress"
     REPO_DIR="$TMPDIR/onionpress"
+fi
+
+# Verify source directory exists
+if [ ! -d "$REPO_DIR/OnionPress.app/Contents/Resources/docker" ]; then
+    echo "ERROR: Docker resources not found at $REPO_DIR/OnionPress.app/Contents/Resources/docker"
+    echo "       Make sure you're running from the full OnionPress repo."
+    exit 1
 fi
 
 # Copy files
@@ -200,6 +214,8 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
+REGISTER_WITH_ONIONHEAVEN=yes
+ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 EOF
     echo "  Default config created"
 fi
@@ -229,6 +245,7 @@ fi
 
 # Install watcher service (triggered by handle-action)
 $SUDO cp "$REPO_DIR/linux/onionpress-watcher.service" /etc/systemd/system/onionpress-watcher.service
+$SUDO cp "$REPO_DIR/linux/onionpress-watcher.timer" /etc/systemd/system/onionpress-watcher.timer
 if [ "$REAL_USER" != "root" ]; then
     $SUDO sed -i "/^\[Service\]/a User=$REAL_USER" \
         /etc/systemd/system/onionpress-watcher.service
@@ -236,6 +253,7 @@ fi
 
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable onionpress
+$SUDO systemctl enable --now onionpress-watcher.timer
 $SUDO systemctl enable onionpress-heartbeat
 echo "  Systemd services installed and enabled (starts on boot)"
 
@@ -255,7 +273,15 @@ $SUDO systemctl start onionpress-heartbeat
 echo "  Waiting for services..."
 local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 
-sleep 5
+# Wait for WordPress container to respond (DB can take 20-30s on first run)
+wp_wait=0
+while [ $wp_wait -lt 60 ]; do
+    if curl -s --max-time 3 "http://localhost:8080" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+    wp_wait=$((wp_wait + 2))
+done
 
 # Check if it started successfully
 if $SUDO systemctl is-active --quiet onionpress; then
@@ -276,7 +302,16 @@ if $SUDO systemctl is-active --quiet onionpress; then
         echo "  Onion address: Still generating... (run 'onionpress address' to check)"
     fi
     echo ""
-    echo "  Open http://${local_ip}:8080 in a browser to set up WordPress."
+    # Run first-time WordPress setup if not already installed
+    if ! docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1; then
+        # Run as the real user so DATA_DIR resolves correctly
+        if [ -n "$SUDO_USER" ]; then
+            sudo -u "$SUDO_USER" "$INSTALL_DIR/onionpress" setup
+        else
+            "$INSTALL_DIR/onionpress" setup
+        fi
+    fi
+
     echo ""
     echo "  Commands:"
     echo "    onionpress status       - Show container status"

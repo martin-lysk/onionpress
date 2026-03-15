@@ -3529,7 +3529,7 @@ class OnionPressApp(rumps.App):
         input_w = 100
         help_x = 280
         help_w = 25
-        container_h = 10 * row_h + 10
+        container_h = 12 * row_h + 10
 
         def _alert(title, message):
             """Show an alert with the OnionPress icon."""

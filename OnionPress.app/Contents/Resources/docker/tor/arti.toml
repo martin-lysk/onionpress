@@ -1,5 +1,5 @@
 [logging]
-console = "info,arti_client=debug,tor_hsservice=debug,tor_guardmgr=debug,tor_circmgr=debug"
+console = "info,tor_hsservice=debug"
 
 [proxy]
 socks_listen = "0.0.0.0:9050"
@@ -29,3 +29,9 @@ num_intro_points = 3
 [onion_services."healthcheck"]
 enabled = true
 proxy_ports = [["80", "127.0.0.1:8081"]]
+
+[vanguards]
+# Disable vanguards — they add overhead on low-resource devices (Pi) and cause
+# noisy "unbootstrapped vanguard manager" errors during startup. OnionPress
+# serves public WordPress content, not sensitive hidden services.
+mode = "disabled"
