@@ -1045,13 +1045,13 @@ disable_workers() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor: comment out the HiddenServiceDir lines for this worker
-            docker_cmd exec "$ctr_name" \
-                sed -i "s|^HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|" \
-                /etc/tor/torrc 2>/dev/null || true
-            docker_cmd exec "$ctr_name" \
-                sed -i "s|^HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|" \
-                /etc/tor/torrc 2>/dev/null || true
+            # C Tor: comment out HiddenServiceDir AND its HiddenServicePort line
+            docker_cmd exec "$ctr_name" sh -c "
+                sed -i 's|^HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|' /etc/tor/torrc
+                sed -i '/^#DISABLED# HiddenServiceDir.*${content_nick}/{n;s|^HiddenServicePort|#DISABLED# HiddenServicePort|}' /etc/tor/torrc
+                sed -i 's|^HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|' /etc/tor/torrc
+                sed -i '/^#DISABLED# HiddenServiceDir.*${hc_nick}/{n;s|^HiddenServicePort|#DISABLED# HiddenServicePort|}' /etc/tor/torrc
+            " 2>/dev/null || true
         else
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = true/enabled = false/}" \
@@ -1108,13 +1108,12 @@ enable_workers() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor: uncomment the HiddenServiceDir lines
-            docker_cmd exec "$ctr_name" \
-                sed -i "s|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|" \
-                /etc/tor/torrc 2>/dev/null || true
-            docker_cmd exec "$ctr_name" \
-                sed -i "s|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|" \
-                /etc/tor/torrc 2>/dev/null || true
+            # C Tor: uncomment HiddenServiceDir AND HiddenServicePort lines
+            docker_cmd exec "$ctr_name" sh -c "
+                sed -i 's|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|' /etc/tor/torrc
+                sed -i 's|^#DISABLED# HiddenServicePort|HiddenServicePort|' /etc/tor/torrc
+                sed -i 's|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|' /etc/tor/torrc
+            " 2>/dev/null || true
         else
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
@@ -1234,12 +1233,11 @@ enable_workers_silent() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            docker_cmd exec "$ctr_name" \
-                sed -i "s|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|" \
-                /etc/tor/torrc 2>/dev/null || true
-            docker_cmd exec "$ctr_name" \
-                sed -i "s|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|" \
-                /etc/tor/torrc 2>/dev/null || true
+            docker_cmd exec "$ctr_name" sh -c "
+                sed -i 's|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|' /etc/tor/torrc
+                sed -i 's|^#DISABLED# HiddenServicePort|HiddenServicePort|' /etc/tor/torrc
+                sed -i 's|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|' /etc/tor/torrc
+            " 2>/dev/null || true
         else
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
