@@ -1900,7 +1900,7 @@ run_worker() {
     log "OnionHeaven: ${ONIONHEAVEN_ADDR}"
     [ -n "$LOCAL_ONION_ADDR" ] && log "This machine: ${LOCAL_ONION_ADDR}" || true
     log "Sites: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
-    log "Containers: ${NUM_CONTAINERS} × ${PER_CTR} sites/container"
+    log "Stress containers: ${NUM_CONTAINERS} × ${PER_CTR} sites/container"
     if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
         log "Container batch size: ${BATCH_SIZE}"
     fi
