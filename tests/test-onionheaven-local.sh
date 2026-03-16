@@ -211,24 +211,35 @@ fi
 
 # Clean up leftover state from previous test runs
 log "Cleaning up leftover OnionHeaven state..."
-# Remove activate flag so the lazy watcher doesn't restart containers
-docker exec "$TOR_CONTAINER" rm -f /var/lib/onionpress/onionheaven/activate 2>/dev/null || true
-# Clear test entries from registry DB so the watcher doesn't see total > 0 and re-bootstrap
+# Clear test entries from registry DB
 docker exec "$TOR_CONTAINER" sh -c "sqlite3 /var/lib/onionpress/onionheaven/registry.db \"DELETE FROM registry WHERE version LIKE 'test-%' OR version LIKE 'stress-test-%'\" 2>/dev/null" || true
-# Stop any leftover onionheaven containers
-for c in onionheaven onionheaven-takeover-0 onionheaven-takeover-1 onionheaven-takeover-2; do
-    if docker ps -a --format '{{.Names}}' | grep -q "^${c}$"; then
-        docker stop "$c" >/dev/null 2>&1 && docker rm "$c" >/dev/null 2>&1 && log "  Cleaned up $c"
+
+# Check if there are real (non-test) registrations — if so, the lazy watcher
+# will keep the onionheaven container alive and we cannot stop it cleanly.
+REAL_TOTAL=$(docker exec "$TOR_CONTAINER" sh -c "sqlite3 /var/lib/onionpress/onionheaven/registry.db \"SELECT COUNT(*) FROM registry WHERE status='online'\" 2>/dev/null" || echo "0")
+if [ "${REAL_TOTAL:-0}" -gt 0 ]; then
+    LIVE_OH_NODE=true
+    log "Live OnionHeaven node with $REAL_TOTAL real registrations — skipping container teardown"
+    pass "Leftover test state cleaned up (live node, onionheaven container stays)"
+else
+    LIVE_OH_NODE=false
+    # Remove activate flag so the lazy watcher doesn't restart containers
+    docker exec "$TOR_CONTAINER" rm -f /var/lib/onionpress/onionheaven/activate 2>/dev/null || true
+    # Stop any leftover onionheaven containers
+    for c in onionheaven onionheaven-takeover-0 onionheaven-takeover-1 onionheaven-takeover-2; do
+        if docker ps -a --format '{{.Names}}' | grep -q "^${c}$"; then
+            docker stop "$c" >/dev/null 2>&1 && docker rm "$c" >/dev/null 2>&1 && log "  Cleaned up $c"
+        fi
+    done
+    # Brief pause to let the lazy watcher cycle past without restarting
+    sleep 12
+    # Verify containers stayed down
+    if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
+        fail "onionheaven container respawned after cleanup — check for leftover DB entries"
+        exit 1
     fi
-done
-# Brief pause to let the lazy watcher cycle past without restarting
-sleep 12
-# Verify containers stayed down
-if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
-    fail "onionheaven container respawned after cleanup — check for leftover DB entries"
-    exit 1
+    pass "Leftover OnionHeaven state cleaned up"
 fi
-pass "Leftover OnionHeaven state cleaned up"
 
 # Generate faux OnionPress identity
 log "Generating faux OnionPress identity..."
@@ -242,15 +253,24 @@ log "  Healthcheck address: ${HEALTHCHECK_ADDR:0:20}...onion"
 # Step 1: Test initial state
 # ---------------------------------------------------------------------------
 
-step 1 "Verify initial state (OnionPress up, OnionHeaven not yet activated)"
+step 1 "Verify initial state (OnionPress up, OnionHeaven API responding)"
 
-# Verify the onionheaven container is NOT running (lazy activation)
-if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
-    fail "onionheaven container is already running — stop it first for a clean test"
-    log "  Run: docker stop onionheaven && docker rm onionheaven"
-    exit 1
+# On a live OnionHeaven node, the container is already running — that's fine.
+# On a fresh node, it should not be running yet (lazy activation).
+if [ "$LIVE_OH_NODE" = true ]; then
+    if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
+        pass "onionheaven container running (live node with real registrations)"
+    else
+        log "WARNING: Live node but onionheaven container not running — test will still proceed"
+    fi
 else
-    pass "No onionheaven container running (lazy activation not yet triggered)"
+    if docker ps --format '{{.Names}}' | grep -q "^onionheaven$"; then
+        fail "onionheaven container is already running — stop it first for a clean test"
+        log "  Run: docker stop onionheaven && docker rm onionheaven"
+        exit 1
+    else
+        pass "No onionheaven container running (lazy activation not yet triggered)"
+    fi
 fi
 
 # Check that our faux address is not already registered
@@ -484,8 +504,10 @@ step 6 "Verify release propagation (no more 302 via Tor)"
 sleep 5
 
 # Check that the key was removed from the onionheaven container
+# Use the test address prefix to avoid false matches against real registrations
+TEST_ADDR_PREFIX="${CONTENT_ADDR:0:16}"
 if [ "$OH_TOR_IMPL" = "tor" ]; then
-    KEY_GONE=$(docker exec "$OH_CONTAINER" sh -c "find /var/lib/tor/hidden_service/ -path '*onionheaven_*' -name 'hs_ed25519_secret_key' 2>/dev/null | head -1" || echo "")
+    KEY_GONE=$(docker exec "$OH_CONTAINER" sh -c "find /var/lib/tor/hidden_service/ -path '*onionheaven_${TEST_ADDR_PREFIX}*' -name 'hs_ed25519_secret_key' 2>/dev/null | head -1" || echo "")
     if [ -z "$KEY_GONE" ]; then
         pass "Key removed from onionheaven C Tor HiddenServiceDir"
     else
