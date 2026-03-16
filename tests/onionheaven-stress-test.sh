@@ -646,7 +646,7 @@ print(sum(1 for x in w if x.get('registered')), len(w))
         local now
         now=$(date +%s)
         if [ $((now - last_status)) -ge 10 ]; then
-            log "  Bootstrap: ${ready_count}/${NUM_CONTAINERS} containers done, ${registered_count}/${TOTAL} sites registered"
+            log "  Bootstrap: ${ready_count}/${NUM_CONTAINERS} stress containers done, ${registered_count}/${TOTAL} sites registered"
             last_status=$now
         fi
 
@@ -654,7 +654,7 @@ print(sum(1 for x in w if x.get('registered')), len(w))
             local elapsed=$(( $(date +%s) - start_ts ))
             [ -n "$PHASE_LOG" ] && echo " ${registered_count}/${TOTAL}" >> "$PHASE_LOG"
             WAIT_RESULT="${registered_count}/${TOTAL} registered in $(fmt_duration $elapsed)"
-            log "All containers bootstrapped: ${registered_count} sites registered"
+            log "All stress containers bootstrapped: ${registered_count} sites registered"
             return 0
         fi
 
@@ -903,6 +903,25 @@ parallel_check_addrs() {
     PCHECK_200=0
     PCHECK_000=0
 
+    # Build list of available stress containers to distribute checks across.
+    # Falls back to onionpress-tor-client if no stress containers are running.
+    local check_ctrs=""
+    local num_check_ctrs=0
+    for ci in $(seq 0 $((NUM_CONTAINERS - 1))); do
+        local cname="stress-worker-${ci}"
+        if docker_cmd inspect "$cname" >/dev/null 2>&1; then
+            check_ctrs="${check_ctrs} ${cname}"
+            num_check_ctrs=$((num_check_ctrs + 1))
+        fi
+    done
+    if [ "$num_check_ctrs" -eq 0 ]; then
+        check_ctrs="onionpress-tor-client"
+        num_check_ctrs=1
+    fi
+    # Convert to indexed array-like string for round-robin
+    local ctr_arr
+    ctr_arr=($check_ctrs)
+
     local tmpdir
     tmpdir=$(mktemp -d)
     local pids=""
@@ -913,8 +932,11 @@ parallel_check_addrs() {
         [ -z "$addr" ] && continue
         idx=$((idx + 1))
 
+        # Round-robin across available containers
+        local ctr_name="${ctr_arr[$(( (idx - 1) % num_check_ctrs ))]}"
+
         (
-            code=$(docker_cmd exec onionpress-tor-client \
+            code=$(docker_cmd exec "$ctr_name" \
                 curl -s --socks5-hostname "reach${idx}:x@127.0.0.1:9050" --max-time "$max_time" \
                 -o /dev/null -w "%{http_code}" \
                 "http://${addr}/" 2>/dev/null) || code="000"
@@ -1131,26 +1153,32 @@ disable_workers() {
         fi
     done
 
-    # Restart Tor in each affected container with the updated config.
+    # SIGHUP Tor to reload config (removes disabled services).
+    # Do NOT kill+restart — that disrupts healthy workers' onion services and
+    # heartbeat delivery in the same container, causing false-positive takeovers.
     local tor_proc="arti"
     [ "$TOR_IMPL" = "tor" ] && tor_proc="tor"
     for ctr_name in $affected_containers; do
         docker_cmd exec "$ctr_name" sh -c "
+            signaled=false
             for d in /proc/[0-9]*; do
                 if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"${tor_proc}\" ]; then
-                    kill \$(basename \$d) 2>/dev/null
+                    kill -HUP \$(basename \$d) 2>/dev/null
+                    signaled=true
                 fi
             done
-            sleep 2
-            if [ '${TOR_IMPL}' = 'tor' ]; then
-                su -s /bin/sh debian-tor -c 'tor -f /etc/tor/torrc' &
-            else
-                su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
+            if [ \"\$signaled\" = false ]; then
+                # Tor not running — start it
+                if [ '${TOR_IMPL}' = 'tor' ]; then
+                    su -s /bin/sh debian-tor -c 'tor -f /etc/tor/torrc' &
+                else
+                    su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
+                fi
             fi
         " 2>/dev/null || true
     done
 
-    log "Disabled ${fail_count} sites (HTTP responders + ${TOR_LABEL} restart)"
+    log "Disabled ${fail_count} sites (HTTP responders + ${TOR_LABEL} SIGHUP)"
 }
 
 enable_workers() {
@@ -1504,12 +1532,18 @@ notify_offline() {
     # Build all offline payloads in one python3 call, then send them in a single
     # docker exec to avoid 300+ subprocess calls (each ~1s under qemu).
     local payloads
+    local _notify_log="${OUTPUT_DIR}/notify_offline_debug.log"
     payloads=$(python3 -c "
-import json, glob, sys, base64
+import json, glob, sys, base64, os
 sys.path.insert(0, '${SCRIPT_DIR}/../src')
 from onion_auth import sign_payload, make_timestamp
 payloads = []
-for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
+# Use absolute path to avoid cwd issues
+output_dir = os.path.abspath('${OUTPUT_DIR}')
+files = sorted(glob.glob(os.path.join(output_dir, 'worker-*-info.json')))
+if not files:
+    print(f'ERROR: no worker-*-info.json in {output_dir}', file=sys.stderr)
+for f in files:
     try:
         workers = json.load(open(f))
         for w in workers:
@@ -1525,56 +1559,74 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
                     ts = make_timestamp()
                     sig = sign_payload(privkey, pubkey, 'offline', ca, ha, ts)
                     payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
-    except: pass
+    except Exception as e:
+        print(f'ERROR generating payload from {f}: {e}', file=sys.stderr)
+print(f'{len(payloads)} /offline payload(s) for sites ${start}..$(( start + count - 1))', file=sys.stderr)
 for p in payloads:
     print(p)
-" 2>/dev/null)
+" 2>"$_notify_log")
 
     if [ -z "$payloads" ]; then
+        [ -s "$_notify_log" ] && log "  notify_offline debug: $(cat "$_notify_log")"
         log "WARNING: No payloads generated for /offline"
         return
     fi
+
+    local payload_count
+    payload_count=$(echo "$payloads" | wc -l | tr -d ' ')
+    log "  Generated ${payload_count} /offline payload(s)"
 
     local notified
     if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
         # Local: send directly over Docker network (fast, reliable — no Tor latency)
         notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor sh -c '
-            n=0; tmpdir=$(mktemp -d); i=0
+            tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (curl -s --max-time 10 \
+                (code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
                     -X POST "http://127.0.0.1:8083/offline" \
                     -H "Content-Type: application/json" \
-                    -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
-                # Limit to 10 concurrent to avoid overwhelming the server
+                    -d "$payload" 2>/dev/null)
+                 [ "$code" = "200" ] && touch "$tmpdir/ok.$i"
+                 echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
             wait
-            n=$(ls "$tmpdir"/ok.* 2>/dev/null | wc -l)
+            # Report results
+            if [ -f "$tmpdir/results" ]; then
+                fails=$(grep -v ":200$" "$tmpdir/results" 2>/dev/null || true)
+                [ -n "$fails" ] && echo "NOTIFY_DEBUG: failures: $fails" >&2
+            fi
+            ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
             rm -rf "$tmpdir"
-            echo $n
-        ')
+        ' 2>>"$_notify_log")
     else
         # Remote: send over Tor with parallelism (up to 10 concurrent)
-        # Each request uses unique SOCKS auth for circuit isolation
         notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
-            n=0; tmpdir=$(mktemp -d); i=0
+            tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (curl -s --socks5-hostname "off${i}:x@127.0.0.1:9050" --max-time 30 \
+                (code=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname "off${i}:x@127.0.0.1:9050" --max-time 30 \
                     -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/offline" \
                     -H "Content-Type: application/json" \
-                    -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
-                # Limit to 10 concurrent to avoid overwhelming Arti SOCKS
+                    -d "$payload" 2>/dev/null)
+                 [ "$code" = "200" ] && touch "$tmpdir/ok.$i"
+                 echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
             wait
-            n=$(ls "$tmpdir"/ok.* 2>/dev/null | wc -l)
+            if [ -f "$tmpdir/results" ]; then
+                fails=$(grep -v ":200$" "$tmpdir/results" 2>/dev/null || true)
+                [ -n "$fails" ] && echo "NOTIFY_DEBUG: failures: $fails" >&2
+            fi
+            ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
             rm -rf "$tmpdir"
-            echo $n
-        ')
+        ' 2>>"$_notify_log")
     fi
 
+    if [ -s "$_notify_log" ]; then
+        log "  notify_offline debug: $(cat "$_notify_log")"
+    fi
     log "Sent /offline for ${notified:-0} sites"
     log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
@@ -1588,12 +1640,18 @@ notify_online() {
     log "Sending /online notifications for sites ${start}..$(( start + count - 1 ))..."
 
     local payloads
+    local _notify_log="${OUTPUT_DIR}/notify_online_debug.log"
     payloads=$(python3 -c "
-import json, glob, sys, base64
+import json, glob, sys, base64, os
 sys.path.insert(0, '${SCRIPT_DIR}/../src')
 from onion_auth import sign_payload, make_timestamp
 payloads = []
-for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
+# Use absolute path to avoid cwd issues
+output_dir = os.path.abspath('${OUTPUT_DIR}')
+files = sorted(glob.glob(os.path.join(output_dir, 'worker-*-info.json')))
+if not files:
+    print(f'ERROR: no worker-*-info.json in {output_dir}', file=sys.stderr)
+for f in files:
     try:
         workers = json.load(open(f))
         for w in workers:
@@ -1609,56 +1667,73 @@ for f in sorted(glob.glob('${OUTPUT_DIR}/worker-*-info.json')):
                     ts = make_timestamp()
                     sig = sign_payload(privkey, pubkey, 'online', ca, ha, ts)
                     payloads.append(json.dumps({'content_address': ca, 'healthcheck_address': ha, 'timestamp': ts, 'signature': sig}))
-    except: pass
+    except Exception as e:
+        print(f'ERROR generating payload from {f}: {e}', file=sys.stderr)
+print(f'{len(payloads)} /online payload(s) for sites ${start}..$(( start + count - 1))', file=sys.stderr)
 for p in payloads:
     print(p)
-" 2>/dev/null)
+" 2>"$_notify_log")
 
     if [ -z "$payloads" ]; then
+        [ -s "$_notify_log" ] && log "  notify_online debug: $(cat "$_notify_log")"
         log "WARNING: No payloads generated for /online"
         return
     fi
+
+    local payload_count
+    payload_count=$(echo "$payloads" | wc -l | tr -d ' ')
+    log "  Generated ${payload_count} /online payload(s)"
 
     local notified
     if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
         # Local: send directly over Docker network (fast, reliable — no Tor latency)
         notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor sh -c '
-            n=0; tmpdir=$(mktemp -d); i=0
+            tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (curl -s --max-time 10 \
+                (code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
                     -X POST "http://127.0.0.1:8083/online" \
                     -H "Content-Type: application/json" \
-                    -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
-                # Limit to 10 concurrent to avoid overwhelming the server
+                    -d "$payload" 2>/dev/null)
+                 [ "$code" = "200" ] && touch "$tmpdir/ok.$i"
+                 echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
             wait
-            n=$(ls "$tmpdir"/ok.* 2>/dev/null | wc -l)
+            if [ -f "$tmpdir/results" ]; then
+                fails=$(grep -v ":200$" "$tmpdir/results" 2>/dev/null || true)
+                [ -n "$fails" ] && echo "NOTIFY_DEBUG: failures: $fails" >&2
+            fi
+            ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
             rm -rf "$tmpdir"
-            echo $n
-        ')
+        ' 2>>"$_notify_log")
     else
         # Remote: send over Tor with parallelism (up to 10 concurrent)
-        # Each request uses unique SOCKS auth for circuit isolation
         notified=$(echo "$payloads" | docker_cmd exec -i onionpress-tor-client sh -c '
-            n=0; tmpdir=$(mktemp -d); i=0
+            tmpdir=$(mktemp -d); i=0
             while IFS= read -r payload; do
                 i=$((i+1))
-                (curl -s --socks5-hostname "on${i}:x@127.0.0.1:9050" --max-time 30 \
+                (code=$(curl -s -o /dev/null -w "%{http_code}" --socks5-hostname "on${i}:x@127.0.0.1:9050" --max-time 30 \
                     -X POST "http://'"${ONIONHEAVEN_ADDR}"':8083/online" \
                     -H "Content-Type: application/json" \
-                    -d "$payload" >/dev/null 2>&1 && touch "$tmpdir/ok.$i") &
-                # Limit to 10 concurrent to avoid overwhelming Arti SOCKS
+                    -d "$payload" 2>/dev/null)
+                 [ "$code" = "200" ] && touch "$tmpdir/ok.$i"
+                 echo "$i:$code" >> "$tmpdir/results") &
                 [ $((i % 10)) -eq 0 ] && wait
             done
             wait
-            n=$(ls "$tmpdir"/ok.* 2>/dev/null | wc -l)
+            if [ -f "$tmpdir/results" ]; then
+                fails=$(grep -v ":200$" "$tmpdir/results" 2>/dev/null || true)
+                [ -n "$fails" ] && echo "NOTIFY_DEBUG: failures: $fails" >&2
+            fi
+            ls "$tmpdir"/ok.* 2>/dev/null | wc -l | tr -d " "
             rm -rf "$tmpdir"
-            echo $n
-        ')
+        ' 2>>"$_notify_log")
     fi
 
+    if [ -s "$_notify_log" ]; then
+        log "  notify_online debug: $(cat "$_notify_log")"
+    fi
     log "Sent /online for ${notified:-0} sites"
     log_json "\"event\":\"online_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
@@ -1724,6 +1799,24 @@ verify_redirects() {
     local sampled_addrs
     sampled_addrs=$(echo "$addrs" | awk 'BEGIN{srand()}{print rand()"\t"$0}' | sort -n | cut -f2 | head -n "$sample_size")
 
+    # Build list of available stress containers to distribute checks across.
+    # Falls back to onionpress-wordpress → onionpress-tor if no stress containers.
+    local verify_ctrs=""
+    local num_verify_ctrs=0
+    for ci in $(seq 0 $((NUM_CONTAINERS - 1))); do
+        local cname="stress-worker-${ci}"
+        if docker_cmd inspect "$cname" >/dev/null 2>&1; then
+            verify_ctrs="${verify_ctrs} ${cname}"
+            num_verify_ctrs=$((num_verify_ctrs + 1))
+        fi
+    done
+    local use_stress_ctrs=true
+    if [ "$num_verify_ctrs" -eq 0 ]; then
+        use_stress_ctrs=false
+    fi
+    local vctr_arr
+    vctr_arr=($verify_ctrs)
+
     # Verify all sampled addresses in parallel
     local tmpdir
     tmpdir=$(mktemp -d)
@@ -1736,18 +1829,27 @@ verify_redirects() {
         sampled=$((sampled + 1))
 
         (
-            # Verify redirect via onionpress-wordpress → onionpress-tor SOCKS.
-            # We CANNOT use onionheaven's own SOCKS proxy — Arti has a bug where
-            # self-connections (SOCKS → own onion service) return empty replies.
+            # Distribute verification across stress containers' SOCKS proxies.
+            # Falls back to onionpress-wordpress → onionpress-tor if none available.
             local http_response="000"
             local attempt
             for attempt in 1 2 3; do
-                http_response=$(docker_cmd exec onionpress-wordpress \
-                    curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
-                    --http1.0 \
-                    --socks5-hostname onionpress-tor:9050 \
-                    --max-time 30 \
-                    "http://${addr}" 2>/dev/null) || http_response="000"
+                if [ "$use_stress_ctrs" = true ]; then
+                    local vctr="${vctr_arr[$(( (sampled - 1) % num_verify_ctrs ))]}"
+                    http_response=$(docker_cmd exec "$vctr" \
+                        curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
+                        --http1.0 \
+                        --socks5-hostname "verify${sampled}:x@127.0.0.1:9050" \
+                        --max-time 30 \
+                        "http://${addr}" 2>/dev/null) || http_response="000"
+                else
+                    http_response=$(docker_cmd exec onionpress-wordpress \
+                        curl -s -o /dev/null -w "%{http_code} %{redirect_url}" \
+                        --http1.0 \
+                        --socks5-hostname onionpress-tor:9050 \
+                        --max-time 30 \
+                        "http://${addr}" 2>/dev/null) || http_response="000"
+                fi
                 local code
                 code=$(echo "$http_response" | awk '{print $1}')
                 [ "$code" != "000" ] && break
@@ -1971,7 +2073,7 @@ run_worker() {
     # Phase 1: Start site containers (Arti + Python HTTP server)
     log "Phase 1: Starting ${NUM_CONTAINERS} site containers..."
     start_all_workers
-    phase_result "1" "Started ${NUM_CONTAINERS} containers"
+    phase_result "1" "Started ${NUM_CONTAINERS} stress containers"
     echo ""
 
     # Track results for summary table
