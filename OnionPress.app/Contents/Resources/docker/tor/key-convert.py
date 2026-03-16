@@ -147,10 +147,12 @@ def arti_to_ctor(pem_path, output_dir):
     secret_path = os.path.join(output_dir, "hs_ed25519_secret_key")
     with open(secret_path, "wb") as f:
         f.write(CTOR_SECRET_HEADER + expanded_key)
+    os.chmod(secret_path, 0o600)
 
     public_path = os.path.join(output_dir, "hs_ed25519_public_key")
     with open(public_path, "wb") as f:
         f.write(CTOR_PUBLIC_HEADER + public_key)
+    os.chmod(public_path, 0o600)
 
     print(f"Wrote {secret_path} ({32 + 64} bytes)")
     print(f"Wrote {public_path} ({32 + 32} bytes)")

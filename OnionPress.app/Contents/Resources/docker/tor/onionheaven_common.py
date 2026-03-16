@@ -589,22 +589,35 @@ def check_farm_scaling(conn, active_entries):
             "SELECT container_name, max_services, active_services FROM takeover_containers "
             "WHERE status = 'active'"
         ).fetchall()
-        if takeover_rows:
+
+        need_scaleup = False
+        if not takeover_rows:
+            # No workers exist — check if any takeovers are pending
+            pending_takeovers = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE status = 'taken-over'"
+            ).fetchone()[0]
+            if pending_takeovers > 0:
+                need_scaleup = True
+                log(f"Farm scale-up needed: no takeover workers but {pending_takeovers} taken-over entries")
+        else:
             total_active = sum(r["active_services"] for r in takeover_rows)
             total_capacity = len(takeover_rows) * TAKEOVER_SCALE_THRESHOLD
             if total_active >= total_capacity:
-                pending = conn.execute(
-                    "SELECT COUNT(*) FROM farm_scale_requests "
-                    "WHERE worker_type = 'takeover' AND fulfilled_at IS NULL"
-                ).fetchone()[0]
-                if pending == 0:
-                    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    conn.execute(
-                        "INSERT INTO farm_scale_requests (worker_type, requested_at) VALUES ('takeover', ?)",
-                        (now,)
-                    )
-                    db_commit_with_retry(conn)
-                    log(f"Farm scale-up requested: takeover (active={total_active}, capacity={total_capacity})")
+                need_scaleup = True
+
+        if need_scaleup:
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM farm_scale_requests "
+                "WHERE worker_type = 'takeover' AND fulfilled_at IS NULL"
+            ).fetchone()[0]
+            if pending == 0:
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                conn.execute(
+                    "INSERT INTO farm_scale_requests (worker_type, requested_at) VALUES ('takeover', ?)",
+                    (now,)
+                )
+                db_commit_with_retry(conn)
+                log(f"Farm scale-up requested: takeover (workers={len(takeover_rows)})")
     except sqlite3.OperationalError:
         pass
 
@@ -686,7 +699,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
         log(f"Skipping Arti takeover for {content_address} — last_healthy not yet stale")
         return
 
-    # All guards pass — route to farm or execute locally
+    # All guards pass — route to farm worker
     if is_farm_mode(conn):
         container = assign_takeover_container(conn)
         if container:
@@ -698,7 +711,15 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
             db_commit_with_retry(conn)
             log(f"Queued takeover of {content_address} → farm worker {container}")
             return
-        log(f"WARNING: farm mode but no active containers — falling back to local takeover")
+        # No containers yet — mark pending so a worker picks it up once spawned
+        conn.execute(
+            "UPDATE registry SET takeover_pending = ? "
+            "WHERE content_address = ? AND healthcheck_address = ?",
+            (now, content_address, healthcheck_address)
+        )
+        db_commit_with_retry(conn)
+        log(f"Takeover pending for {content_address} — waiting for farm worker to be spawned")
+        return
 
     _takeover_local(content_address)
 

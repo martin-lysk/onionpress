@@ -221,9 +221,10 @@ do_takeover_ctor() {
         exit 1
     fi
 
-    # Set correct ownership and permissions (C Tor is strict)
+    # Set correct ownership and permissions (C Tor is strict — requires 700 dir, 600 keys)
     chown -R debian-tor:debian-tor "$HS_SERVICE_DIR" 2>/dev/null || chown -R tor:tor "$HS_SERVICE_DIR" 2>/dev/null || true
     chmod 700 "$HS_SERVICE_DIR"
+    chmod 600 "$HS_SERVICE_DIR"/hs_ed25519_secret_key "$HS_SERVICE_DIR"/hs_ed25519_public_key 2>/dev/null || true
 
     # Add hidden service config to torrc if not already present
     local marker="# onionheaven:${CONTENT_ADDRESS}"

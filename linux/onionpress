@@ -1183,6 +1183,7 @@ _start_takeover_worker() {
         --network onionpress-network \
         --ulimit nofile=10000:10000 \
         -e TZ="${TZ:-UTC}" \
+        -e TOR_IMPL="${TOR_IMPL:-arti}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}" \
@@ -1207,6 +1208,9 @@ start_onionheaven_farm() {
 }
 
 _onionheaven_farm_monitor() {
+    # Disable errexit — this runs as a background function and any transient
+    # docker/sqlite failure would silently kill the entire monitor loop.
+    set +e
     local next_takeover=0
     local db="/var/lib/onionpress/onionheaven/registry.db"
     local hub_promoted=false
@@ -1327,6 +1331,9 @@ start_onionheaven_activation_watcher() {
 }
 
 _onionheaven_activation_watcher() {
+    # Disable errexit — this runs as a background function and any transient
+    # docker failure would silently kill the entire watcher loop (bash 4+).
+    set +e
     # Persistent loop: poll for the activation flag every 30s.
     # If the flag exists but the onionheaven container is not running,
     # restart it.  This handles the case where the container was stopped
@@ -2185,6 +2192,14 @@ main() {
             echo "  Local access:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}"
             echo "  Status page:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}/onionpress-status"
             echo "  Logs:          $LOG_FILE"
+
+            # Keep main process alive so systemd (KillMode=control-group)
+            # doesn't kill our background monitors (farm, activation watcher).
+            # Signal readiness to systemd, then wait on background children.
+            if [ "${NOTIFY_SOCKET:-}" ]; then
+                systemd-notify --ready 2>/dev/null || true
+            fi
+            wait
             ;;
 
         stop)

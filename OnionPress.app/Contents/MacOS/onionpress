@@ -223,6 +223,9 @@ start_onionheaven_farm() {
 }
 
 _onionheaven_farm_monitor() {
+    # Disable errexit — this runs as a background function and any transient
+    # docker/sqlite failure would silently kill the entire monitor loop (bash 4+).
+    set +e
     # Tracks the next index to use for takeover workers
     local next_takeover=2
     local db="/var/lib/onionpress/onionheaven/registry.db"
@@ -302,6 +305,9 @@ stop_onionheaven_farm() {
 # onionheaven container, takeover farm, and scaling monitor so any fresh
 # OnionPress instance can become an OnionHeaven node without pre-configuration.
 _watch_onionheaven_activate() {
+    # Disable errexit — this runs as a background function and any transient
+    # docker failure would silently kill the entire watcher loop (bash 4+).
+    set +e
     while true; do
         sleep 10
         # Check if any registrations have arrived by querying the API server

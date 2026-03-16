@@ -4,8 +4,8 @@ After=docker.service
 Requires=docker.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=notify
+NotifyAccess=all
 ExecStart=/opt/onionpress/onionpress start
 ExecStop=/opt/onionpress/onionpress stop
 TimeoutStartSec=300
