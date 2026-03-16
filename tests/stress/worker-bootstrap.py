@@ -4,7 +4,7 @@ Worker bootstrap: waits for Arti keys, extracts addresses, registers with OnionH
 
 Runs inside each worker container after Arti starts. Each worker self-registers
 with OnionHeaven just like a real OnionPress instance would — over Tor, using the
-container's own Arti SOCKS proxy.
+container's own Tor SOCKS proxy.
 
 Usage:
     python3 worker-bootstrap.py <onionheaven_addr> <container_idx> <num_workers> [base_port]
@@ -159,7 +159,7 @@ def register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, w
 
 def wait_for_socks():
     """Wait for Arti's SOCKS proxy to be ready before attempting registration."""
-    print("Waiting for Arti SOCKS proxy to be ready...", flush=True)
+    print("Waiting for Tor SOCKS proxy to be ready...", flush=True)
     for attempt in range(120):  # up to 4 minutes
         try:
             result = subprocess.run(
@@ -292,7 +292,7 @@ def bootstrap_one_worker(i):
 def main():
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Wait for Arti SOCKS to be functional before registering any workers
+    # Wait for Tor SOCKS to be functional before registering any workers
     wait_for_socks()
 
     # Bootstrap all workers in parallel (10 concurrent to avoid overwhelming SOCKS)
