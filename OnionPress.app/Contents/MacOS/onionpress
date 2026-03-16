@@ -1642,12 +1642,12 @@ start_containers() {
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d --pull always wordpress db tor-client >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d wordpress db tor-client >> "$LOG_FILE" 2>&1; then
             break
         fi
-        log "WARNING: 'docker compose up -d --pull always wordpress db tor-client' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
+        log "WARNING: 'docker compose up -d wordpress db tor-client' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
         if [ $attempt -eq $max_attempts ]; then
-            log "ERROR: 'docker compose up -d --pull always wordpress db tor-client' failed after $max_attempts attempts."
+            log "ERROR: 'docker compose up -d wordpress db tor-client' failed after $max_attempts attempts."
             return 1
         fi
         attempt=$((attempt + 1))
@@ -1681,7 +1681,7 @@ start_containers() {
 
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
-        docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+        docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
     else
         log "WordPress not yet installed — waiting for setup (Tor NOT started)"
     fi
@@ -1714,7 +1714,7 @@ start_containers() {
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
         log "Cloudflare Tunnel enabled, starting cloudflared..."
-        docker compose $CF_COMPOSE up -d --pull always cloudflared >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start cloudflared container"
+        docker compose $CF_COMPOSE up -d cloudflared >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start cloudflared container"
     else
         # Stop cloudflared if it was previously running but token was removed
         docker stop onionpress-cloudflared 2>/dev/null || true
