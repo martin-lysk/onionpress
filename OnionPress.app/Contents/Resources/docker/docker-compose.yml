@@ -14,7 +14,7 @@ services:
         hard: 10000
     environment:
       - TZ=${TZ:-UTC}
-      - TOR_IMPL=${TOR_IMPL:-arti}
+      - TOR_IMPL=${TOR_IMPL:-tor}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
     volumes:
       - arti-state:/var/lib/arti/
@@ -97,7 +97,7 @@ services:
         hard: 10000
     environment:
       - TZ=${TZ:-UTC}
-      - TOR_IMPL=${TOR_IMPL:-arti}
+      - TOR_IMPL=${TOR_IMPL:-tor}
       - NO_ONION_SERVICE=1
     volumes:
       - arti-state-client:/var/lib/arti/
@@ -120,7 +120,7 @@ services:
         hard: 10000
     environment:
       - TZ=${TZ:-UTC}
-      - TOR_IMPL=${TOR_IMPL:-arti}
+      - TOR_IMPL=${TOR_IMPL:-tor}
       - NO_ONION_SERVICE=1
       - ONIONHEAVEN=${ONIONHEAVEN:-0}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}

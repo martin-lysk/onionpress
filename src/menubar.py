@@ -3504,7 +3504,7 @@ class OnionPressApp(rumps.App):
             ("INSTALL_IA_PLUGIN", "yes"),
             ("REGISTER_WITH_ONIONHEAVEN", "yes"),
             ("ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"),
-            ("TOR_IMPL", "arti"),
+            ("TOR_IMPL", "tor"),
             ("CLOUDFLARE_TUNNEL_TOKEN", ""),
         ]
         old_values = {}
@@ -3668,12 +3668,12 @@ class OnionPressApp(rumps.App):
             oh_addr_field.setPlaceholderString_("oheavenfhb...onion")
             oh_addr_field.setFrame_(AppKit.NSMakeRect(input_x, oh_addr_field.frame().origin.y, input_w, 24))
             y -= row_h
-            tor_impl_val = form_values.get("TOR_IMPL", "arti").lower()
+            tor_impl_val = form_values.get("TOR_IMPL", "tor").lower()
             if tor_impl_val not in ("arti", "tor"):
-                tor_impl_val = "arti"
+                tor_impl_val = "tor"
             add_popup_row(y, "Tor Implementation (advanced):", "TOR_IMPL", tor_impl_val, [
-                ("Arti (default)", "arti"),
-                ("C Tor", "tor"),
+                ("C Tor (default)", "tor"),
+                ("Arti", "arti"),
             ])
             y -= row_h
             cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"])
@@ -4683,7 +4683,7 @@ License: AGPL v3"""
                 'state': state,
                 'version': self.version,
                 'onion_address': onion_addr,
-                'tor_impl': self._read_config_value("TOR_IMPL", "arti"),
+                'tor_impl': self._read_config_value("TOR_IMPL", "tor"),
                 'uptime_seconds': uptime_seconds,
                 'bootstrap_pct': bootstrap_pct,
                 'containers': containers,

@@ -145,9 +145,9 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export CLOUDFLARE_TUNNEL_TOKEN
 
-# Tor implementation: "arti" (default) or "tor" (C Tor)
-# Read from config file, default to arti
-TOR_IMPL="arti"
+# Tor implementation: "tor" (C Tor, default) or "arti"
+# Read from config file, default to C Tor
+TOR_IMPL="tor"
 if [ -f "$DATA_DIR/config" ]; then
     _tor_impl=$(grep "^TOR_IMPL=" "$DATA_DIR/config" | cut -d= -f2)
     if [ "$_tor_impl" = "tor" ] || [ "$_tor_impl" = "arti" ]; then
@@ -191,7 +191,7 @@ _start_takeover_worker() {
         --log-opt max-size=10m \
         --log-opt max-file=3 \
         -e TZ="${TZ:-UTC}" \
-        -e TOR_IMPL="${TOR_IMPL:-arti}" \
+        -e TOR_IMPL="${TOR_IMPL:-tor}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES=3 \

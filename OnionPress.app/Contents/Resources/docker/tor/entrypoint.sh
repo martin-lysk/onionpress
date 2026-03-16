@@ -4,8 +4,8 @@
 # Creates state directories, starts healthcheck server, launches Tor,
 # and writes compat hostname files for existing scripts to read.
 
-# Which Tor implementation to use: "arti" (default) or "tor" (C Tor)
-TOR_IMPL="${TOR_IMPL:-arti}"
+# Which Tor implementation to use: "tor" (C Tor, default) or "arti"
+TOR_IMPL="${TOR_IMPL:-tor}"
 
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state

@@ -12,7 +12,7 @@
 # On release: removes config + keys, signals Tor to reload.
 
 # Which Tor implementation are we managing?
-TOR_IMPL="${TOR_IMPL:-arti}"
+TOR_IMPL="${TOR_IMPL:-tor}"
 
 # Detect config: onionheaven/takeover-worker containers use arti-onionheaven.toml, main tor uses arti.toml
 if [ "${NO_ONION_SERVICE}" = "1" ] || [ "${TAKEOVER_WORKER}" = "1" ]; then
