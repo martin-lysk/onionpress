@@ -959,8 +959,10 @@ parallel_check_addrs() {
     rm -rf "$tmpdir"
 }
 
-# ── Phase: Wait for healthy (local state) ───────────────────────────────────
-# Polls our sites' healthcheck .onion addresses via tor-client (parallel).
+# ── Phase: Wait for healthy (distributed) ────────────────────────────────────
+# Each stress container checks its own sites via its own SOCKS proxy.
+# This avoids the tor-client bottleneck where one Tor process tries to
+# reach all sites simultaneously.
 
 wait_for_healthy() {
     local target="$1"
@@ -976,18 +978,71 @@ wait_for_healthy() {
     local reachable=0
     local prev_reachable=0
 
-    # Get addresses to check — content addresses if no healthcheck, otherwise healthcheck
-    local hc_addrs
-    if [ "$NO_HEALTHCHECK" = true ]; then
-        hc_addrs=$(get_worker_content_addrs 0 "$TOTAL")
-    else
-        hc_addrs=$(get_worker_hc_addrs 0 "$TOTAL")
-    fi
-
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        parallel_check_addrs "$hc_addrs" "200"
-        reachable=$PCHECK_MATCHED
-        local total_checked=$PCHECK_TOTAL
+        # Check reachability from each stress container's own SOCKS proxy
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        local pids=""
+
+        for ctr_idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
+            local ctr_name="stress-worker-${ctr_idx}"
+            local info_file="${OUTPUT_DIR}/worker-${ctr_idx}-info.json"
+            [ -f "$info_file" ] || continue
+
+            # Each container checks its own sites in parallel (backgrounded)
+            (
+                local count=0
+                local addrs
+                if [ "$NO_HEALTHCHECK" = true ]; then
+                    addrs=$(python3 -c "
+import json
+with open('${info_file}') as f:
+    workers = json.load(f)
+for w in workers:
+    if w.get('content_address'):
+        print(w['content_address'])
+" 2>/dev/null)
+                else
+                    addrs=$(python3 -c "
+import json
+with open('${info_file}') as f:
+    workers = json.load(f)
+for w in workers:
+    if w.get('healthcheck_address'):
+        print(w['healthcheck_address'])
+" 2>/dev/null)
+                fi
+
+                while IFS= read -r addr; do
+                    [ -z "$addr" ] && continue
+                    code=$(docker_cmd exec "$ctr_name" \
+                        curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 \
+                        -o /dev/null -w "%{http_code}" \
+                        "http://${addr}/" 2>/dev/null) || code="000"
+                    [ "$code" = "200" ] && count=$((count + 1))
+                done <<< "$addrs"
+                echo "$count" > "${tmpdir}/ctr_${ctr_idx}"
+            ) &
+            pids="$pids $!"
+        done
+
+        for pid in $pids; do
+            wait "$pid" 2>/dev/null || true
+        done
+
+        reachable=0
+        local total_checked=0
+        for f in "${tmpdir}"/ctr_*; do
+            [ -f "$f" ] || continue
+            local c
+            c=$(cat "$f")
+            reachable=$((reachable + c))
+            total_checked=$((total_checked + 1))
+        done
+        rm -rf "$tmpdir"
+
+        PCHECK_MATCHED=$reachable
+        PCHECK_TOTAL=$target
 
         # Write progress dots to phase log (one dot per newly healthy site)
         if [ -n "$PHASE_LOG" ] && [ "$reachable" -gt "$prev_reachable" ]; then
