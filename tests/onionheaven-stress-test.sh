@@ -3,26 +3,26 @@
 #
 # Architecture:
 #   - Worker containers: each runs Arti with N real onion services + a single
-#     Python HTTP server handling all ports (replaces per-worker socat processes).
-#   - Each worker self-registers with OnionHeaven over Tor, just like a real
+#     Python HTTP server handling all ports (replaces per-site socat processes).
+#   - Each site self-registers with OnionHeaven over Tor, just like a real
 #     OnionPress instance.
 #   - OnionHeaven Tor container: never modified by this script.
 #   - This script: orchestrates containers, monitors dashboard, controls failures.
 #
 # Scaling:
-#   - Each worker container handles --per-ctr workers (default 50).
-#   - For 1000 workers: 20 containers × 50 workers each.
-#   - Only 1 docker exec -d per container (vs 2 per worker in old architecture).
+#   - Each worker container handles --per-ctr sites (default 50).
+#   - For 1000 sites: 20 containers × 50 sites each.
+#   - Only 1 docker exec -d per container (vs 2 per site in old architecture).
 #   - macOS process limit is no longer a bottleneck.
 #
 # Usage:
-#   # Quick test — 5 workers in 1 container
+#   # Quick test — 5 sites in 1 container
 #   ./onionheaven-stress-test.sh --total 5
 #
-#   # Scale test — 100 workers across 2 containers
+#   # Scale test — 100 sites across 2 containers
 #   ./onionheaven-stress-test.sh --total 100 --per-ctr 50
 #
-#   # Big test — 1000 workers across 20 containers, start 5 at a time
+#   # Big test — 1000 sites across 20 containers, start 5 at a time
 #   ./onionheaven-stress-test.sh --total 1000 --per-ctr 50 --batch-size 5
 #
 #   # Monitor dashboard
@@ -34,7 +34,7 @@
 #   # Test against a specific OnionHeaven node (e.g. a Pi)
 #   ./onionheaven-stress-test.sh --total 5 --onionheaven-addr op2pie...ad.onion
 #
-#   # Fast bootstrap — skip healthcheck onion services (halves circuit load)
+#   # Fast bootstrap — skip healthcheck onion services per site (halves circuit load)
 #   ./onionheaven-stress-test.sh --total 5 --no-healthcheck
 #
 #   # Clean up only stale stress tests (no activity in 2+ hours)
@@ -45,7 +45,7 @@ set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 MODE="worker"
-TOTAL=5           # default 5 workers
+TOTAL=5           # default 5 sites
 HEALTHY=""        # auto: half of total
 FAILING=""        # auto: half of total
 ONIONHEAVEN_ADDR=""    # auto-detect from local tor container
@@ -53,7 +53,7 @@ OUTPUT_DIR="./onionheaven-stress-results"
 CLEANUP=false
 CLEANUP_STALE=false
 STALE_HOURS=2
-PER_CTR=50        # workers per container
+PER_CTR=50        # sites per container
 BATCH_SIZE=0      # 0 = start all containers at once
 STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
 BASE_PORT=9100    # port range start inside each container
@@ -179,7 +179,7 @@ write_phase_header() {
   OnionHeaven Stress Test
   $(date '+%Y-%m-%d %H:%M:%S')
 --------------------------------------------------------------------
-  Workers: ${TOTAL} total (${HEALTHY} healthy, ${FAILING} failing)
+  Sites: ${TOTAL} total (${HEALTHY} healthy, ${FAILING} failing)
   Stress-worker containers: ${NUM_CONTAINERS} x ${PER_CTR}/container
   OnionHeaven: ${ONIONHEAVEN_ADDR}
   OnionHeaven server version: ${oh_version:-unknown}
@@ -319,7 +319,7 @@ preflight() {
         log "  Detected OnionHeaven host (content address matches)"
     else
         IS_ONIONHEAVEN_HOST=false
-        log "  Not OnionHeaven host — workers will register over Tor"
+        log "  Not OnionHeaven host — sites will register over Tor"
         if [ -n "$LOCAL_ONION_ADDR" ]; then
             log "  Local address: $LOCAL_ONION_ADDR"
         fi
@@ -384,14 +384,14 @@ get_onionpress_network() {
 # ── Worker container management ───────────────────────────────────────────────
 
 # Start a single worker container with Arti + Python HTTP server.
-# Each container handles $workers_in_ctr onion service pairs.
+# Each container handles $workers_in_ctr onion service pairs (sites).
 start_worker_container() {
     local idx="$1"
     local workers_in_ctr="$2"
     local ctr_name="stress-worker-${idx}"
     local network="$3"
 
-    log "  Starting container ${ctr_name} (${workers_in_ctr} workers)..."
+    log "  Starting container ${ctr_name} (${workers_in_ctr} sites)..."
 
     # Remove leftover
     docker_cmd rm -f "$ctr_name" 2>/dev/null || true
@@ -439,7 +439,7 @@ state_dir = "/var/lib/arti/state"
 enabled = true
 
 [vanguards]
-# Disable vanguards on stress workers — reduces circuit exhaustion cascades
+# Disable vanguards on stress containers — reduces circuit exhaustion cascades
 # when hosting many onion services per Arti instance.
 mode = "disabled"
 
@@ -535,7 +535,7 @@ mkdir -p /var/lib/arti/cache /var/lib/arti/state
 chown -R arti:arti /var/lib/arti
 chmod 700 /var/lib/arti /var/lib/arti/cache /var/lib/arti/state
 
-# Start Python HTTP server (single process handles all ${workers_in_ctr} workers)
+# Start Python HTTP server (single process handles all ${workers_in_ctr} sites)
 python3 /worker-server.py ${BASE_PORT} ${workers_in_ctr} &
 
 # Start Arti
@@ -587,15 +587,15 @@ start_all_workers() {
         fi
     done
 
-    log "Started ${NUM_CONTAINERS} worker containers"
+    log "Started ${NUM_CONTAINERS} stress-worker containers"
 }
 
-# Wait for all workers to bootstrap (register with OnionHeaven over Tor).
+# Wait for all sites to bootstrap (register with OnionHeaven over Tor).
 WAIT_RESULT=""  # human-readable result from last wait_for_* call
 
 wait_for_bootstrap() {
     local timeout_secs="${1:-900}"
-    log "Waiting for all workers to bootstrap and register (timeout: ${timeout_secs}s)..."
+    log "Waiting for all sites to bootstrap and register (timeout: ${timeout_secs}s)..."
 
     local start_ts
     start_ts=$(date +%s)
@@ -613,7 +613,7 @@ wait_for_bootstrap() {
             local ctr_name="stress-worker-${idx}"
             if docker_cmd exec "$ctr_name" test -f /worker-info.json 2>/dev/null; then
                 ready_count=$((ready_count + 1))
-                # Count registered workers in this container
+                # Count registered sites in this container
                 local reg
                 reg=$(docker_cmd exec "$ctr_name" python3 -c "
 import json
@@ -627,7 +627,7 @@ print(sum(1 for x in w if x.get('registered')))
             fi
         done
 
-        # Write progress dots to phase log (one dot per newly registered worker)
+        # Write progress dots to phase log (one dot per newly registered site)
         if [ -n "$PHASE_LOG" ] && [ "$registered_count" -gt "$prev_registered" ]; then
             local new_dots=$((registered_count - prev_registered))
             printf '%0.s.' $(seq 1 "$new_dots") >> "$PHASE_LOG"
@@ -637,7 +637,7 @@ print(sum(1 for x in w if x.get('registered')))
         local now
         now=$(date +%s)
         if [ $((now - last_status)) -ge 10 ]; then
-            log "  Bootstrap: ${ready_count}/${NUM_CONTAINERS} containers done, ${registered_count}/${TOTAL} workers registered"
+            log "  Bootstrap: ${ready_count}/${NUM_CONTAINERS} containers done, ${registered_count}/${TOTAL} sites registered"
             last_status=$now
         fi
 
@@ -645,7 +645,7 @@ print(sum(1 for x in w if x.get('registered')))
             local elapsed=$(( $(date +%s) - start_ts ))
             [ -n "$PHASE_LOG" ] && echo " ${registered_count}/${TOTAL}" >> "$PHASE_LOG"
             WAIT_RESULT="${registered_count}/${TOTAL} registered in $(fmt_duration $elapsed)"
-            log "All containers bootstrapped: ${registered_count} workers registered"
+            log "All containers bootstrapped: ${registered_count} sites registered"
             return 0
         fi
 
@@ -655,7 +655,7 @@ print(sum(1 for x in w if x.get('registered')))
     local elapsed=$(( $(date +%s) - start_ts ))
     [ -n "$PHASE_LOG" ] && echo " ${registered_count}/${TOTAL} (timed out)" >> "$PHASE_LOG"
     WAIT_RESULT="${registered_count}/${TOTAL} registered, timed out after $(fmt_duration $elapsed)"
-    log "WARNING: Bootstrap timed out — some containers not ready"
+    log "WARNING: Bootstrap timed out — some sites not ready"
     return 1
 }
 
@@ -681,7 +681,7 @@ except: print(0)
         total_registered=$((total_registered + reg))
     done
 
-    log "Total registered workers: ${total_registered}"
+    log "Total registered sites: ${total_registered}"
 }
 
 # ── Metrics collection ────────────────────────────────────────────────────────
@@ -760,7 +760,7 @@ get_takeover_container_count() {
     _onionheaven_field "takeover_containers"
 }
 
-# Count workers registered from local containers (works on any machine)
+# Count sites registered from local containers (works on any machine)
 get_local_registered_count() {
     local total=0
     for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
@@ -834,9 +834,9 @@ print_dashboard() {
     log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"heartbeat_healthy\":${hb_ok:-0},\"wordpress_unhealthy\":${wp_bad:-0},\"vm_mem_pct\":${mem_pct:-0},\"pass_duration\":\"${pass_dur}\",\"takeover_containers\":${takeover_ctrs:-0},\"stress_containers\":${stress_ctrs:-0}"
 }
 
-# ── Helper: get worker addresses from local info files ──────────────────────
+# ── Helper: get site addresses from local info files ────────────────────────
 
-# Get content addresses for a range of workers (from local worker-info files).
+# Get content addresses for a range of sites (from local worker-info files).
 # Usage: get_worker_content_addrs <start> <count>
 get_worker_content_addrs() {
     local start="$1"
@@ -858,7 +858,7 @@ except: pass
     done
 }
 
-# Get healthcheck addresses for a range of workers.
+# Get healthcheck addresses for a range of sites.
 get_worker_hc_addrs() {
     local start="$1"
     local count="$2"
@@ -913,7 +913,7 @@ parallel_check_addrs() {
         ) &
         pids="$pids $!"
 
-        # Batch concurrency cap for large worker counts
+        # Batch concurrency cap for large site counts
         if [ $((idx % max_parallel)) -eq 0 ]; then
             for pid in $pids; do
                 wait "$pid" 2>/dev/null || true
@@ -951,14 +951,14 @@ parallel_check_addrs() {
 }
 
 # ── Phase: Wait for healthy (local state) ───────────────────────────────────
-# Polls our workers' healthcheck .onion addresses via tor-client (parallel).
+# Polls our sites' healthcheck .onion addresses via tor-client (parallel).
 
 wait_for_healthy() {
     local target="$1"
     local phase_name="$2"
     local timeout_secs="${3:-600}"
 
-    log "${phase_name}: Waiting for ${target} workers to be reachable via Tor (timeout: ${timeout_secs}s)..."
+    log "${phase_name}: Waiting for ${target} sites to be reachable via Tor (timeout: ${timeout_secs}s)..."
 
     local start_ts
     start_ts=$(date +%s)
@@ -980,7 +980,7 @@ wait_for_healthy() {
         reachable=$PCHECK_MATCHED
         local total_checked=$PCHECK_TOTAL
 
-        # Write progress dots to phase log (one dot per newly healthy worker)
+        # Write progress dots to phase log (one dot per newly healthy site)
         if [ -n "$PHASE_LOG" ] && [ "$reachable" -gt "$prev_reachable" ]; then
             local new_dots=$((reachable - prev_reachable))
             printf '%0.s.' $(seq 1 "$new_dots") >> "$PHASE_LOG"
@@ -991,7 +991,7 @@ wait_for_healthy() {
         now=$(date +%s)
         if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
-            log "  (reachable: ${reachable}/${total_checked} workers)"
+            log "  (reachable: ${reachable}/${total_checked} sites)"
             last_dashboard=$now
         fi
 
@@ -999,7 +999,7 @@ wait_for_healthy() {
             local elapsed=$(( $(date +%s) - start_ts ))
             [ -n "$PHASE_LOG" ] && echo " ${reachable}/${target}" >> "$PHASE_LOG"
             WAIT_RESULT="${reachable}/${target} healthy in $(fmt_duration $elapsed)"
-            log "${phase_name}: ${reachable}/${total_checked} workers reachable via Tor"
+            log "${phase_name}: ${reachable}/${total_checked} sites reachable via Tor"
             print_dashboard
             return 0
         fi
@@ -1022,7 +1022,7 @@ disable_workers() {
     local fail_start="$1"
     local fail_count="$2"
 
-    log "Disabling responders for workers ${fail_start}..$(( fail_start + fail_count - 1 ))..."
+    log "Disabling responders for sites ${fail_start}..$(( fail_start + fail_count - 1 ))..."
 
     local affected_containers=""
 
@@ -1040,7 +1040,7 @@ disable_workers() {
             -H "Content-Type: application/json" \
             -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
 
-        # Also shut down Tor onion services for this worker so OnionHeaven's
+        # Also shut down Tor onion services for this site so OnionHeaven's
         # takeover worker becomes the sole publisher for these .onion addresses.
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
@@ -1086,14 +1086,14 @@ disable_workers() {
         " 2>/dev/null || true
     done
 
-    log "Disabled ${fail_count} workers (HTTP responders + ${TOR_LABEL} restart)"
+    log "Disabled ${fail_count} sites (HTTP responders + ${TOR_LABEL} restart)"
 }
 
 enable_workers() {
     local start="$1"
     local count="$2"
 
-    log "Re-enabling responders and re-registering workers ${start}..$(( start + count - 1 ))..."
+    log "Re-enabling responders and re-registering sites ${start}..$(( start + count - 1 ))..."
 
     local affected_containers=""
 
@@ -1208,17 +1208,17 @@ print(f'Re-registered {w[\"content_address\"]}')
         " 2>/dev/null || true
     done
 
-    log "Re-enabled ${count} workers, ${TOR_LABEL} restarted + re-registrations over Tor (1s apart)"
+    log "Re-enabled ${count} sites, ${TOR_LABEL} restarted + re-registrations over Tor (1s apart)"
 }
 
-# Re-enable workers WITHOUT re-registering or sending /online.
+# Re-enable sites WITHOUT re-registering or sending /online.
 # Tests pure heartbeat-based recovery: OnionHeaven must discover the service
 # is healthy again by polling the healthcheck address.
 enable_workers_silent() {
     local start="$1"
     local count="$2"
 
-    log "Re-enabling responders for workers ${start}..$(( start + count - 1 )) (no /online, no /register)..."
+    log "Re-enabling responders for sites ${start}..$(( start + count - 1 )) (no /online, no /register)..."
 
     local affected_containers=""
 
@@ -1280,7 +1280,7 @@ enable_workers_silent() {
         " 2>/dev/null || true
     done
 
-    log "Re-enabled ${count} workers silently (${TOR_LABEL} restarted, no notifications sent)"
+    log "Re-enabled ${count} sites silently (${TOR_LABEL} restarted, no notifications sent)"
 }
 
 # Restart Tor/Arti SOCKS proxies to flush HSDir descriptor caches.
@@ -1313,7 +1313,7 @@ wait_for_takeover() {
     local poll_start="${3:-$((TOTAL - FAILING))}"
     local poll_count="${4:-$FAILING}"
 
-    log "Waiting for ${expected} takeovers — polling disabled workers' .onion addresses for 302 redirects (timeout: ${timeout_secs}s)..."
+    log "Waiting for ${expected} takeovers — polling disabled sites' .onion addresses for 302 redirects (timeout: ${timeout_secs}s)..."
 
     local start_ts
     start_ts=$(date +%s)
@@ -1322,7 +1322,7 @@ wait_for_takeover() {
     local taken_over=0
     local prev_taken=0
 
-    # Get content addresses of the workers we disabled
+    # Get content addresses of the sites we disabled
     local content_addrs
     content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
 
@@ -1372,7 +1372,7 @@ wait_for_recovery() {
     local poll_start="${3:-$((TOTAL - FAILING))}"
     local poll_count="${4:-$FAILING}"
 
-    log "Waiting for recovery — polling previously-failed workers for 200 OK (timeout: ${timeout_secs}s)..."
+    log "Waiting for recovery — polling previously-failed sites for 200 OK (timeout: ${timeout_secs}s)..."
 
     local start_ts
     start_ts=$(date +%s)
@@ -1382,7 +1382,7 @@ wait_for_recovery() {
     local still_taken=0
     local prev_recovered=0
 
-    # Get content addresses of the workers that were disabled
+    # Get content addresses of the sites that were disabled
     local content_addrs
     content_addrs=$(get_worker_content_addrs "$poll_start" "$poll_count")
 
@@ -1407,11 +1407,11 @@ wait_for_recovery() {
             last_dashboard=$now
         fi
 
-        if [ "$recovered" -ge "$FAILING" ] 2>/dev/null && [ "$still_taken" -eq 0 ] 2>/dev/null; then
+        if [ "$recovered" -ge "$expected_healthy" ] 2>/dev/null && [ "$still_taken" -eq 0 ] 2>/dev/null; then
             local elapsed=$(( $(date +%s) - start_ts ))
-            [ -n "$PHASE_LOG" ] && echo " ${recovered}/${FAILING}" >> "$PHASE_LOG"
-            WAIT_RESULT="${recovered}/${FAILING} recovered in $(fmt_duration $elapsed)"
-            log "Recovery complete — ${recovered} workers back to 200 OK, 0 still redirecting"
+            [ -n "$PHASE_LOG" ] && echo " ${recovered}/${expected_healthy}" >> "$PHASE_LOG"
+            WAIT_RESULT="${recovered}/${expected_healthy} recovered in $(fmt_duration $elapsed)"
+            log "Recovery complete — ${recovered} sites back to 200 OK, 0 still redirecting"
             print_dashboard
             return 0
         fi
@@ -1429,13 +1429,13 @@ wait_for_recovery() {
 
 # ── Graceful offline/online notification ─────────────────────────────────────
 
-# POST /offline to OnionHeaven for a range of workers (triggers immediate takeover).
+# POST /offline to OnionHeaven for a range of sites (triggers immediate takeover).
 # This simulates a real OnionPress instance calling /offline before sleeping/quitting.
 notify_offline() {
     local start="$1"
     local count="$2"
 
-    log "Sending /offline notifications for workers ${start}..$(( start + count - 1 ))..."
+    log "Sending /offline notifications for sites ${start}..$(( start + count - 1 ))..."
 
     # Build all offline payloads in one python3 call, then send them in a single
     # docker exec to avoid 300+ subprocess calls (each ~1s under qemu).
@@ -1511,17 +1511,17 @@ for p in payloads:
         ')
     fi
 
-    log "Sent /offline for ${notified:-0} workers"
+    log "Sent /offline for ${notified:-0} sites"
     log_json "\"event\":\"offline_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
 
-# POST /online to OnionHeaven for a range of workers (triggers immediate release).
+# POST /online to OnionHeaven for a range of sites (triggers immediate release).
 # This simulates a real OnionPress instance calling /online after waking up.
 notify_online() {
     local start="$1"
     local count="$2"
 
-    log "Sending /online notifications for workers ${start}..$(( start + count - 1 ))..."
+    log "Sending /online notifications for sites ${start}..$(( start + count - 1 ))..."
 
     local payloads
     payloads=$(python3 -c "
@@ -1595,7 +1595,7 @@ for p in payloads:
         ')
     fi
 
-    log "Sent /online for ${notified:-0} workers"
+    log "Sent /online for ${notified:-0} sites"
     log_json "\"event\":\"online_notify\",\"start\":${start},\"count\":${count},\"notified\":${notified:-0}"
 }
 
@@ -1605,8 +1605,8 @@ get_taken_over_addresses() {
         docker_cmd exec onionheaven \
             sqlite3 "$ONIONHEAVEN_DB_PATH" "SELECT content_address FROM registry WHERE status='taken-over'" 2>/dev/null || true
     else
-        # On remote machines, use the disabled workers' addresses from local info files.
-        # These are the workers we know we disabled, so they should be taken over.
+        # On remote machines, use the disabled sites' addresses from local info files.
+        # These are the sites we know we disabled, so they should be taken over.
         local fail_start=$((TOTAL - FAILING))
         for i in $(seq "$fail_start" $((TOTAL - 1))); do
             local ctr_idx=$((i / PER_CTR))
@@ -1758,9 +1758,9 @@ cleanup_stress_test() {
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
         docker_cmd rm -f "$ctr" 2>/dev/null || true
     done || true
-    log "  Removed worker containers"
+    log "  Removed stress-worker containers"
 
-    # Unregister stress-test workers from OnionHeaven (signed payloads)
+    # Unregister stress-test sites from OnionHeaven (signed payloads)
     local payloads
     payloads=$(python3 -c "
 import json, glob, sys, base64
@@ -1865,13 +1865,16 @@ run_worker() {
     # Check for leftover artifacts before starting
     check_previous_artifacts
 
-    mkdir -p "$OUTPUT_DIR"
-    # Archive previous phase log if it has content
-    if [ -s "${OUTPUT_DIR}/phase.log" ]; then
-        local ts
-        ts=$(date '+%Y%m%d-%H%M%S')
-        mv "${OUTPUT_DIR}/phase.log" "${OUTPUT_DIR}/phase-${ts}.log"
-    fi
+    # Create timestamped run directory so successive runs don't overwrite
+    local run_ts
+    run_ts=$(date '+%Y%m%d-%H%M%S')
+    RUN_DIR="${OUTPUT_DIR}/run-${run_ts}"
+    mkdir -p "$RUN_DIR"
+    # Update OUTPUT_DIR to point to the run directory for all file writes
+    OUTPUT_DIR="$RUN_DIR"
+    # Maintain a "latest" symlink for convenience
+    ln -sfn "run-${run_ts}" "$(dirname "$RUN_DIR")/latest"
+
     PHASE_LOG="${OUTPUT_DIR}/phase.log"
     : > "$PHASE_LOG"  # start fresh
     write_phase_header
@@ -1887,8 +1890,8 @@ run_worker() {
     log "=== OnionHeaven Stress Test (${TOR_LABEL}) ==="
     log "OnionHeaven: ${ONIONHEAVEN_ADDR}"
     [ -n "$LOCAL_ONION_ADDR" ] && log "This machine: ${LOCAL_ONION_ADDR}" || true
-    log "Workers: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
-    log "Stress-worker containers: ${NUM_CONTAINERS} × ${PER_CTR} workers/container"
+    log "Sites: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
+    log "Stress-worker containers: ${NUM_CONTAINERS} × ${PER_CTR} sites/container"
     if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
         log "Container batch size: ${BATCH_SIZE}"
     fi
@@ -1896,13 +1899,13 @@ run_worker() {
     echo ""
 
     RUN_START_TS=$(date +%s)
-    phase_start "1" "Starting ${NUM_CONTAINERS} worker containers (${TOTAL} workers) (est. <1m)"
+    phase_start "1" "Starting ${NUM_CONTAINERS} stress-worker containers (${TOTAL} sites) (est. <1m)"
 
     trap 'log "Cleaning up before exit..."; cleanup_stress_test' EXIT
     trap 'log "Interrupted..."; exit 130' INT TERM
 
     # Phase 1: Start worker containers (Arti + Python HTTP server)
-    log "Phase 1: Starting ${NUM_CONTAINERS} worker containers..."
+    log "Phase 1: Starting ${NUM_CONTAINERS} stress-worker containers..."
     start_all_workers
     phase_result "1" "Started ${NUM_CONTAINERS} containers"
     echo ""
@@ -1913,11 +1916,11 @@ run_worker() {
     local r_b1="" r_b1v="" r_b2="" r_b_sum=""
     local r_c1="" r_c2="" r_c_sum=""
 
-    # Phase 2: Wait for all workers to bootstrap and self-register over Tor
-    phase_start "2" "Waiting for workers to bootstrap and register over Tor (est. 2m)"
-    log "Phase 2: Waiting for workers to bootstrap and register over Tor..."
+    # Phase 2: Wait for all sites to bootstrap and self-register over Tor
+    phase_start "2" "Waiting for sites to bootstrap and register over Tor (est. 2m)"
+    log "Phase 2: Waiting for sites to bootstrap and register over Tor..."
     if ! wait_for_bootstrap 900; then
-        log "WARNING: Not all workers bootstrapped"
+        log "WARNING: Not all sites bootstrapped"
     fi
     r_phase2="$WAIT_RESULT"
     phase_result "2" "$WAIT_RESULT"
@@ -1942,13 +1945,13 @@ run_worker() {
         echo ""
     fi
 
-    # Flush tor-client descriptor cache so it discovers new worker onion services faster
+    # Flush tor-client descriptor cache so it discovers new site onion services faster
     flush_client_descriptor_cache
 
-    # Phase 3: Wait for onionheaven heartbeat monitor to confirm workers are healthy
-    phase_start "3" "Waiting for heartbeat monitor to confirm all ${TOTAL} workers are healthy (est. 1m)"
+    # Phase 3: Wait for onionheaven heartbeat monitor to confirm sites are healthy
+    phase_start "3" "Waiting for heartbeat monitor to confirm all ${TOTAL} sites are healthy (est. 1m)"
     if ! wait_for_healthy "$TOTAL" "Phase 3" 600; then
-        log "WARNING: Not all workers became healthy, continuing anyway..."
+        log "WARNING: Not all sites became healthy, continuing anyway..."
     fi
     r_phase3="$WAIT_RESULT"
     phase_result "3" "$WAIT_RESULT"
@@ -1965,9 +1968,9 @@ run_worker() {
         phase_start "A" "GRACEFUL OFFLINE/ONLINE (with /offline and /online notifications)"
 
         # A1: Takeover — /offline + disable, then wait for 302s
-        phase_start "A.1" "Graceful takeover: /offline + disable ${FAILING} workers, wait for takeover (est. 1-2m)"
+        phase_start "A.1" "Graceful takeover: /offline + disable ${FAILING} sites, wait for takeover (est. 1-2m)"
         scenario_ts=$(date +%s)
-        log "Phase A.1: Graceful offline — sending /offline + disabling responders for ${FAILING} workers..."
+        log "Phase A.1: Graceful offline — sending /offline + disabling responders for ${FAILING} sites..."
         notify_offline "$fail_start" "$FAILING"
         disable_workers "$fail_start" "$FAILING"
         flush_client_descriptor_cache
@@ -1988,7 +1991,7 @@ run_worker() {
         echo ""
 
         # A2: Recovery — re-enable + /online, then wait for 200s
-        phase_start "A.2" "Graceful recovery: re-enable + /online for ${FAILING} workers, wait for recovery (est. 1-2m)"
+        phase_start "A.2" "Graceful recovery: re-enable + /online for ${FAILING} sites, wait for recovery (est. 1-2m)"
         scenario_ts=$(date +%s)
         log "Phase A.2: Graceful recovery — re-enabling responders + sending /online..."
         enable_workers "$fail_start" "$FAILING"
@@ -1996,7 +1999,7 @@ run_worker() {
         flush_client_descriptor_cache
         log "Phase A.2: Waiting for recovery..."
         if ! wait_for_recovery "$FAILING" 600; then
-            log "WARNING: Not all workers recovered from graceful offline"
+            log "WARNING: Not all sites recovered from graceful offline"
         fi
         local recovery_elapsed=$(( $(date +%s) - scenario_ts ))
         r_a2="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
@@ -2014,9 +2017,9 @@ run_worker() {
         phase_start "B" "SILENT CRASH/RECOVERY (no notifications, heartbeat-only detection)"
 
         # B1: Takeover — disable only (no /offline), wait for heartbeat monitor to detect
-        phase_start "B.1" "Silent crash: disable ${FAILING} workers (no /offline), wait for heartbeat monitor takeover (est. 9m)"
+        phase_start "B.1" "Silent crash: disable ${FAILING} sites (no /offline), wait for heartbeat monitor takeover (est. 9m)"
         scenario_ts=$(date +%s)
-        log "Phase B.1: Silent crash — disabling responders for ${FAILING} workers (no /offline)..."
+        log "Phase B.1: Silent crash — disabling responders for ${FAILING} sites (no /offline)..."
         disable_workers "$fail_start" "$FAILING"
         flush_client_descriptor_cache
         log "Phase B.1: Waiting for heartbeat-detected takeovers..."
@@ -2036,14 +2039,14 @@ run_worker() {
         echo ""
 
         # B2: Recovery — re-enable only (no /online, no /register), wait for heartbeat monitor
-        phase_start "B.2" "Silent recovery: re-enable ${FAILING} workers (no /online), wait for heartbeat monitor recovery (est. 1m)"
+        phase_start "B.2" "Silent recovery: re-enable ${FAILING} sites (no /online), wait for heartbeat monitor recovery (est. 1m)"
         scenario_ts=$(date +%s)
         log "Phase B.2: Silent recovery — re-enabling responders (no /online, no /register)..."
         enable_workers_silent "$fail_start" "$FAILING"
         flush_client_descriptor_cache
         log "Phase B.2: Waiting for heartbeat-detected recovery..."
         if ! wait_for_recovery "$FAILING" 900; then
-            log "WARNING: Not all workers recovered via heartbeat detection"
+            log "WARNING: Not all sites recovered via heartbeat detection"
         fi
         recovery_elapsed=$(( $(date +%s) - scenario_ts ))
         r_b2="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
@@ -2055,26 +2058,26 @@ run_worker() {
         echo ""
 
     else
-        log "No failing workers configured — skipping failure/recovery test"
+        log "No failing sites configured — skipping failure/recovery test"
         echo ""
     fi
 
     # ══════════════════════════════════════════════════════════════
-    # Scenario C: Takeover capacity — all workers taken over, sustained 302 checks
+    # Scenario C: Takeover capacity — all sites taken over, sustained 302 checks
     # ══════════════════════════════════════════════════════════════
 
-    phase_start "C" "TAKEOVER CAPACITY (all ${TOTAL} workers taken over, sustained 302 checks)"
+    phase_start "C" "TAKEOVER CAPACITY (all ${TOTAL} sites taken over, sustained 302 checks)"
 
-    # C.1: Take over all workers
-    phase_start "C.1" "Take over all ${TOTAL} workers via /offline (est. 5m)"
+    # C.1: Take over all sites
+    phase_start "C.1" "Take over all ${TOTAL} sites via /offline (est. 5m)"
     scenario_ts=$(date +%s)
-    log "Phase C.1: Sending /offline + disabling all ${TOTAL} workers..."
+    log "Phase C.1: Sending /offline + disabling all ${TOTAL} sites..."
     notify_offline 0 "$TOTAL"
     disable_workers 0 "$TOTAL"
     flush_client_descriptor_cache
     log "Phase C.1: Waiting for all ${TOTAL} takeovers..."
     if ! wait_for_takeover "$TOTAL" 900 0 "$TOTAL"; then
-        log "WARNING: Not all workers were taken over"
+        log "WARNING: Not all sites were taken over"
     fi
     takeover_elapsed=$(( $(date +%s) - scenario_ts ))
     r_c1="$WAIT_RESULT ($(fmt_duration $takeover_elapsed) e2e)"
@@ -2133,16 +2136,16 @@ run_worker() {
     phase_result "C.2" "Sustained 302s: $r_c2"
     echo ""
 
-    # C.3: Recovery — bring all workers back
-    phase_start "C.3" "Recovery: re-enable + /online all ${TOTAL} workers (est. 5m)"
+    # C.3: Recovery — bring all sites back
+    phase_start "C.3" "Recovery: re-enable + /online all ${TOTAL} sites (est. 5m)"
     scenario_ts=$(date +%s)
-    log "Phase C.3: Re-enabling all workers..."
+    log "Phase C.3: Re-enabling all sites..."
     enable_workers 0 "$TOTAL"
     notify_online 0 "$TOTAL"
     flush_client_descriptor_cache
     log "Phase C.3: Waiting for all ${TOTAL} to recover..."
     if ! wait_for_recovery "$TOTAL" 900 0 "$TOTAL"; then
-        log "WARNING: Not all workers recovered"
+        log "WARNING: Not all sites recovered"
     fi
     recovery_elapsed=$(( $(date +%s) - scenario_ts ))
     r_c3="$WAIT_RESULT ($(fmt_duration $recovery_elapsed) e2e)"
@@ -2182,7 +2185,7 @@ SUMMARY
         fi
         cat >> "$PHASE_LOG" << SUMMARY
   ---
-  C. Takeover capacity (all ${TOTAL} workers):
+  C. Takeover capacity (all ${TOTAL} sites):
      C.1  Takeover all:   ${r_c1:-(not run)}
      C.2  Sustained 302s: ${r_c2:-(not run)}
      C.3  Recovery all:   ${r_c3:-(not run)}
@@ -2212,6 +2215,10 @@ SUMMARY
 run_coordinator() {
     preflight
     detect_onionheaven_addr
+    # Follow the "latest" symlink if it exists, otherwise use OUTPUT_DIR directly
+    if [ -L "${OUTPUT_DIR}/latest" ]; then
+        OUTPUT_DIR="${OUTPUT_DIR}/latest"
+    fi
     mkdir -p "$OUTPUT_DIR"
     PHASE_LOG="${OUTPUT_DIR}/phase.log"
 
