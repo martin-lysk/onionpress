@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # Retina scale — render at 2x pixels, mark as 144 DPI so Finder
 # displays at the same point size but with double the detail
-SCALE = 7
+SCALE = 2
 RETINA_DPI = 72 * SCALE
 
 # Layout constants (in points, multiplied by SCALE for pixel coords)
