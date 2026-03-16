@@ -297,15 +297,26 @@ def _send_heartbeat(app, wordpress_healthy=True):
 
     payload = json.dumps(payload_dict)
 
-    ok, output = _run_docker(app, [
+    curl_args = [
         "exec", "onionpress-wordpress",
-        "curl", "-s", "-X", "POST",
+        "curl", "-s", "-S", "-X", "POST",
         "--socks5-hostname", "onionpress-tor-client:9050",
         "-H", "Content-Type: application/json",
         "-d", payload,
         "--max-time", "30",
         f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/online"
-    ], timeout=45)
+    ]
+
+    rc, output = _run_docker_rc(app, curl_args, timeout=45)
+    ok = (rc == 0)
+
+    # Retry once after 3s on transient Tor HSDir failures
+    if not (ok and output):
+        app.log(f"OnionHeaven: heartbeat failed (curl_rc={rc}), retrying in 3s...")
+        import time
+        time.sleep(3)
+        rc, output = _run_docker_rc(app, curl_args, timeout=45)
+        ok = (rc == 0)
 
     if ok and output:
         try:
@@ -327,9 +338,9 @@ def _send_heartbeat(app, wordpress_healthy=True):
                 return  # success, silent
             app.log(f"OnionHeaven: heartbeat rejected: {resp.get('error', 'unknown')}")
         except json.JSONDecodeError:
-            pass
+            app.log(f"OnionHeaven: heartbeat got non-JSON response: {output[:200]}")
     else:
-        app.log(f"OnionHeaven: heartbeat failed (will retry next cycle)")
+        app.log(f"OnionHeaven: heartbeat failed after retry: curl_rc={rc}, output={repr(output[:200]) if output else 'empty'}")
 
 
 def unregister_from_onionheaven(app, content_address=None):
