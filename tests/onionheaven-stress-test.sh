@@ -2,7 +2,7 @@
 # OnionHeaven Stress Test — Real Arti Onion Services
 #
 # Architecture:
-#   - Worker containers: each runs Arti with N real onion services + a single
+#   - Site containers: each runs Arti with N real onion services + a single
 #     Python HTTP server handling all ports (replaces per-site socat processes).
 #   - Each site self-registers with OnionHeaven over Tor, just like a real
 #     OnionPress instance.
@@ -10,7 +10,7 @@
 #   - This script: orchestrates containers, monitors dashboard, controls failures.
 #
 # Scaling:
-#   - Each worker container handles --per-ctr sites (default 50).
+#   - Each container handles --per-ctr sites (default 50).
 #   - For 1000 sites: 20 containers × 50 sites each.
 #   - Only 1 docker exec -d per container (vs 2 per site in old architecture).
 #   - macOS process limit is no longer a bottleneck.
@@ -180,7 +180,7 @@ write_phase_header() {
   $(date '+%Y-%m-%d %H:%M:%S')
 --------------------------------------------------------------------
   Sites: ${TOTAL} total (${HEALTHY} healthy, ${FAILING} failing)
-  Stress-worker containers: ${NUM_CONTAINERS} x ${PER_CTR}/container
+  Containers: ${NUM_CONTAINERS} x ${PER_CTR} sites/container
   OnionHeaven: ${ONIONHEAVEN_ADDR}
   OnionHeaven server version: ${oh_version:-unknown}
   Stress test version: ${STRESS_VERSION}
@@ -381,9 +381,9 @@ get_onionpress_network() {
     docker_cmd inspect onionpress-tor --format='{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null
 }
 
-# ── Worker container management ───────────────────────────────────────────────
+# ── Site container management ─────────────────────────────────────────────────
 
-# Start a single worker container with Arti + Python HTTP server.
+# Start a single site container with Arti + Python HTTP server.
 # Each container handles $workers_in_ctr onion service pairs (sites).
 start_worker_container() {
     local idx="$1"
@@ -556,7 +556,7 @@ STARTEOF
     docker_cmd exec "$ctr_name" sh /start.sh </dev/null >/dev/null 2>&1 &
 }
 
-# Start all worker containers, optionally in batches.
+# Start all site containers, optionally in batches.
 start_all_workers() {
     local network
     network=$(get_onionpress_network)
@@ -587,7 +587,7 @@ start_all_workers() {
         fi
     done
 
-    log "Started ${NUM_CONTAINERS} stress-worker containers"
+    log "Started ${NUM_CONTAINERS} stress containers"
 }
 
 # Wait for all sites to bootstrap (register with OnionHeaven over Tor).
@@ -659,9 +659,9 @@ print(sum(1 for x in w if x.get('registered')))
     return 1
 }
 
-# Extract all worker info from containers into local files.
+# Extract all site info from containers into local files.
 extract_all_worker_info() {
-    log "Extracting worker info from containers..."
+    log "Extracting site info from containers..."
     local total_registered=0
 
     for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
@@ -836,7 +836,7 @@ print_dashboard() {
 
 # ── Helper: get site addresses from local info files ────────────────────────
 
-# Get content addresses for a range of sites (from local worker-info files).
+# Get content addresses for a range of sites (from local site-info files).
 # Usage: get_worker_content_addrs <start> <count>
 get_worker_content_addrs() {
     local start="$1"
@@ -1016,7 +1016,7 @@ wait_for_healthy() {
 }
 
 # ── Phase: Trigger failures ──────────────────────────────────────────────────
-# Disable HTTP responders via the Python control API in each worker container.
+# Disable HTTP responders via the Python control API in each site container.
 
 disable_workers() {
     local fail_start="$1"
@@ -1750,7 +1750,7 @@ verify_redirects() {
 cleanup_stress_test() {
     log "Cleaning up stress test artifacts..."
 
-    # Remove all worker containers
+    # Remove all stress containers
     for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
         docker_cmd rm -f "stress-worker-${idx}" 2>/dev/null || true
     done
@@ -1758,7 +1758,7 @@ cleanup_stress_test() {
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
         docker_cmd rm -f "$ctr" 2>/dev/null || true
     done || true
-    log "  Removed stress-worker containers"
+    log "  Removed stress containers"
 
     # Unregister stress-test sites from OnionHeaven (signed payloads)
     local payloads
@@ -1802,7 +1802,7 @@ for idx in range(${NUM_CONTAINERS}):
     log "Cleanup complete"
 }
 
-# ── Worker mode (full test) ──────────────────────────────────────────────────
+# ── Site mode (full test) ────────────────────────────────────────────────────
 
 check_previous_artifacts() {
     # Check for leftover stress test artifacts from a previous run
@@ -1820,7 +1820,7 @@ check_previous_artifacts() {
     if [ "$stale_count" -gt 0 ] || [ "$registry_count" -gt 0 ]; then
         echo ""
         echo "Found artifacts from a previous stress test:"
-        [ "$stale_count" -gt 0 ] && echo "  - ${stale_count} stress-worker container(s)"
+        [ "$stale_count" -gt 0 ] && echo "  - ${stale_count} stress container(s)"
         [ "$registry_count" -gt 0 ] && echo "  - ${registry_count} registry entries"
         echo ""
         if [ -t 0 ]; then
@@ -1839,7 +1839,7 @@ check_previous_artifacts() {
                     echo "$stale_containers" | while read -r ctr; do
                         docker_cmd rm -f "$ctr" 2>/dev/null || true
                     done
-                    log "  Removed ${stale_count} stress-worker containers"
+                    log "  Removed ${stale_count} stress containers"
                 fi
                 # Clear registry
                 if [ "$registry_count" -gt 0 ] && [ "$IS_ONIONHEAVEN_HOST" = true ]; then
@@ -1891,7 +1891,7 @@ run_worker() {
     log "OnionHeaven: ${ONIONHEAVEN_ADDR}"
     [ -n "$LOCAL_ONION_ADDR" ] && log "This machine: ${LOCAL_ONION_ADDR}" || true
     log "Sites: ${TOTAL} total (${HEALTHY} stay healthy, ${FAILING} will fail)"
-    log "Stress-worker containers: ${NUM_CONTAINERS} × ${PER_CTR} sites/container"
+    log "Containers: ${NUM_CONTAINERS} × ${PER_CTR} sites/container"
     if [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null; then
         log "Container batch size: ${BATCH_SIZE}"
     fi
@@ -1899,13 +1899,13 @@ run_worker() {
     echo ""
 
     RUN_START_TS=$(date +%s)
-    phase_start "1" "Starting ${NUM_CONTAINERS} stress-worker containers (${TOTAL} sites) (est. <1m)"
+    phase_start "1" "Starting ${NUM_CONTAINERS} containers (${TOTAL} sites) (est. <1m)"
 
     trap 'log "Cleaning up before exit..."; cleanup_stress_test' EXIT
     trap 'log "Interrupted..."; exit 130' INT TERM
 
-    # Phase 1: Start worker containers (Arti + Python HTTP server)
-    log "Phase 1: Starting ${NUM_CONTAINERS} stress-worker containers..."
+    # Phase 1: Start site containers (Arti + Python HTTP server)
+    log "Phase 1: Starting ${NUM_CONTAINERS} site containers..."
     start_all_workers
     phase_result "1" "Started ${NUM_CONTAINERS} containers"
     echo ""
@@ -2228,7 +2228,7 @@ run_coordinator() {
     log "Press Ctrl-C to stop"
     echo ""
 
-    # Open a Terminal window tailing the phase log (written by the worker process)
+    # Open a Terminal window tailing the phase log (written by the site process)
     if [ -f "$PHASE_LOG" ]; then
         open_phase_log_window
     else
@@ -2270,7 +2270,7 @@ run_cleanup() {
         IS_ONIONHEAVEN_HOST=false
     fi
 
-    # Remove all stress-worker containers
+    # Remove all stress containers
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
         docker_cmd rm -f "$ctr" 2>/dev/null || true
         log "Removed container: $ctr"
@@ -2422,7 +2422,7 @@ run_cleanup_stale() {
         total_cleaned=$((total_cleaned + cnt))
     done <<< "$stale_versions"
 
-    # Also remove any local stress-worker containers that aren't running a test
+    # Also remove any local stress containers that aren't running a test
     local stale_containers
     stale_containers=$(docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' || true)
     if [ -n "$stale_containers" ]; then
