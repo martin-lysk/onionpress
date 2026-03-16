@@ -57,6 +57,13 @@
 - All other container data uses Docker named volumes (which live inside the VM)
 - **Do not add additional `--mount` flags without considering security implications**
 
+## Docker Image Pull Strategy (IMPORTANT)
+- **Do NOT use `--pull always` on `docker compose up`** — it causes double container recreation
+- The launcher already pulls images via `docker compose pull` before starting containers
+- `docker compose up -d` (without `--pull always`) automatically recreates containers if the local image changed from the pull
+- Adding `--pull always` back causes a redundant pull → container recreated mid-bootstrap → double Tor bootstrap → brief reachability then gap → browser opens to a dead service
+- This has been added and reverted multiple times — the separate `pull` step is the correct approach
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers
