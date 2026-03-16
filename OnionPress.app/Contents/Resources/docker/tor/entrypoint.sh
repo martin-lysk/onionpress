@@ -279,6 +279,9 @@ if [ "$TOR_IMPL" = "tor" ]; then
     # Add OnionHeaven API port to WordPress service
     sed -i 's/# __WORDPRESS_API_PORT__/HiddenServicePort 8083 127.0.0.1:8083/' /etc/tor/torrc
 
+    # Every node runs the OnionHeaven API — use max intro points to handle heartbeat traffic
+    sed -i 's/HiddenServiceNumIntroductionPoints 3/HiddenServiceNumIntroductionPoints 10/' /etc/tor/torrc
+
     # Ensure all of /var/lib/tor is owned by debian-tor (C Tor checks this)
     chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
 
@@ -310,6 +313,9 @@ else
 
     # Expose port 8083 through the onion service so other nodes can reach the API
     sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
+
+    # Every node runs the OnionHeaven API — use max intro points to handle heartbeat traffic
+    sed -i 's/num_intro_points = 3/num_intro_points = 10/' /etc/arti/arti.toml
 
     # Convert C Tor keys to Arti format if switching back from C Tor
     for nickname in wordpress healthcheck; do

@@ -1055,7 +1055,7 @@ for w in workers:
         now=$(date +%s)
         if [ $((now - last_dashboard)) -ge 10 ]; then
             print_dashboard
-            log "  (reachable: ${reachable}/${total_checked} sites)"
+            log "  (reachable: ${reachable}/${target} sites)"
             last_dashboard=$now
         fi
 

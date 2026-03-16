@@ -14,6 +14,7 @@ Log notice stdout
 # WordPress onion service
 HiddenServiceDir /var/lib/tor/hidden_service/wordpress
 HiddenServicePort 80 127.0.0.1:8080
+HiddenServiceNumIntroductionPoints 3
 # OnionHeaven API port (added by entrypoint.sh if needed)
 # __WORDPRESS_API_PORT__
 
