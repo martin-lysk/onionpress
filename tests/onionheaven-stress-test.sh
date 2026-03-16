@@ -612,16 +612,25 @@ wait_for_bootstrap() {
         for idx in $(seq 0 $((NUM_CONTAINERS - 1))); do
             local ctr_name="stress-worker-${idx}"
             if docker_cmd exec "$ctr_name" test -f /worker-info.json 2>/dev/null; then
-                ready_count=$((ready_count + 1))
-                # Count registered sites in this container
-                local reg
+                # Count registered and total sites in this container
+                local reg total_in_ctr
                 reg=$(docker_cmd exec "$ctr_name" python3 -c "
 import json
 with open('/worker-info.json') as f:
     w = json.load(f)
-print(sum(1 for x in w if x.get('registered')))
-" 2>/dev/null || echo 0)
-                registered_count=$((registered_count + reg))
+print(sum(1 for x in w if x.get('registered')), len(w))
+" 2>/dev/null || echo "0 0")
+                local reg_count=$(echo "$reg" | awk '{print $1}')
+                total_in_ctr=$(echo "$reg" | awk '{print $2}')
+                registered_count=$((registered_count + reg_count))
+                # Container is "done" when all expected sites have been processed
+                local expected_in_ctr=$PER_CTR
+                [ $((idx + 1)) -eq "$NUM_CONTAINERS" ] && expected_in_ctr=$(( TOTAL - idx * PER_CTR ))
+                if [ "$total_in_ctr" -ge "$expected_in_ctr" ] 2>/dev/null; then
+                    ready_count=$((ready_count + 1))
+                else
+                    all_ready=false
+                fi
             else
                 all_ready=false
             fi
