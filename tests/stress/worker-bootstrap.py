@@ -300,15 +300,16 @@ def main():
     print(f"Bootstrapping {NUM_WORKERS} workers ({max_parallel} parallel)...", flush=True)
 
     workers = [None] * NUM_WORKERS
+    lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=max_parallel) as pool:
         futures = {pool.submit(bootstrap_one_worker, i): i for i in range(NUM_WORKERS)}
         for future in as_completed(futures):
             i = futures[future]
             workers[i] = future.result()
-
-    # Write info for stress test script to read
-    with open("/worker-info.json", "w") as f:
-        json.dump(workers, f, indent=2)
+            # Write incrementally so the stress test can track progress per-site
+            with lock:
+                with open("/worker-info.json", "w") as f:
+                    json.dump([w for w in workers if w is not None], f, indent=2)
 
     registered_workers = [w for w in workers if w.get("registered")]
     print(f"Bootstrap complete: {len(registered_workers)}/{len(workers)} registered", flush=True)
