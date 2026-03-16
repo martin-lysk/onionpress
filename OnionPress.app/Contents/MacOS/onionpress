@@ -1687,6 +1687,40 @@ start_containers() {
 
     if $wp_installed; then
         log "WordPress is installed — starting Tor"
+
+        # Ensure .htaccess exists — WordPress REST API (block editor publishing)
+        # requires rewrite rules. These can be lost if WordPress auto-updates or
+        # the volume is recreated. Check on every launch, not just first setup.
+        if ! docker exec onionpress-wordpress test -s /var/www/html/.htaccess 2>/dev/null; then
+            log "Restoring .htaccess rewrite rules (missing or empty)"
+            docker exec onionpress-wordpress bash -c 'cat > /var/www/html/.htaccess << "HTEOF"
+# Privacy: prevent onion address leaking in Referer headers
+<IfModule mod_headers.c>
+Header set Referrer-Policy "no-referrer"
+</IfModule>
+
+# BEGIN WordPress Multisite
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+
+# add a trailing slash to /wp-admin
+RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]
+
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]
+RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\.php)$ $2 [L]
+RewriteRule . index.php [L]
+# END WordPress Multisite
+HTEOF
+chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
+                log "✓ .htaccess restored" || \
+                log "WARNING: Failed to restore .htaccess"
+        fi
+
         docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
     else
         log "WordPress not yet installed — waiting for setup (Tor NOT started)"
