@@ -730,11 +730,17 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
         log(f"Takeover pending for {content_address} — waiting for farm worker to be spawned")
         return
 
-    _takeover_local(content_address)
+    # Legacy fallback — only safe inside takeover worker containers.
+    # In the main tor container this would SIGHUP our own onion service.
+    if os.environ.get("TAKEOVER_WORKER") == "1":
+        _takeover_local(content_address)
+    else:
+        log(f"ERROR: takeover_function fell through to legacy mode for {content_address} — "
+            f"farm mode returned False but we are not a takeover worker. Skipping.")
 
 
 def _takeover_local(content_address, no_sighup=False):
-    """Execute takeover via local tor-manager.
+    """Execute takeover via local tor-manager (takeover worker containers only).
 
     C Tor: uses ADD_ONION via control port (no SIGHUP needed).
     Arti: modifies config; if no_sighup=True, caller must call flush_sighup_tor().
@@ -793,7 +799,8 @@ def release_function(conn, content_address, healthcheck_address, force=False):
     db_commit_with_retry(conn)
     log(f"Marked {healthcheck_address} as online for {content_address}")
 
-    # Route to farm worker or execute locally
+    # Route to farm worker or skip — never run _release_local in the main
+    # tor container (it sends SIGHUP which disrupts our own onion service).
     takeover_container = row["takeover_container"] if "takeover_container" in row.keys() else None
     if takeover_container and is_farm_mode(conn):
         conn.execute(
@@ -805,11 +812,16 @@ def release_function(conn, content_address, healthcheck_address, force=False):
         log(f"Queued release of {content_address} → farm worker {takeover_container}")
         return
 
-    _release_local(content_address)
+    # Only run _release_local inside takeover worker containers, never in
+    # the main onionpress-tor container where it would SIGHUP our own Tor.
+    if os.environ.get("TAKEOVER_WORKER") == "1":
+        _release_local(content_address)
+    elif not takeover_container:
+        log(f"Release skipped for {content_address} — no takeover container assigned (nothing to release)")
 
 
 def _release_local(content_address, no_sighup=False):
-    """Execute release via local tor-manager (legacy/worker mode).
+    """Execute release via local tor-manager (takeover worker containers only).
 
     If no_sighup=True, skips the SIGHUP — caller is responsible for
     calling flush_sighup_tor() after a batch of releases.

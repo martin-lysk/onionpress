@@ -642,11 +642,12 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         created = False
 
         if healthcheck_address:
-            # Check if entry exists (for logging/response)
+            # Check if entry exists and its current status (for release decision)
             existing = conn.execute(
-                "SELECT 1 FROM registry WHERE content_address = ? AND healthcheck_address = ?",
+                "SELECT status FROM registry WHERE content_address = ? AND healthcheck_address = ?",
                 (content_address, healthcheck_address)
             ).fetchone()
+            was_taken_over = existing and existing["status"] == "taken-over"
 
             # Upsert: create if new, update if exists
             wp_healthy_val = (1 if wordpress_healthy else 0) if wordpress_healthy is not None else None
@@ -668,14 +669,16 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 (content_address, healthcheck_address, now, version, now, is_oh,
                  wp_healthy_val, now if wp_healthy_val is not None else None))
             db_commit_with_retry(conn)
-            release_function(conn, content_address, healthcheck_address, force=True)
+            # Only release if the entry was actually taken over
+            if was_taken_over:
+                release_function(conn, content_address, healthcheck_address, force=True)
             if not existing:
                 created = True
                 log(f"New registry entry for {content_address} / {healthcheck_address}")
         else:
             # No healthcheck_address — update all rows for this content_address
             existing = conn.execute(
-                "SELECT healthcheck_address FROM registry WHERE content_address = ?",
+                "SELECT healthcheck_address, status FROM registry WHERE content_address = ?",
                 (content_address,)
             ).fetchall()
             if not existing:
@@ -691,8 +694,10 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 (now, is_oh, content_address)
             )
             db_commit_with_retry(conn)
+            # Only release rows that were actually taken over
             for row in existing:
-                release_function(conn, content_address, row["healthcheck_address"], force=True)
+                if row["status"] == "taken-over":
+                    release_function(conn, content_address, row["healthcheck_address"], force=True)
             flush_sighup_tor()
 
         conn.close()
