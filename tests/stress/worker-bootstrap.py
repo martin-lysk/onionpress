@@ -58,7 +58,7 @@ def ctor_add_onion(port):
         if line.startswith("250-ServiceID="):
             service_id = line.split("=", 1)[1].strip()
         elif line.startswith("250-PrivateKey=ED25519-V3:"):
-            privkey_b64 = line.split(":", 2)[2].strip()
+            privkey_b64 = line.split("ED25519-V3:", 1)[1].strip()
     if service_id and privkey_b64:
         return f"{service_id}.onion", privkey_b64
     return None, None
