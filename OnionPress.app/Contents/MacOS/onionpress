@@ -2000,6 +2000,11 @@ main() {
             log "Onion address: $ONION_ADDR"
             log "Local access: http://localhost:${ONIONPRESS_WP_PORT:-8080}"
             log "OnionPress is now running! Check the menu bar for status."
+
+            # Stay alive so background jobs (lazy OnionHeaven watcher, farm
+            # monitor) keep running. Without this, main() returns and the
+            # EXIT trap kills all background children.
+            wait
             ;;
 
         stop)

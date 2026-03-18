@@ -778,93 +778,89 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=self.auto_start, daemon=True).start()
 
     def show_launch_splash(self):
-        """Show non-blocking launch splash with logo - no I/O blocking"""
-        def show():
+        """Show launch splash with logo synchronously (called from __init__ on main thread)"""
+        try:
+            # Create window - taller for buttons and time estimate
+            window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                AppKit.NSMakeRect(0, 0, 320, 300),
+                AppKit.NSWindowStyleMaskTitled,  # No close button - dismisses automatically when ready
+                AppKit.NSBackingStoreBuffered,
+                False
+            )
+            window.setTitle_("OnionPress")
+            window.setLevel_(AppKit.NSFloatingWindowLevel)
+            window.center()
+            window.setReleasedWhenClosed_(False)  # Keep window object alive
+            window.setHidesOnDeactivate_(False)  # Stay visible when clicking other windows
+
+            # Create content view
+            content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 320, 300))
+
+            # Add "Launching..." text
+            text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(60, 120, 200, 30))
+            text_field.setStringValue_("Launching OnionPress...")
+            text_field.setBezeled_(False)
+            text_field.setDrawsBackground_(False)
+            text_field.setEditable_(False)
+            text_field.setSelectable_(False)
+            text_field.setAlignment_(AppKit.NSTextAlignmentCenter)
+            font = AppKit.NSFont.systemFontOfSize_(16)
+            text_field.setFont_(font)
+            content_view.addSubview_(text_field)
+
+            # Add estimated time text
+            time_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(40, 90, 240, 20))
+            time_field.setStringValue_("Estimated time: ~3 minutes")
+            time_field.setBezeled_(False)
+            time_field.setDrawsBackground_(False)
+            time_field.setEditable_(False)
+            time_field.setSelectable_(False)
+            time_field.setAlignment_(AppKit.NSTextAlignmentCenter)
+            time_field.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+            small_font = AppKit.NSFont.systemFontOfSize_(12)
+            time_field.setFont_(small_font)
+            content_view.addSubview_(time_field)
+
+            # Add View Log button
+            view_log_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(20, 20, 130, 32))
+            view_log_button.setTitle_("View Log")
+            view_log_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            view_log_button.setTarget_(self)
+            view_log_button.setAction_("openLogFile:")
+            content_view.addSubview_(view_log_button)
+
+            # Add Dismiss button
+            dismiss_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(170, 20, 130, 32))
+            dismiss_button.setTitle_("Dismiss")
+            dismiss_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            dismiss_button.setTarget_(self)
+            dismiss_button.setAction_("dismissSplashButton:")
+            content_view.addSubview_(dismiss_button)
+
+            # Add logo (fast local PNG load)
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(110, 180, 100, 100))
+                image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if image:
+                    image_view.setImage_(image)
+                    content_view.addSubview_(image_view)
+
+            window.setContentView_(content_view)
+            window.makeKeyAndOrderFront_(None)
+
+            self.launch_splash = window
+            self.launch_splash_time_field = time_field  # Store reference for updates
+
+            # Log splash creation
             try:
-                # Create window (no I/O) - taller for buttons and time estimate
-                window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-                    AppKit.NSMakeRect(0, 0, 320, 300),
-                    AppKit.NSWindowStyleMaskTitled,  # No close button - dismisses automatically when ready
-                    AppKit.NSBackingStoreBuffered,
-                    False
-                )
-                window.setTitle_("OnionPress")
-                window.setLevel_(AppKit.NSFloatingWindowLevel)
-                window.center()
-                window.setReleasedWhenClosed_(False)  # Keep window object alive
-                window.setHidesOnDeactivate_(False)  # Stay visible when clicking other windows
+                with open(self.log_file, 'a') as f:
+                    f.write(f"DEBUG: Launch splash created and shown\n")
+            except Exception:
+                pass
 
-                # Create content view
-                content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 320, 300))
-
-                # Add "Launching..." text (no I/O)
-                text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(60, 120, 200, 30))
-                text_field.setStringValue_("Launching OnionPress...")
-                text_field.setBezeled_(False)
-                text_field.setDrawsBackground_(False)
-                text_field.setEditable_(False)
-                text_field.setSelectable_(False)
-                text_field.setAlignment_(AppKit.NSTextAlignmentCenter)
-                font = AppKit.NSFont.systemFontOfSize_(16)
-                text_field.setFont_(font)
-                content_view.addSubview_(text_field)
-
-                # Add estimated time text
-                time_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(40, 90, 240, 20))
-                time_field.setStringValue_("Estimated time: ~3 minutes")
-                time_field.setBezeled_(False)
-                time_field.setDrawsBackground_(False)
-                time_field.setEditable_(False)
-                time_field.setSelectable_(False)
-                time_field.setAlignment_(AppKit.NSTextAlignmentCenter)
-                time_field.setTextColor_(AppKit.NSColor.secondaryLabelColor())
-                small_font = AppKit.NSFont.systemFontOfSize_(12)
-                time_field.setFont_(small_font)
-                content_view.addSubview_(time_field)
-
-                # Add View Log button
-                view_log_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(20, 20, 130, 32))
-                view_log_button.setTitle_("View Log")
-                view_log_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-                view_log_button.setTarget_(self)
-                view_log_button.setAction_("openLogFile:")
-                content_view.addSubview_(view_log_button)
-
-                # Add Dismiss button
-                dismiss_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(170, 20, 130, 32))
-                dismiss_button.setTitle_("Dismiss")
-                dismiss_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-                dismiss_button.setTarget_(self)
-                dismiss_button.setAction_("dismissSplashButton:")
-                content_view.addSubview_(dismiss_button)
-
-                window.setContentView_(content_view)
-                window.makeKeyAndOrderFront_(None)
-
-                self.launch_splash = window
-                self.launch_splash_time_field = time_field  # Store reference for updates
-
-                # Log splash creation
-                try:
-                    with open(self.log_file, 'a') as f:
-                        f.write(f"DEBUG: Launch splash created and shown\n")
-                except Exception:
-                    pass
-
-                # Add logo on main thread (fast local PNG load, avoids AppKit threading crash)
-                icon_path = os.path.join(self.resources_dir, "app-icon.png")
-                if os.path.exists(icon_path):
-                    image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(110, 180, 100, 100))
-                    image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                    if image:
-                        image_view.setImage_(image)
-                        content_view.addSubview_(image_view)
-
-            except Exception as e:
-                pass  # Don't log yet, log file not ready
-
-        # Show on main thread
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(show)
+        except Exception as e:
+            pass  # Don't crash on splash failure
 
     def dismiss_launch_splash(self):
         """Dismiss the launch splash window"""
