@@ -1681,21 +1681,46 @@ create_backup() {
     staging=$(mktemp -d -t onionpress-backup-XXXXXX)
     trap "rm -rf '$staging'" RETURN
 
-    # 1. Extract Tor keys from vanity-keys directory
+    # 1. Extract Tor keys (both Arti and C Tor formats)
     log "Backup: extracting Tor keys..."
     mkdir -p "$staging/tor-keys"
-    local key_file
-    key_file=$(find "$DATA_DIR/shared/vanity-keys" -name "ks_hs_id.ed25519_expanded_private" 2>/dev/null | head -1)
-    if [ -z "$key_file" ]; then
-        # Try extracting from the arti-state volume
-        key_file=$(docker run --rm -v onionpress-arti-state:/src alpine cat /src/state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private 2>/dev/null) || true
-        if [ -n "$key_file" ]; then
-            echo "$key_file" > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
-        else
-            log "WARNING: No Tor key found — backup will not include keys"
-        fi
+
+    # Arti format key (ks_hs_id.ed25519_expanded_private)
+    local arti_key
+    arti_key=$(find "$DATA_DIR/shared/vanity-keys" -name "ks_hs_id.ed25519_expanded_private" 2>/dev/null | head -1)
+    if [ -n "$arti_key" ]; then
+        cp "$arti_key" "$staging/tor-keys/"
     else
-        cp "$key_file" "$staging/tor-keys/"
+        # Try extracting from the arti-state volume
+        docker run --rm -v onionpress-arti-state:/src alpine cat /src/state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null || true
+        if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
+            rm -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
+            log "WARNING: No Arti key found"
+        fi
+    fi
+
+    # C Tor format keys (hs_ed25519_secret_key, hs_ed25519_public_key)
+    local ctor_key
+    ctor_key=$(find "$DATA_DIR/shared/vanity-keys" -name "hs_ed25519_secret_key" 2>/dev/null | head -1)
+    if [ -n "$ctor_key" ]; then
+        cp "$ctor_key" "$staging/tor-keys/"
+        # Also grab public key if present
+        local ctor_pub="${ctor_key%secret_key}public_key"
+        [ -f "$ctor_pub" ] && cp "$ctor_pub" "$staging/tor-keys/"
+    else
+        # Try extracting from the tor-state volume
+        docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/wordpress/hs_ed25519_secret_key' > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
+        if [ ! -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
+            rm -f "$staging/tor-keys/hs_ed25519_secret_key"
+            log "WARNING: No C Tor secret key found"
+        else
+            docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/wordpress/hs_ed25519_public_key' > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
+            [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
+        fi
+    fi
+
+    if [ -z "$(ls -A "$staging/tor-keys/" 2>/dev/null)" ]; then
+        log "WARNING: No Tor keys found — backup will not include keys"
     fi
 
     # 2. Dump WordPress database
@@ -1800,6 +1825,47 @@ restore_backup() {
         mkdir -p "$addr_dir"
         cp "$key_file" "$addr_dir/"
         echo "$onion_address" > "$addr_dir/hostname"
+
+        # Restore C Tor format keys — use from backup if present, else derive from Arti PEM
+        local ctor_secret="$staging/tor-keys/hs_ed25519_secret_key"
+        local ctor_public="$staging/tor-keys/hs_ed25519_public_key"
+        if [ -f "$ctor_secret" ]; then
+            cp "$ctor_secret" "$addr_dir/"
+            [ -f "$ctor_public" ] && cp "$ctor_public" "$addr_dir/"
+            log "Restore: C Tor keys copied from backup"
+        else
+            # Derive C Tor keys from the OpenSSH PEM key
+            python3 -c "
+import base64, struct, os, sys
+
+pem_path, out_dir = sys.argv[1], sys.argv[2]
+with open(pem_path, 'rb') as f:
+    pem = f.read()
+b64 = b''.join(pem.split(b'\n')[1:-2])
+binary = base64.b64decode(b64)
+
+def read_str(data, off):
+    length = struct.unpack('>I', data[off:off+4])[0]
+    return data[off+4:off+4+length], off+4+length
+
+off = 15  # skip MAGIC
+for _ in range(3): _, off = read_str(binary, off)  # cipher, kdf, kdf_opts
+off += 4  # num_keys
+_, off = read_str(binary, off)  # pub_blob
+priv_blob, _ = read_str(binary, off)
+off2 = 8  # skip check bytes
+_, off2 = read_str(priv_blob, off2)  # key_type
+pubkey, off2 = read_str(priv_blob, off2)
+privkey, off2 = read_str(priv_blob, off2)
+
+with open(os.path.join(out_dir, 'hs_ed25519_secret_key'), 'wb') as f:
+    f.write(b'== ed25519v1-secret: type0 ==\x00\x00\x00' + privkey)
+os.chmod(os.path.join(out_dir, 'hs_ed25519_secret_key'), 0o600)
+with open(os.path.join(out_dir, 'hs_ed25519_public_key'), 'wb') as f:
+    f.write(b'== ed25519v1-public: type0 ==\x00\x00\x00' + pubkey)
+os.chmod(os.path.join(out_dir, 'hs_ed25519_public_key'), 0o644)
+" "$key_file" "$addr_dir" 2>>"$LOG_FILE" || log "WARNING: Failed to derive C Tor key files from Arti PEM"
+        fi
 
         # Update ADDRESS_PREFIX in config to match restored address
         local addr_base="${onion_address%.onion}"
