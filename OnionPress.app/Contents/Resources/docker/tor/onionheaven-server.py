@@ -15,7 +15,7 @@ Endpoints:
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
-ONIONHEAVEN_SERVER_VERSION = "2.4.34"
+ONIONHEAVEN_SERVER_VERSION = "2.4.35"
 
 import base64
 import hashlib
