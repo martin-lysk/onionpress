@@ -1941,9 +1941,10 @@ main() {
             # These are _watch_onionheaven_activate and _onionheaven_farm_monitor
             # subshells that survive when the MenubarApp quits without the
             # launcher's trap firing.
-            for old_pid in $(pgrep -u "$(whoami)" -f "onionpress start" 2>/dev/null); do
+            for old_pid in $(pgrep -u "$(whoami)" -f "onionpress start" 2>/dev/null || true); do
                 [ "$old_pid" = "$$" ] && continue
-                kill "$old_pid" 2>/dev/null && log "Killed orphaned launcher process $old_pid"
+                kill "$old_pid" 2>/dev/null || true
+                log "Killed orphaned launcher process $old_pid"
             done
 
             # PID lock — prevent double-starting
