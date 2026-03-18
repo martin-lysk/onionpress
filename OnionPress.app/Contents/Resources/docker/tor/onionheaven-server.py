@@ -652,10 +652,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             # Offline cooldown: if the entry was taken over within the last 30s
             # (e.g., by /offline), ignore this heartbeat — it's likely a stale
             # in-flight heartbeat from before the client shut down.
-            # A real comeback will have arti_key_pem (re-registration) or will
-            # arrive after the cooldown expires.
+            # A real comeback takes longer than 30s (Tor bootstrap, etc.).
             OFFLINE_COOLDOWN = 30  # seconds
-            if was_taken_over and not arti_key_pem and existing["last_taken_over"]:
+            if was_taken_over and existing["last_taken_over"]:
                 try:
                     from datetime import datetime, timezone
                     lto = datetime.fromisoformat(existing["last_taken_over"].replace("Z", "+00:00"))
