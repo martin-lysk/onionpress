@@ -649,28 +649,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             ).fetchone()
             was_taken_over = existing and existing["status"] == "taken-over"
 
-            # Offline cooldown: if the entry was taken over within the last 30s
-            # (e.g., by /offline), ignore this heartbeat — it's likely a stale
-            # in-flight heartbeat from before the client shut down.
-            # A real comeback takes longer than 30s (Tor bootstrap, etc.).
-            OFFLINE_COOLDOWN = 30  # seconds
-            if was_taken_over and existing["last_taken_over"]:
-                try:
-                    from datetime import datetime, timezone
-                    lto = datetime.fromisoformat(existing["last_taken_over"].replace("Z", "+00:00"))
-                    since_takeover = (datetime.now(timezone.utc) - lto).total_seconds()
-                    if since_takeover < OFFLINE_COOLDOWN:
-                        log(f"Ignoring /online for {content_address} — taken over {since_takeover:.0f}s ago (cooldown {OFFLINE_COOLDOWN}s)")
-                        conn.close()
-                        self._send_json(200, {
-                            "online": False,
-                            "cooldown": True,
-                            "content_address": content_address,
-                            "seconds_remaining": int(OFFLINE_COOLDOWN - since_takeover),
-                        })
-                        return
-                except (ValueError, TypeError):
-                    pass
+            # No cooldown — /online always releases immediately.
+            # The client is responsible for stopping heartbeats before /offline.
 
             # Upsert: create if new, update if exists
             wp_healthy_val = (1 if wordpress_healthy else 0) if wordpress_healthy is not None else None
