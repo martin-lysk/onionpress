@@ -63,26 +63,25 @@ def startup_reconciliation(conn):
 
     For Arti: also cleans orphaned toml entries not backed by DB rows.
     """
+    # Get the list of addresses to re-add (one-time snapshot, not a while loop)
+    stale = conn.execute(
+        "SELECT DISTINCT content_address FROM registry "
+        "WHERE takeover_container = ? AND status = 'taken-over'",
+        (CONTAINER_NAME,)
+    ).fetchall()
     count = 0
-    while True:
-        row = conn.execute(
-            "SELECT DISTINCT content_address FROM registry "
-            "WHERE takeover_container = ? AND status = 'taken-over' LIMIT 1",
-            (CONTAINER_NAME,)
-        ).fetchone()
-        if not row:
-            break
+    for row in stale:
         addr = row[0]
-        _takeover_local(addr, no_sighup=True)
-        # Clear takeover_pending so we don't re-process in the main loop
-        conn.execute(
-            "UPDATE registry SET takeover_pending = NULL "
-            "WHERE content_address = ? AND takeover_container = ?",
-            (addr, CONTAINER_NAME)
-        )
-        db_commit_with_retry(conn)
-        count += 1
-        log(f"  re-added takeover for {addr}")
+        ok = _takeover_local(addr, no_sighup=True)
+        if ok:
+            conn.execute(
+                "UPDATE registry SET takeover_pending = NULL "
+                "WHERE content_address = ? AND takeover_container = ?",
+                (addr, CONTAINER_NAME)
+            )
+            db_commit_with_retry(conn)
+            count += 1
+            log(f"  re-added takeover for {addr}")
         time.sleep(5)
 
     if count > 0:
