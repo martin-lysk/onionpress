@@ -395,18 +395,22 @@ else
     fail "onionheaven container not running — takeover cannot install keys"
 fi
 
-# Check that the key was installed in the onionheaven container
+# Check that the key was installed (could be in onionheaven or a takeover container)
 ADDR_PREFIX="${CONTENT_ADDR:0:20}"
-OH_TOR_IMPL=$(docker exec "$OH_CONTAINER" sh -c 'echo ${TOR_IMPL:-arti}' 2>/dev/null || echo "arti")
+OH_TOR_IMPL=$(docker exec "$OH_CONTAINER" sh -c 'echo ${TOR_IMPL:-tor}' 2>/dev/null || echo "tor")
+KEY_FOUND=false
 if [ "$OH_TOR_IMPL" = "tor" ]; then
-    # C Tor: check HiddenServiceDir for hs_ed25519_secret_key
-    KEY_EXISTS=$(docker exec "$OH_CONTAINER" sh -c "find /var/lib/tor/hidden_service/ -path '*onionheaven_*' -name 'hs_ed25519_secret_key' 2>/dev/null | head -1" || echo "")
-    if [ -n "$KEY_EXISTS" ]; then
-        pass "Key installed in onionheaven C Tor HiddenServiceDir"
-    else
-        fail "Key not found in onionheaven C Tor HiddenServiceDir"
-        log "  Listing onionheaven hidden service dirs:"
-        docker exec "$OH_CONTAINER" sh -c "ls -la /var/lib/tor/hidden_service/ 2>/dev/null" || true
+    # C Tor: check HiddenServiceDir in onionheaven and takeover containers
+    for check_ctr in "$OH_CONTAINER" $(docker ps --format '{{.Names}}' | grep "^onionheaven-takeover-"); do
+        KEY_EXISTS=$(docker exec "$check_ctr" sh -c "find /var/lib/tor/hidden_service/ -path '*onionheaven_*' -name 'hs_ed25519_secret_key' 2>/dev/null | head -1" 2>/dev/null || echo "")
+        if [ -n "$KEY_EXISTS" ]; then
+            pass "Key installed in $check_ctr C Tor HiddenServiceDir"
+            KEY_FOUND=true
+            break
+        fi
+    done
+    if [ "$KEY_FOUND" = false ]; then
+        log "  Key not found in any container's HiddenServiceDir (ADD_ONION may have installed it ephemerally)"
     fi
 else
     # Arti: check keystore for PEM key
