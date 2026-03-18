@@ -354,10 +354,33 @@ def wait_for_db():
     return True
 
 
+def wait_for_tor():
+    """Wait for C Tor's control port to be ready (bootstrapped)."""
+    log("takeover-worker: waiting for Tor to bootstrap...")
+    for attempt in range(60):
+        try:
+            result = subprocess.run(
+                ["sh", "-c",
+                 'cookie=$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d "\\n"); '
+                 '[ -n "$cookie" ] && printf "AUTHENTICATE %s\\r\\nGETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n" '
+                 '"$cookie" | nc -w 2 127.0.0.1 9051'],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "PROGRESS=100" in result.stdout:
+                log("takeover-worker: Tor bootstrapped and ready")
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+    log("WARNING: Tor not bootstrapped after 120s, proceeding anyway")
+    return False
+
+
 def main():
     log(f"takeover-worker starting: {CONTAINER_NAME}")
 
     wait_for_db()
+    wait_for_tor()
 
     conn = db_connect()
     db_ensure_schema(conn)
