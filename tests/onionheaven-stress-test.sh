@@ -53,7 +53,7 @@ OUTPUT_DIR="./onionheaven-stress-results"
 CLEANUP=false
 CLEANUP_STALE=false
 STALE_HOURS=2
-PER_CTR=50        # sites per container
+PER_CTR=20        # sites per container
 BATCH_SIZE=0      # 0 = start all containers at once
 STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
 BASE_PORT=9100    # port range start inside each container
@@ -401,6 +401,8 @@ start_worker_container() {
         local torrc="${OUTPUT_DIR}/${ctr_name}-torrc"
         cat > "$torrc" << 'TORRC_HEAD'
 SocksPort 127.0.0.1:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_HEAD
@@ -1131,54 +1133,54 @@ disable_workers() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor: comment out HiddenServiceDir AND its HiddenServicePort line
+            # C Tor: DEL_ONION via control port — only affects these services,
+            # no SIGHUP, no descriptor re-publish for the other 48 services.
             docker_cmd exec "$ctr_name" sh -c "
-                sed -i 's|^HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|' /etc/tor/torrc
-                sed -i '/^#DISABLED# HiddenServiceDir.*${content_nick}/{n;s|^HiddenServicePort|#DISABLED# HiddenServicePort|}' /etc/tor/torrc
-                sed -i 's|^HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|' /etc/tor/torrc
-                sed -i '/^#DISABLED# HiddenServiceDir.*${hc_nick}/{n;s|^HiddenServicePort|#DISABLED# HiddenServicePort|}' /etc/tor/torrc
+                cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
+                content_addr=\$(cat /var/lib/tor/hidden_service/${content_nick}/hostname 2>/dev/null | tr -d '\n' | sed 's/.onion//')
+                if [ -n \"\$content_addr\" ]; then
+                    printf 'AUTHENTICATE %s\r\nDEL_ONION %s\r\nQUIT\r\n' \"\$cookie\" \"\$content_addr\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
+                fi
+                hc_addr=\$(cat /var/lib/tor/hidden_service/${hc_nick}/hostname 2>/dev/null | tr -d '\n' | sed 's/.onion//')
+                if [ -n \"\$hc_addr\" ]; then
+                    printf 'AUTHENTICATE %s\r\nDEL_ONION %s\r\nQUIT\r\n' \"\$cookie\" \"\$hc_addr\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
+                fi
             " 2>/dev/null || true
         else
+            # Arti: disable in config (no control port equivalent)
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = true/enabled = false/}" \
                 /etc/arti/arti.toml 2>/dev/null || true
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${hc_nick}\"\]/,/^enabled = /{s/^enabled = true/enabled = false/}" \
                 /etc/arti/arti.toml 2>/dev/null || true
-        fi
 
-        # Track which containers need Tor reload
-        if ! echo "$affected_containers" | grep -q "$ctr_name"; then
-            affected_containers="${affected_containers} ${ctr_name}"
+            # Track which containers need Arti SIGHUP
+            if ! echo "$affected_containers" | grep -q "$ctr_name"; then
+                affected_containers="${affected_containers} ${ctr_name}"
+            fi
         fi
     done
 
-    # SIGHUP Tor to reload config (removes disabled services).
-    # Do NOT kill+restart — that disrupts healthy workers' onion services and
-    # heartbeat delivery in the same container, causing false-positive takeovers.
-    local tor_proc="arti"
-    [ "$TOR_IMPL" = "tor" ] && tor_proc="tor"
-    for ctr_name in $affected_containers; do
-        docker_cmd exec "$ctr_name" sh -c "
-            signaled=false
-            for d in /proc/[0-9]*; do
-                if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"${tor_proc}\" ]; then
-                    kill -HUP \$(basename \$d) 2>/dev/null
-                    signaled=true
-                fi
-            done
-            if [ \"\$signaled\" = false ]; then
-                # Tor not running — start it
-                if [ '${TOR_IMPL}' = 'tor' ]; then
-                    su -s /bin/sh debian-tor -c 'tor -f /etc/tor/torrc' &
-                else
+    # Arti only: SIGHUP to reload config (C Tor uses DEL_ONION above, no SIGHUP needed)
+    if [ "$TOR_IMPL" != "tor" ]; then
+        for ctr_name in $affected_containers; do
+            docker_cmd exec "$ctr_name" sh -c "
+                signaled=false
+                for d in /proc/[0-9]*; do
+                    if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"arti\" ]; then
+                        kill -HUP \$(basename \$d) 2>/dev/null
+                        signaled=true
+                    fi
+                done
+                if [ \"\$signaled\" = false ]; then
                     su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
                 fi
-            fi
-        " 2>/dev/null || true
-    done
+            " 2>/dev/null || true
+        done
+    fi
 
-    log "Disabled ${fail_count} sites (HTTP responders + ${TOR_LABEL} SIGHUP)"
+    log "Disabled ${fail_count} sites (HTTP responders + ${TOR_LABEL} $([ "$TOR_IMPL" = "tor" ] && echo "DEL_ONION" || echo "SIGHUP"))"
 }
 
 enable_workers() {
@@ -1196,27 +1198,33 @@ enable_workers() {
         local cp=$((BASE_PORT + local_idx * 2))
         local hp=$((BASE_PORT + local_idx * 2 + 1))
 
-        # Re-enable Arti onion services first (so descriptor publishing resumes)
+        # Re-enable Tor onion services (so descriptor publishing resumes)
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor: uncomment HiddenServiceDir AND HiddenServicePort lines
+            # C Tor: ADD_ONION via control port — re-adds only these services,
+            # no SIGHUP, no descriptor re-publish for the other services.
             docker_cmd exec "$ctr_name" sh -c "
-                sed -i 's|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|' /etc/tor/torrc
-                sed -i 's|^#DISABLED# HiddenServicePort|HiddenServicePort|' /etc/tor/torrc
-                sed -i 's|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|' /etc/tor/torrc
+                cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
+                # Read the secret key, extract raw 64-byte expanded key as base64
+                content_key=\$(python3 /key-convert.py pem-to-ed25519-base64 /tmp/w${ctr_idx}_${local_idx}_content.pem 2>/dev/null || \
+                    python3 -c \"import base64; f=open('/var/lib/tor/hidden_service/${content_nick}/hs_ed25519_secret_key','rb'); d=f.read(); print(base64.b64encode(d[32:]).decode())\" 2>/dev/null)
+                if [ -n \"\$content_key\" ]; then
+                    printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
+                fi
             " 2>/dev/null || true
         else
+            # Arti: re-enable in config
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
                 /etc/arti/arti.toml 2>/dev/null || true
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${hc_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
                 /etc/arti/arti.toml 2>/dev/null || true
-        fi
 
-        if ! echo "$affected_containers" | grep -q "$ctr_name"; then
-            affected_containers="${affected_containers} ${ctr_name}"
+            if ! echo "$affected_containers" | grep -q "$ctr_name"; then
+                affected_containers="${affected_containers} ${ctr_name}"
+            fi
         fi
 
         # Re-enable HTTP responders
@@ -1278,29 +1286,25 @@ print(f'Re-registered {w[\"content_address\"]}')
 " 2>/dev/null &
     done
 
-    # Restart Tor if dead, or SIGHUP if alive (preserves circuits for faster recovery)
-    local tor_proc="arti"
-    [ "$TOR_IMPL" = "tor" ] && tor_proc="tor"
-    for ctr_name in $affected_containers; do
-        docker_cmd exec "$ctr_name" sh -c "
-            tor_running=false
-            for d in /proc/[0-9]*; do
-                if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"${tor_proc}\" ]; then
-                    kill -HUP \$(basename \$d) 2>/dev/null
-                    tor_running=true
-                fi
-            done
-            if [ \"\$tor_running\" = false ]; then
-                if [ '${TOR_IMPL}' = 'tor' ]; then
-                    su -s /bin/sh debian-tor -c 'tor -f /etc/tor/torrc' &
-                else
+    # Arti only: SIGHUP to reload config (C Tor uses ADD_ONION above, no SIGHUP needed)
+    if [ "$TOR_IMPL" != "tor" ]; then
+        for ctr_name in $affected_containers; do
+            docker_cmd exec "$ctr_name" sh -c "
+                tor_running=false
+                for d in /proc/[0-9]*; do
+                    if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"arti\" ]; then
+                        kill -HUP \$(basename \$d) 2>/dev/null
+                        tor_running=true
+                    fi
+                done
+                if [ \"\$tor_running\" = false ]; then
                     su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
                 fi
-            fi
-        " 2>/dev/null || true
-    done
+            " 2>/dev/null || true
+        done
+    fi
 
-    log "Re-enabled ${count} sites, ${TOR_LABEL} restarted + re-registrations over Tor (1s apart)"
+    log "Re-enabled ${count} sites, ${TOR_LABEL} $([ "$TOR_IMPL" = "tor" ] && echo "ADD_ONION" || echo "SIGHUP") + re-registrations over Tor (1s apart)"
 }
 
 # Re-enable sites WITHOUT re-registering or sending /online.
@@ -1325,22 +1329,27 @@ enable_workers_silent() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
+            # C Tor: ADD_ONION via control port — re-adds only these services
             docker_cmd exec "$ctr_name" sh -c "
-                sed -i 's|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${content_nick}|' /etc/tor/torrc
-                sed -i 's|^#DISABLED# HiddenServicePort|HiddenServicePort|' /etc/tor/torrc
-                sed -i 's|^#DISABLED# HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|HiddenServiceDir /var/lib/tor/hidden_service/${hc_nick}|' /etc/tor/torrc
+                cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
+                content_key=\$(python3 /key-convert.py pem-to-ed25519-base64 /tmp/w${ctr_idx}_${local_idx}_content.pem 2>/dev/null || \
+                    python3 -c \"import base64; f=open('/var/lib/tor/hidden_service/${content_nick}/hs_ed25519_secret_key','rb'); d=f.read(); print(base64.b64encode(d[32:]).decode())\" 2>/dev/null)
+                if [ -n \"\$content_key\" ]; then
+                    printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
+                fi
             " 2>/dev/null || true
         else
+            # Arti: re-enable in config
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${content_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
                 /etc/arti/arti.toml 2>/dev/null || true
             docker_cmd exec "$ctr_name" \
                 sed -i "/^\[onion_services\.\"${hc_nick}\"\]/,/^enabled = /{s/^enabled = false/enabled = true/}" \
                 /etc/arti/arti.toml 2>/dev/null || true
-        fi
 
-        if ! echo "$affected_containers" | grep -q "$ctr_name"; then
-            affected_containers="${affected_containers} ${ctr_name}"
+            if ! echo "$affected_containers" | grep -q "$ctr_name"; then
+                affected_containers="${affected_containers} ${ctr_name}"
+            fi
         fi
 
         # Re-enable HTTP responders
@@ -1350,29 +1359,25 @@ enable_workers_silent() {
             -d "{\"ports\": [${cp}, ${hp}]}" >/dev/null 2>&1 || true
     done
 
-    # Restart Tor if dead, or SIGHUP if alive (preserves circuits for faster recovery)
-    local tor_proc="arti"
-    [ "$TOR_IMPL" = "tor" ] && tor_proc="tor"
-    for ctr_name in $affected_containers; do
-        docker_cmd exec "$ctr_name" sh -c "
-            tor_running=false
-            for d in /proc/[0-9]*; do
-                if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"${tor_proc}\" ]; then
-                    kill -HUP \$(basename \$d) 2>/dev/null
-                    tor_running=true
-                fi
-            done
-            if [ \"\$tor_running\" = false ]; then
-                if [ '${TOR_IMPL}' = 'tor' ]; then
-                    su -s /bin/sh debian-tor -c 'tor -f /etc/tor/torrc' &
-                else
+    # Arti only: SIGHUP to reload config (C Tor uses ADD_ONION above)
+    if [ "$TOR_IMPL" != "tor" ]; then
+        for ctr_name in $affected_containers; do
+            docker_cmd exec "$ctr_name" sh -c "
+                tor_running=false
+                for d in /proc/[0-9]*; do
+                    if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"arti\" ]; then
+                        kill -HUP \$(basename \$d) 2>/dev/null
+                        tor_running=true
+                    fi
+                done
+                if [ \"\$tor_running\" = false ]; then
                     su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
                 fi
-            fi
-        " 2>/dev/null || true
-    done
+            " 2>/dev/null || true
+        done
+    fi
 
-    log "Re-enabled ${count} sites silently (${TOR_LABEL} restarted, no notifications sent)"
+    log "Re-enabled ${count} sites silently (${TOR_LABEL} $([ "$TOR_IMPL" = "tor" ] && echo "ADD_ONION" || echo "SIGHUP"), no notifications sent)"
 }
 
 # Restart Tor/Arti SOCKS proxies to flush HSDir descriptor caches.
