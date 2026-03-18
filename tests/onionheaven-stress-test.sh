@@ -496,8 +496,8 @@ EOF
 #!/bin/sh
 set -e
 
-# Install Python + curl
-apt-get update -qq && apt-get install -y -qq python3-minimal curl >/dev/null 2>&1
+# Install Python + curl + netcat/xxd (for control port ADD_ONION/DEL_ONION)
+apt-get update -qq && apt-get install -y -qq python3-minimal curl netcat-openbsd xxd >/dev/null 2>&1
 
 # Prepare C Tor data dirs
 mkdir -p /var/lib/tor
