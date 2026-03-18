@@ -55,6 +55,7 @@ CLEANUP_STALE=false
 STALE_HOURS=2
 PER_CTR=20        # sites per container
 BATCH_SIZE=0      # 0 = start all containers at once
+NUM_POLL_CLIENTS=3  # dedicated Tor SOCKS clients for polling reachability
 STRESS_VERSION="stress-test-$(date +%Y%m%d-%H%M%S)-$$"
 BASE_PORT=9100    # port range start inside each container
 IS_ONIONHEAVEN_HOST=false  # auto-detected in preflight
@@ -519,6 +520,68 @@ start_all_workers() {
     log "Started ${NUM_CONTAINERS} stress containers"
 }
 
+# ── Polling client farm ───────────────────────────────────────────────────────
+# Dedicated Tor SOCKS containers for polling reachability. These are separate
+# from the stress workers (which publish services) and from onionpress-tor-client
+# (which may have stale circuits). Each polling client has fresh circuits
+# optimized for client-side descriptor lookups.
+
+start_poll_clients() {
+    local network
+    network=$(get_onionpress_network)
+    log "Starting ${NUM_POLL_CLIENTS} polling clients..."
+    for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        local name="stress-poll-client-${i}"
+        docker_cmd rm -f "$name" 2>/dev/null || true
+        docker_cmd run -d \
+            --name "$name" \
+            --network "$network" \
+            --ulimit nofile=10000:10000 \
+            --entrypoint sh \
+            "$ARTI_IMAGE" \
+            -c "
+                mkdir -p /var/lib/tor
+                chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
+                chmod 700 /var/lib/tor
+                cat > /etc/tor/torrc << EOF
+SocksPort 0.0.0.0:9050
+DataDirectory /var/lib/tor
+Log notice stdout
+EOF
+                su -s /bin/sh debian-tor -c 'tor -f /etc/tor/torrc'
+            " >/dev/null 2>&1
+    done
+
+    # Wait for all polling clients to bootstrap
+    log "Waiting for polling clients to bootstrap..."
+    local all_ready=false
+    for attempt in $(seq 1 30); do
+        local ready=0
+        for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+            if docker_cmd exec "stress-poll-client-${i}" \
+                curl -s -o /dev/null --socks5-hostname 127.0.0.1:9050 --max-time 5 \
+                "http://example.com/" 2>/dev/null; then
+                ready=$((ready + 1))
+            fi
+        done
+        if [ "$ready" -ge "$NUM_POLL_CLIENTS" ]; then
+            all_ready=true
+            log "  All ${NUM_POLL_CLIENTS} polling clients ready (${attempt}0s)"
+            break
+        fi
+        sleep 10
+    done
+    if [ "$all_ready" = false ]; then
+        log "WARNING: Not all polling clients bootstrapped, using what's available"
+    fi
+}
+
+stop_poll_clients() {
+    for i in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        docker_cmd rm -f "stress-poll-client-${i}" 2>/dev/null || true
+    done
+}
+
 # Wait for all sites to bootstrap (register with OnionHeaven over Tor).
 WAIT_RESULT=""  # human-readable result from last wait_for_* call
 
@@ -764,10 +827,11 @@ print_dashboard() {
     pass_dur=$(get_last_pass_duration)
     takeover_ctrs=$(get_takeover_container_count)
     stress_ctrs=$(docker_cmd ps --filter "name=stress-worker-" --format "{{.Names}}" 2>/dev/null | wc -l | tr -d ' ')
+    poll_ctrs=$(docker_cmd ps --filter "name=stress-poll-client-" --format "{{.Names}}" 2>/dev/null | wc -l | tr -d ' ')
 
     log "Registry: ${reg_count} entries | Tor mem: ${tor_mem}MB | WP mem: ${wp_mem}MB"
     echo "           Online: ${healthy_count} | Taken over: ${takeover_count} | Heartbeat: ${hb_ok:-0} ok / WP unhealthy: ${wp_bad:-0} | VM mem: ${mem_pct}%"
-    echo "           Farm: ${takeover_ctrs:-0} takeover + ${stress_ctrs:-0} stress containers | Last pass: ${pass_dur:-?}s"
+    echo "           Farm: ${takeover_ctrs:-0} takeover + ${stress_ctrs:-0} stress + ${poll_ctrs:-0} poll containers | Last pass: ${pass_dur:-?}s"
 
     log_json "\"registry_count\":${reg_count:-0},\"tor_mem_mb\":${tor_mem:-0},\"wp_mem_mb\":${wp_mem:-0},\"online\":${healthy_count:-0},\"failing\":${fail_count:-0},\"takeovers\":${takeover_count:-0},\"heartbeat_healthy\":${hb_ok:-0},\"wordpress_unhealthy\":${wp_bad:-0},\"vm_mem_pct\":${mem_pct:-0},\"pass_duration\":\"${pass_dur}\",\"takeover_containers\":${takeover_ctrs:-0},\"stress_containers\":${stress_ctrs:-0}"
 }
@@ -832,11 +896,21 @@ parallel_check_addrs() {
     PCHECK_200=0
     PCHECK_000=0
 
-    # Use onionpress-tor-client for polling — it has established circuits
-    # for client-side descriptor lookups. Stress containers' Tor is optimized
-    # for publishing their own services, not discovering other services.
-    local check_ctrs="onionpress-tor-client"
-    local num_check_ctrs=1
+    # Use dedicated polling clients for descriptor lookups.
+    # Falls back to onionpress-tor-client if no polling clients running.
+    local check_ctrs=""
+    local num_check_ctrs=0
+    for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        local cname="stress-poll-client-${ci}"
+        if docker_cmd inspect "$cname" >/dev/null 2>&1; then
+            check_ctrs="${check_ctrs} ${cname}"
+            num_check_ctrs=$((num_check_ctrs + 1))
+        fi
+    done
+    if [ "$num_check_ctrs" -eq 0 ]; then
+        check_ctrs="onionpress-tor-client"
+        num_check_ctrs=1
+    fi
     local ctr_arr=($check_ctrs)
 
     local tmpdir
@@ -1691,12 +1765,12 @@ verify_redirects() {
     local sampled_addrs
     sampled_addrs=$(echo "$addrs" | awk 'BEGIN{srand()}{print rand()"\t"$0}' | sort -n | cut -f2 | head -n "$sample_size")
 
-    # Build list of available stress containers to distribute checks across.
-    # Falls back to onionpress-wordpress → onionpress-tor if no stress containers.
+    # Use dedicated polling clients for verification.
+    # Falls back to onionpress-tor-client if none available.
     local verify_ctrs=""
     local num_verify_ctrs=0
-    for ci in $(seq 0 $((NUM_CONTAINERS - 1))); do
-        local cname="stress-worker-${ci}"
+    for ci in $(seq 0 $((NUM_POLL_CLIENTS - 1))); do
+        local cname="stress-poll-client-${ci}"
         if docker_cmd inspect "$cname" >/dev/null 2>&1; then
             verify_ctrs="${verify_ctrs} ${cname}"
             num_verify_ctrs=$((num_verify_ctrs + 1))
@@ -1816,7 +1890,9 @@ cleanup_stress_test() {
     docker_cmd ps -a --format '{{.Names}}' 2>/dev/null | grep '^stress-worker-' | while read -r ctr; do
         docker_cmd rm -f "$ctr" 2>/dev/null || true
     done || true
-    log "  Removed stress containers"
+    # Remove polling clients
+    stop_poll_clients
+    log "  Removed stress + polling containers"
 
     # Unregister stress-test sites from OnionHeaven (signed payloads)
     local payloads
@@ -1962,10 +2038,11 @@ run_worker() {
     trap 'log "Cleaning up before exit..."; cleanup_stress_test' EXIT
     trap 'log "Interrupted..."; exit 130' INT TERM
 
-    # Phase 1: Start site containers (Arti + Python HTTP server)
-    log "Phase 1: Starting ${NUM_CONTAINERS} site containers..."
+    # Phase 1: Start site containers + polling clients
+    log "Phase 1: Starting ${NUM_CONTAINERS} site containers + ${NUM_POLL_CLIENTS} polling clients..."
     start_all_workers
-    phase_result "1" "Started ${NUM_CONTAINERS} stress containers"
+    start_poll_clients
+    phase_result "1" "Started ${NUM_CONTAINERS} stress + ${NUM_POLL_CLIENTS} poll containers"
     echo ""
 
     # Track results for summary table
