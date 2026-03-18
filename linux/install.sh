@@ -185,8 +185,15 @@ fi
 echo ""
 echo "  Setting up data directory..."
 
-mkdir -p "$DATA_DIR"
-mkdir -p "$DATA_DIR/shared/vanity-keys"
+# Use install -d -o to create dirs owned by the real user, not root
+if [ -n "$SUDO_USER" ]; then
+    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DATA_DIR"
+    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DATA_DIR/shared"
+    install -d -o "$SUDO_USER" -g "$SUDO_USER" "$DATA_DIR/shared/vanity-keys"
+else
+    mkdir -p "$DATA_DIR"
+    mkdir -p "$DATA_DIR/shared/vanity-keys"
+fi
 
 # Generate secrets if they don't exist
 if [ ! -f "$DATA_DIR/secrets" ]; then
@@ -218,6 +225,11 @@ REGISTER_WITH_ONIONHEAVEN=yes
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 EOF
     echo "  Default config created"
+fi
+
+# Ensure all data dir files are owned by the real user (not root)
+if [ -n "$SUDO_USER" ]; then
+    chown -R "$SUDO_USER:$SUDO_USER" "$DATA_DIR"
 fi
 
 # ─── Install systemd service ─────────────────────────────────────────
