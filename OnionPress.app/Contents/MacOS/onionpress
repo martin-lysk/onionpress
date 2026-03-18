@@ -1937,6 +1937,15 @@ _validate_oh_address() {
 main() {
     case "${1:-start}" in
         start)
+            # Kill orphaned background processes from previous launches.
+            # These are _watch_onionheaven_activate and _onionheaven_farm_monitor
+            # subshells that survive when the MenubarApp quits without the
+            # launcher's trap firing.
+            for old_pid in $(pgrep -u "$(whoami)" -f "onionpress start" 2>/dev/null); do
+                [ "$old_pid" = "$$" ] && continue
+                kill "$old_pid" 2>/dev/null && log "Killed orphaned launcher process $old_pid"
+            done
+
             # PID lock — prevent double-starting
             if [ -f "$PIDFILE" ]; then
                 old_pid=$(cat "$PIDFILE" 2>/dev/null)
@@ -1949,7 +1958,8 @@ main() {
                 rm -f "$PIDFILE"
             fi
             echo $$ > "$PIDFILE"
-            trap 'rm -f "$PIDFILE"' EXIT INT TERM HUP
+            # On exit: clean PID file and kill our background children
+            trap 'rm -f "$PIDFILE"; kill $(jobs -p) 2>/dev/null' EXIT INT TERM HUP
 
             # Detect container runtime
             if ! RUNTIME=$(detect_container_runtime); then
