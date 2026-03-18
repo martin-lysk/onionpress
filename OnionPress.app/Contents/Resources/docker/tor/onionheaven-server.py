@@ -644,10 +644,34 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         if healthcheck_address:
             # Check if entry exists and its current status (for release decision)
             existing = conn.execute(
-                "SELECT status FROM registry WHERE content_address = ? AND healthcheck_address = ?",
+                "SELECT status, last_taken_over FROM registry WHERE content_address = ? AND healthcheck_address = ?",
                 (content_address, healthcheck_address)
             ).fetchone()
             was_taken_over = existing and existing["status"] == "taken-over"
+
+            # Offline cooldown: if the entry was taken over within the last 30s
+            # (e.g., by /offline), ignore this heartbeat — it's likely a stale
+            # in-flight heartbeat from before the client shut down.
+            # A real comeback will have arti_key_pem (re-registration) or will
+            # arrive after the cooldown expires.
+            OFFLINE_COOLDOWN = 30  # seconds
+            if was_taken_over and not arti_key_pem and existing["last_taken_over"]:
+                try:
+                    from datetime import datetime, timezone
+                    lto = datetime.fromisoformat(existing["last_taken_over"].replace("Z", "+00:00"))
+                    since_takeover = (datetime.now(timezone.utc) - lto).total_seconds()
+                    if since_takeover < OFFLINE_COOLDOWN:
+                        log(f"Ignoring /online for {content_address} — taken over {since_takeover:.0f}s ago (cooldown {OFFLINE_COOLDOWN}s)")
+                        conn.close()
+                        self._send_json(200, {
+                            "online": False,
+                            "cooldown": True,
+                            "content_address": content_address,
+                            "seconds_remaining": int(OFFLINE_COOLDOWN - since_takeover),
+                        })
+                        return
+                except (ValueError, TypeError):
+                    pass
 
             # Upsert: create if new, update if exists
             wp_healthy_val = (1 if wordpress_healthy else 0) if wordpress_healthy is not None else None
