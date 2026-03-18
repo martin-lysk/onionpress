@@ -1593,9 +1593,15 @@ class OnionPressApp(rumps.App):
                 timeout=15,
                 env=docker_env
             )
-            if probe_result.returncode != 0 or probe_result.stdout.strip() not in ["200", "301"]:
+            http_code = probe_result.stdout.strip() if probe_result.returncode == 0 else "000"
+            if http_code not in ("200", "301"):
                 if log_result:
-                    self.log(f"✗ Onion service not yet reachable through Tor network")
+                    if http_code == "302":
+                        self.log(f"✗ Onion service returning 302 (OnionHeaven takeover active)")
+                    elif http_code == "000" or not http_code:
+                        self.log(f"✗ Onion service not yet reachable through Tor network")
+                    else:
+                        self.log(f"✗ Onion service returned HTTP {http_code}")
                 return False
 
             if log_result:
