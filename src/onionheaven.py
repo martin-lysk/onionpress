@@ -287,13 +287,12 @@ def _send_heartbeat(app, wordpress_healthy=True):
         "signature": signature,
     }
 
-    # Include arti key until we've confirmed the server has it
-    if not getattr(app, '_onionheaven_key_sent', False):
-        try:
-            arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
-            payload_dict["arti_key_pem"] = base64.b64encode(arti_pem).decode('ascii')
-        except Exception as e:
-            app.log(f"OnionHeaven: failed to build arti key for heartbeat: {e}")
+    # Always include the key — every /online is both heartbeat and registration
+    try:
+        arti_pem = key_manager.build_openssh_key(secret_key_bytes, public_key_raw)
+        payload_dict["arti_key_pem"] = base64.b64encode(arti_pem).decode('ascii')
+    except Exception as e:
+        app.log(f"OnionHeaven: failed to build arti key for heartbeat: {e}")
 
     payload = json.dumps(payload_dict)
 
@@ -322,9 +321,6 @@ def _send_heartbeat(app, wordpress_healthy=True):
         try:
             resp = json.loads(output)
             if resp.get("online"):
-                # Track that key has been sent successfully
-                if resp.get("arti_key_stored") or getattr(app, '_onionheaven_key_sent', False):
-                    app._onionheaven_key_sent = True
                 # Save registration status on first success
                 if not getattr(app, '_onionheaven_registration_succeeded', False):
                     app._onionheaven_registration_succeeded = True
