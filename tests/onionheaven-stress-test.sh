@@ -1070,7 +1070,7 @@ for w in workers:
             local elapsed=$(( $(date +%s) - start_ts ))
             [ -n "$PHASE_LOG" ] && echo " ${reachable}/${target}" >> "$PHASE_LOG"
             WAIT_RESULT="${reachable}/${target} healthy in $(fmt_duration $elapsed)"
-            log "${phase_name}: ${reachable}/${total_checked} sites reachable via Tor"
+            log "${phase_name}: ${reachable}/${target} sites reachable via Tor"
             print_dashboard
             return 0
         fi

@@ -267,11 +267,12 @@ def process_takeovers(conn):
     if count > 0:
         flush_sighup_tor(force=True)  # Arti only; no-op for C Tor
         update_active_count(conn)
+        log(f"takeover-worker: processed {count} takeover(s)")
     return count
 
 
 def process_releases(conn):
-    """Process ALL pending release requests in one batch with a single SIGHUP."""
+    """Process pending release requests."""
     rows = conn.execute(
         "SELECT content_address, healthcheck_address FROM registry "
         "WHERE takeover_container = ? AND release_pending IS NOT NULL",
@@ -298,9 +299,9 @@ def process_releases(conn):
         count += 1
 
     if count > 0:
-        log(f"takeover-worker: batch SIGHUP for {count} release(s)")
-        flush_sighup_tor()
+        flush_sighup_tor()  # Arti only; no-op for C Tor
         update_active_count(conn)
+        log(f"takeover-worker: processed {count} release(s)")
     return count
 
 
@@ -360,9 +361,6 @@ def main():
 
             takeovers = process_takeovers(conn)
             releases = process_releases(conn)
-
-            if takeovers > 0 or releases > 0:
-                log(f"takeover-worker: processed {takeovers} takeover(s), {releases} release(s)")
 
             # Periodic heartbeat
             now = time.monotonic()
