@@ -579,7 +579,7 @@ log "Final Tor network verification..."
 # The original owner's key is restored, so the address should serve content again.
 # Allow retries — descriptor propagation may still be in progress.
 FAUX_RESTORED=false
-for attempt in $(seq 1 6); do
+for attempt in $(seq 1 2); do
     VERIFY_CODE=$(docker exec onionpress-tor-client curl -s -o /dev/null -w "%{http_code}" --max-time 30 --socks5-hostname 127.0.0.1:9050 "http://${CONTENT_ADDR}/" 2>/dev/null || echo "000")
     log "  Faux address verification attempt $attempt: HTTP $VERIFY_CODE"
     if [ "$VERIFY_CODE" = "200" ]; then
