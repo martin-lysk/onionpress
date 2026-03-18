@@ -204,72 +204,16 @@ open_phase_log_window() {
 
 # ── Inject code into onionheaven + takeover containers ────────────────────────
 _inject_onionheaven_code() {
+    # No-op: the onionheaven containers are built from the local image overlay
+    # which already has the latest code. Injecting and restarting processes
+    # mid-run caused race conditions (killed workers, lost ADD_ONION work,
+    # stale MAX_TAKEOVER_SERVICES).
     if ! docker_cmd exec onionheaven sqlite3 --version >/dev/null 2>&1; then
         log "  Installing sqlite3 in onionheaven..."
         docker_cmd exec onionheaven sh -c "apt-get update -qq && apt-get install -y -qq sqlite3 >/dev/null 2>&1"
     fi
     log "  sqlite3 available in onionheaven"
-
-    # Inject debug onionheaven-redirect.sh (with logging to /tmp/onionheaven-redirect-debug.log)
-    log "  Injecting debug onionheaven-redirect.sh..."
-    docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-redirect.sh" \
-        onionheaven:/onionheaven-redirect.sh
-    docker_cmd exec onionheaven sh -c '
-        for pid in $(pidof socat 2>/dev/null); do
-            if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "TCP-LISTEN:8082"; then
-                kill "$pid" 2>/dev/null
-            fi
-        done
-    '
-    sleep 1
-    docker_cmd exec onionheaven sh -c 'rm -f /tmp/onionheaven-redirect-debug.log'
-    docker_cmd exec -d onionheaven sh /onionheaven-redirect.sh
-    log "  Debug redirect service started"
-
-    # Inject onionheaven-tor-manager.sh
-    log "  Injecting onionheaven-tor-manager.sh..."
-    docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-tor-manager.sh" \
-        onionheaven:/onionheaven-tor-manager.sh
-    docker_cmd exec onionheaven chmod +x /onionheaven-tor-manager.sh
-
-    # Inject latest heartbeat monitor code with production settings
-    log "  Injecting onionheaven-heartbeat.py (production settings)..."
-    docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven_common.py" \
-        onionheaven:/onionheaven_common.py
-    docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/onionheaven-heartbeat.py" \
-        onionheaven:/onionheaven-heartbeat.py
-    docker_cmd exec onionheaven sh -c '
-        for pid in $(pidof python3 2>/dev/null); do
-            if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "onionheaven-heartbeat"; then
-                kill "$pid" 2>/dev/null
-            fi
-        done
-    '
-    sleep 1
-    docker_cmd exec -d onionheaven \
-        sh -c 'python3 /onionheaven-heartbeat.py 2>/var/lib/onionpress/onionheaven/heartbeat.log'
-    log "  Heartbeat monitor started (production: interval=15s, propagation_delay=180s)"
-
-    # Inject updated code into takeover workers too
-    log "  Injecting code into takeover workers..."
-    for i in $(seq 0 9); do
-        ctr="onionheaven-takeover-$i"
-        docker_cmd inspect "$ctr" > /dev/null 2>&1 || continue
-        for f in onionheaven_common.py onionheaven-tor-manager.sh onionheaven-takeover-worker.py; do
-            docker_cmd cp "${SCRIPT_DIR}/../OnionPress.app/Contents/Resources/docker/tor/$f" "$ctr:/$f"
-        done
-        docker_cmd exec "$ctr" chmod +x /onionheaven-tor-manager.sh
-        docker_cmd exec "$ctr" sh -c '
-            for pid in $(pidof python3 2>/dev/null); do
-                if cat /proc/$pid/cmdline 2>/dev/null | tr "\0" " " | grep -q "onionheaven-takeover-worker"; then
-                    kill "$pid" 2>/dev/null
-                fi
-            done
-        '
-        sleep 1
-        docker_cmd exec -d "$ctr" python3 /onionheaven-takeover-worker.py
-        log "    Injected and restarted $ctr"
-    done
+    log "  Using production heartbeat timing and existing container scripts"
 }
 
 # ── Wait for lazy OnionHeaven activation ──────────────────────────────────────
