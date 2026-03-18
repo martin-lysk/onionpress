@@ -274,7 +274,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         try:
             conn = db_connect()
             db_ensure_schema(conn)
-            total = conn.execute("SELECT COUNT(*) FROM registry").fetchone()[0]
+            total = conn.execute(
+                "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL"
+            ).fetchone()[0]
             online = conn.execute(
                 "SELECT COUNT(*) FROM registry WHERE status='online'"
             ).fetchone()[0]
