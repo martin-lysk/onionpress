@@ -55,16 +55,13 @@ def register_self(conn):
 
 
 def startup_reconciliation(conn):
-    """Release stale assignments from previous container run.
+    """Re-add taken-over services after container restart.
 
-    Container restart wipes Arti config (takeover service entries lost)
-    but the DB still has rows assigned to us. Release them so the heartbeat
-    monitor re-evaluates from scratch.
+    Container restart wipes ephemeral ADD_ONION services (C Tor) and
+    Arti config. Re-execute takeovers for entries still assigned to us
+    so they start serving again immediately.
 
-    Also cleans orphaned services from the Arti toml — services added
-    by tor-manager that are no longer in the DB (e.g., stress test
-    cleanup deleted the rows but left the toml entries). Orphaned
-    services waste Arti circuits and cause descriptor upload failures.
+    For Arti: also cleans orphaned toml entries not backed by DB rows.
     """
     stale = conn.execute(
         "SELECT DISTINCT content_address FROM registry "
@@ -74,19 +71,11 @@ def startup_reconciliation(conn):
 
     if stale:
         addrs = [row[0] for row in stale]
-        log(f"takeover-worker: reconciling {len(addrs)} stale assignment(s)")
+        log(f"takeover-worker: re-adding {len(addrs)} taken-over service(s) after restart")
         for addr in addrs:
-            subprocess.run([TOR_MANAGER, "release", addr],
-                           capture_output=True, text=True, timeout=30)
-            log(f"  released stale takeover for {addr}")
-
-        conn.execute(
-            "UPDATE registry SET status = 'online', takeover_container = NULL, "
-            "takeover_pending = NULL, release_pending = NULL "
-            "WHERE takeover_container = ? AND status = 'taken-over'",
-            (CONTAINER_NAME,)
-        )
-        db_commit_with_retry(conn)
+            _takeover_local(addr, no_sighup=True)
+            log(f"  re-added takeover for {addr}")
+        flush_sighup_tor(force=True)  # flush for Arti; no-op for C Tor (uses control port)
 
     # Clean orphaned services from Arti toml — entries not backed by DB rows
     _clean_orphaned_services(conn)

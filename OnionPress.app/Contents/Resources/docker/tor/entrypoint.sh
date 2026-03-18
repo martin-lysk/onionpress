@@ -54,12 +54,13 @@ if [ "${TAKEOVER_WORKER}" = "1" ]; then
     fi
 
     if [ "$TOR_IMPL" = "tor" ]; then
-        # C Tor with SOCKS + dynamic hidden services
+        # C Tor with SOCKS + control port for ADD_ONION/DEL_ONION
         mkdir -p /var/lib/tor
         chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || chown -R tor:tor /var/lib/tor 2>/dev/null || true
         chmod 700 /var/lib/tor
         cat > /etc/tor/torrc << TORRC_EOF
 SocksPort 0.0.0.0:9050
+ControlPort 127.0.0.1:9051
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
@@ -111,13 +112,13 @@ if [ "${NO_ONION_SERVICE}" = "1" ]; then
         fi
 
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor with OnionHeaven config (SOCKS + hidden service dirs for takeover)
+            # C Tor with control port for ADD_ONION/DEL_ONION (no SIGHUP needed)
             mkdir -p /var/lib/tor
             chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || chown -R tor:tor /var/lib/tor 2>/dev/null || true
             chmod 700 /var/lib/tor
-            # Minimal torrc for SOCKS + dynamic hidden services (added by tor-manager)
             cat > /etc/tor/torrc << TORRC_EOF
 SocksPort 0.0.0.0:9050
+ControlPort 127.0.0.1:9051
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF

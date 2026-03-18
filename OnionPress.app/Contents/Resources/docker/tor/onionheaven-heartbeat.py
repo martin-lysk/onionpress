@@ -146,14 +146,26 @@ def startup_reconciliation(conn):
         db_commit_with_retry(conn)
 
     if re_takeover_addrs:
-        log(f"startup reconciliation: re-executing {len(re_takeover_addrs)} takeover(s)")
-        for addr in re_takeover_addrs:
-            try:
-                subprocess.run([TOR_MANAGER, "takeover", "--no-sighup", addr],
-                               capture_output=True, text=True, timeout=30)
-                log(f"  re-took-over {addr}")
-            except Exception as e:
-                log(f"  failed to re-takeover {addr}: {e}")
+        if is_farm_mode(conn):
+            # Farm mode: takeover workers handle their own reconciliation via ADD_ONION.
+            # Just ensure the DB rows have takeover_pending set so workers pick them up.
+            log(f"startup reconciliation: {len(re_takeover_addrs)} takeover(s) pending — farm workers will re-add")
+            for addr in re_takeover_addrs:
+                conn.execute(
+                    "UPDATE registry SET takeover_pending = ? "
+                    "WHERE content_address = ? AND status = 'taken-over' AND unregistered_at IS NULL",
+                    (now, addr)
+                )
+            db_commit_with_retry(conn)
+        else:
+            log(f"startup reconciliation: re-executing {len(re_takeover_addrs)} takeover(s) locally")
+            for addr in re_takeover_addrs:
+                try:
+                    subprocess.run([TOR_MANAGER, "takeover", "--no-sighup", addr],
+                                   capture_output=True, text=True, timeout=30)
+                    log(f"  re-took-over {addr}")
+                except Exception as e:
+                    log(f"  failed to re-takeover {addr}: {e}")
 
     # Clean up duplicate online rows for the same content_address.
     # Keep the one with the newest last_healthy, unregister the rest.

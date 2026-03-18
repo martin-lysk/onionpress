@@ -195,13 +195,32 @@ do_release_arti() {
     echo "Release complete for ${CONTENT_ADDRESS} (Arti)"
 }
 
-# ==================== C Tor takeover/release ====================
+# ==================== C Tor takeover/release (control port) ====================
+#
+# Uses ADD_ONION/DEL_ONION via the control port (127.0.0.1:9051).
+# This adds/removes individual onion services WITHOUT reloading config
+# or disrupting other services — no SIGHUP, no circuit rebuild storm.
+
+CTOR_CONTROL_PORT="127.0.0.1:9051"
+
+# Send a command to C Tor's control port via netcat.
+# Returns the response on stdout.  Exits non-zero on failure.
+ctor_control() {
+    local cmd="$1"
+    local response
+    response=$(printf '%s\r\nQUIT\r\n' "$cmd" | nc -w 5 127.0.0.1 9051 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$response" ]; then
+        echo "ERROR: Control port not responding at ${CTOR_CONTROL_PORT}"
+        return 1
+    fi
+    echo "$response"
+}
 
 do_takeover_ctor() {
     local keys_src="${ONIONHEAVEN_KEYS_DIR}/${CONTENT_ADDRESS}"
     local key_file="${keys_src}/ks_hs_id.ed25519_expanded_private"
 
-    # Check for key (Arti PEM format — we convert it)
+    # Check for key (Arti PEM format — we extract the raw ed25519 key)
     if [ ! -f "$key_file" ]; then
         echo "ERROR: No key found for ${CONTENT_ADDRESS}"
         exit 1
@@ -211,97 +230,82 @@ do_takeover_ctor() {
         exit 1
     fi
 
-    # Create hidden service directory for this address
-    mkdir -p "$HS_SERVICE_DIR"
-
-    # Convert Arti PEM key to C Tor format
-    if ! python3 /key-convert.py arti-to-ctor "$key_file" "$HS_SERVICE_DIR"; then
-        echo "ERROR: Key conversion failed for ${CONTENT_ADDRESS}"
-        rm -rf "$HS_SERVICE_DIR"
+    # Extract raw ed25519 expanded key as base64 for ADD_ONION
+    local key_b64
+    key_b64=$(python3 /key-convert.py pem-to-ed25519-base64 "$key_file")
+    if [ -z "$key_b64" ]; then
+        echo "ERROR: Key extraction failed for ${CONTENT_ADDRESS}"
         exit 1
     fi
 
-    # Set correct ownership and permissions (C Tor is strict — requires 700 dir, 600 keys)
-    chown -R debian-tor:debian-tor "$HS_SERVICE_DIR" 2>/dev/null || chown -R tor:tor "$HS_SERVICE_DIR" 2>/dev/null || true
-    chmod 700 "$HS_SERVICE_DIR"
-    chmod 600 "$HS_SERVICE_DIR"/hs_ed25519_secret_key "$HS_SERVICE_DIR"/hs_ed25519_public_key 2>/dev/null || true
+    # Service ID is the address without .onion
+    local service_id
+    service_id=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//')
 
-    # Add hidden service config to torrc if not already present
-    local marker="# onionheaven:${CONTENT_ADDRESS}"
-    if grep -q "$marker" "$CTOR_TORRC"; then
-        echo "Service config already exists for ${CONTENT_ADDRESS}"
+    # ADD_ONION: create ephemeral hidden service via control port
+    local response
+    response=$(ctor_control "ADD_ONION ED25519-V3:${key_b64} Port=80,127.0.0.1:${REDIRECT_PORT}")
+    if echo "$response" | grep -q "^250 "; then
+        echo "ADD_ONION succeeded for ${CONTENT_ADDRESS}"
+    elif echo "$response" | grep -q "Onion address collision"; then
+        echo "Service already active for ${CONTENT_ADDRESS} (collision — OK)"
     else
-        cat >> "$CTOR_TORRC" << EOF
-
-${marker}
-HiddenServiceDir ${HS_SERVICE_DIR}
-HiddenServicePort 80 127.0.0.1:${REDIRECT_PORT}
-EOF
-        echo "Added hidden service config for ${CONTENT_ADDRESS}"
+        echo "ERROR: ADD_ONION failed for ${CONTENT_ADDRESS}:"
+        echo "$response"
+        exit 1
     fi
 
-    echo "Takeover complete for ${CONTENT_ADDRESS} (C Tor)"
+    echo "Takeover complete for ${CONTENT_ADDRESS} (C Tor control port)"
 }
 
 do_release_ctor() {
-    # Remove hidden service config from torrc
-    local marker="# onionheaven:${CONTENT_ADDRESS}"
-    if grep -q "$marker" "$CTOR_TORRC"; then
-        # Remove the marker line and the 2 config lines that follow it
-        # (HiddenServiceDir, HiddenServicePort)
-        local tmp_torrc="${CTOR_TORRC}.tmp"
-        awk -v marker="$marker" '
-        BEGIN { skip = 0 }
-        $0 == marker { skip = 2; next }
-        skip > 0 { skip--; next }
-        { print }
-        ' "$CTOR_TORRC" > "$tmp_torrc"
+    # Service ID is the address without .onion
+    local service_id
+    service_id=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//')
 
-        sed -i '/^$/N;/^\n$/d' "$tmp_torrc" 2>/dev/null || true
-        mv "$tmp_torrc" "$CTOR_TORRC"
-        echo "Removed hidden service config for ${CONTENT_ADDRESS}"
+    # DEL_ONION: remove ephemeral hidden service via control port
+    local response
+    response=$(ctor_control "DEL_ONION ${service_id}")
+    if echo "$response" | grep -q "^250 "; then
+        echo "DEL_ONION succeeded for ${CONTENT_ADDRESS}"
     else
-        echo "No service config found for ${CONTENT_ADDRESS}"
+        echo "WARNING: DEL_ONION response for ${CONTENT_ADDRESS}:"
+        echo "$response"
+        # Not fatal — service may have already been removed (restart, etc.)
     fi
 
-    # Remove the hidden service directory
-    if [ -d "$HS_SERVICE_DIR" ]; then
-        rm -rf "$HS_SERVICE_DIR"
-        echo "Removed hidden service directory for ${CONTENT_ADDRESS}"
-    fi
-
-    echo "Release complete for ${CONTENT_ADDRESS} (C Tor)"
+    echo "Release complete for ${CONTENT_ADDRESS} (C Tor control port)"
 }
 
 # ==================== Dispatch ====================
 
 do_takeover() {
     if [ "$TOR_IMPL" = "tor" ]; then
+        # C Tor: ADD_ONION via control port — no SIGHUP needed
         do_takeover_ctor
     else
         do_takeover_arti
-    fi
-
-    # Signal Tor to reload configuration (unless --no-sighup)
-    if [ "$NO_SIGHUP" -eq 0 ]; then
-        send_sighup
-    else
-        echo "Skipping SIGHUP (--no-sighup)"
+        # Arti: config file + SIGHUP (no control port equivalent)
+        if [ "$NO_SIGHUP" -eq 0 ]; then
+            send_sighup
+        else
+            echo "Skipping SIGHUP (--no-sighup)"
+        fi
     fi
 }
 
 do_release() {
     if [ "$TOR_IMPL" = "tor" ]; then
+        # C Tor: DEL_ONION via control port — no SIGHUP needed
         do_release_ctor
     else
         do_release_arti
-    fi
-
-    # Signal Tor to reload configuration (unless --no-sighup)
-    if [ "$NO_SIGHUP" -eq 0 ]; then
-        send_sighup
-    else
-        echo "Skipping SIGHUP (--no-sighup)"
+        # Arti: config file + SIGHUP (no control port equivalent)
+        if [ "$NO_SIGHUP" -eq 0 ]; then
+            send_sighup
+        else
+            echo "Skipping SIGHUP (--no-sighup)"
+        fi
     fi
 }
 

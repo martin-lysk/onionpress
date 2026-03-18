@@ -40,8 +40,9 @@ CONSECUTIVE_FAILS_THRESHOLD = int(os.environ.get("ONIONHEAVEN_CONSECUTIVE_FAILS"
 # Default 30 minutes — a peer that's been down 30+ minutes is likely truly dead.
 ONIONHEAVEN_PEER_GRACE = int(os.environ.get("ONIONHEAVEN_PEER_GRACE", "1800"))
 
-# Minimum interval between SIGHUPs to Arti (seconds)
-SIGHUP_MIN_INTERVAL = int(os.environ.get("ONIONHEAVEN_SIGHUP_INTERVAL", "5"))
+# Minimum interval between SIGHUPs to Tor (seconds).
+# Higher values reduce circuit rebuilds at the cost of slower takeover/release.
+SIGHUP_MIN_INTERVAL = int(os.environ.get("ONIONHEAVEN_SIGHUP_INTERVAL", "60"))
 
 # Container identity — set by entrypoint for takeover workers
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "")
@@ -431,7 +432,7 @@ def db_ensure_schema(conn):
     # Farm coordination tables (always created, idempotent)
     conn.execute("""CREATE TABLE IF NOT EXISTS takeover_containers (
         container_name  TEXT PRIMARY KEY,
-        max_services    INTEGER DEFAULT 50,
+        max_services    INTEGER DEFAULT 10,
         active_services INTEGER DEFAULT 0,
         last_heartbeat  TEXT,
         status          TEXT DEFAULT 'active'
@@ -518,7 +519,7 @@ def _discover_takeover_containers(conn):
                 conn.execute(
                     "INSERT INTO takeover_containers "
                     "(container_name, max_services, active_services, last_heartbeat, status) "
-                    "VALUES (?, 50, 0, ?, 'active')",
+                    "VALUES (?, 10, 0, ?, 'active')",
                     (name, ts)
                 )
                 db_commit_with_retry(conn)
@@ -550,11 +551,11 @@ _takeover_rr_containers = None
 
 
 def assign_takeover_container(conn):
-    """Round-robin assignment across active takeover containers.
+    """Assign to a takeover container that has capacity.
 
-    Avoids the stale-DB problem where least-loaded queries return the same
-    container for an entire batch because active_services hasn't been updated
-    by the worker yet.
+    Uses round-robin but skips containers that are at max_services.
+    Returns None if all containers are full (caller should set takeover_pending
+    and wait for scale-up).
     """
     global _takeover_rr_cycle, _takeover_rr_containers
 
@@ -567,20 +568,29 @@ def assign_takeover_container(conn):
         _takeover_rr_containers = containers
         _takeover_rr_cycle = itertools.cycle(containers)
 
-    return next(_takeover_rr_cycle)
+    # Try each container once — skip any that are full
+    for _ in range(len(containers)):
+        candidate = next(_takeover_rr_cycle)
+        try:
+            row = conn.execute(
+                "SELECT active_services, max_services FROM takeover_containers "
+                "WHERE container_name = ? AND status = 'active'",
+                (candidate,)
+            ).fetchone()
+            if row and row["active_services"] < row["max_services"]:
+                return candidate
+        except sqlite3.OperationalError:
+            continue
 
-
-# Max services per takeover worker before requesting scale-up.
-# Each Arti instance can handle many onion services — keep this high to avoid
-# spawning too many containers (each runs a full Arti at ~60MB RAM).
-TAKEOVER_SCALE_THRESHOLD = int(os.environ.get("ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD", "50"))
+    return None  # all full
 
 
 def check_farm_scaling(conn, active_entries):
     """Check if farm needs more takeover workers and write scale requests.
 
-    Called by the heartbeat monitor each cycle. Writes unfulfilled requests to
-    farm_scale_requests for the host-side monitor to pick up.
+    Called by the heartbeat monitor each cycle. Requests 2 new containers
+    (fulfilled by the host-side farm monitor) when ALL existing containers
+    are at their max_services limit.
 
     active_entries: number of active registry entries this cycle.
     """
@@ -600,9 +610,9 @@ def check_farm_scaling(conn, active_entries):
                 need_scaleup = True
                 log(f"Farm scale-up needed: no takeover workers but {pending_takeovers} taken-over entries")
         else:
-            total_active = sum(r["active_services"] for r in takeover_rows)
-            total_capacity = len(takeover_rows) * TAKEOVER_SCALE_THRESHOLD
-            if total_active >= total_capacity:
+            # Scale up when ALL containers are at max_services
+            all_full = all(r["active_services"] >= r["max_services"] for r in takeover_rows)
+            if all_full:
                 need_scaleup = True
 
         if need_scaleup:
@@ -611,13 +621,15 @@ def check_farm_scaling(conn, active_entries):
                 "WHERE worker_type = 'takeover' AND fulfilled_at IS NULL"
             ).fetchone()[0]
             if pending == 0:
+                total_active = sum(r["active_services"] for r in takeover_rows) if takeover_rows else 0
+                total_max = sum(r["max_services"] for r in takeover_rows) if takeover_rows else 0
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 conn.execute(
                     "INSERT INTO farm_scale_requests (worker_type, requested_at) VALUES ('takeover', ?)",
                     (now,)
                 )
                 db_commit_with_retry(conn)
-                log(f"Farm scale-up requested: takeover (workers={len(takeover_rows)})")
+                log(f"Farm scale-up requested: {len(takeover_rows)} workers full ({total_active}/{total_max})")
     except sqlite3.OperationalError:
         pass
 

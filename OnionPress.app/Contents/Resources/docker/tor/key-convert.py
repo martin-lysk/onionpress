@@ -201,6 +201,16 @@ def ctor_to_arti(secret_key_path, output_pem_path):
     print(f"Wrote {output_pem_path}")
 
 
+def pem_to_ed25519_base64(pem_path):
+    """Extract raw 64-byte expanded ed25519 key from Arti PEM, output as base64.
+
+    This is the format C Tor's ADD_ONION command expects:
+        ADD_ONION ED25519-V3:<base64_key> ...
+    """
+    expanded_key, _ = parse_arti_pem(pem_path)
+    print(base64.b64encode(expanded_key).decode("ascii"))
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
@@ -219,6 +229,12 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
         ctor_to_arti(sys.argv[2], sys.argv[3])
+    elif cmd == "pem-to-ed25519-base64":
+        if len(sys.argv) != 3:
+            print("Usage: key-convert.py pem-to-ed25519-base64 <pem_file>",
+                  file=sys.stderr)
+            sys.exit(1)
+        pem_to_ed25519_base64(sys.argv[2])
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
