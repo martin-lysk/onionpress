@@ -1353,23 +1353,10 @@ enable_workers_silent() {
 # even after takeover/release, making transitions appear much slower.
 # Flushes the test client descriptor cache.
 flush_client_descriptor_cache() {
-    log "Flushing descriptor caches (tor-client)..."
-
-    # Restart the test client
-    docker_cmd restart onionpress-tor-client >/dev/null 2>&1 || true
-
-    # Wait for tor-client SOCKS proxy to come back up
-    local attempt
-    for attempt in $(seq 1 30); do
-        if docker_cmd exec onionpress-tor-client \
-            curl -s -o /dev/null --socks5-hostname 127.0.0.1:9050 --max-time 5 \
-            "http://example.com/" 2>/dev/null; then
-            log "  tor-client SOCKS proxy ready (${attempt}s)"
-            return
-        fi
-        sleep 2
-    done
-    log "  WARNING: tor-client SOCKS proxy not ready after 60s"
+    # No-op: restarting tor-client kills all circuits and makes descriptor
+    # discovery slower, not faster. Let Tor discover new descriptors naturally.
+    # The polling loops will find them within seconds (ADD_ONION publishes immediately).
+    :
 }
 
 wait_for_takeover() {
