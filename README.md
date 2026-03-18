@@ -4,7 +4,7 @@
   **[Product Page](https://brewsterkahle.github.io/onionpress/)**
 </div>
 
-# OnionPress
+# OnionPresss
 
 **Run your own website from your Mac. Just Works. Free, forever.**
 
@@ -48,12 +48,14 @@ onionpress is a macOS application that bundles WordPress with a Tor onion servic
 Since this app is not code-signed with an Apple Developer certificate, macOS on first launch. This is normal for open-source software.
 
 **Method 1 - System Settings (Recommended):**
+
 1. Open the app when in your Applications folder - you'll see a security warning.  Hit Done.
 2. Open **System Settings** → **Privacy & Security**
 3. Scroll down and click **"Open Anyway"** next to the OnionPress warning
 4. Click **"Open Anyway"** in the confirmation dialog, and enter your computer's password
 
 **Method 2 - Right-Click:**
+
 1. Right-click (or Control-click) on the OnionPress app in you Application folder
 2. Select **"Open"**
 3. Click **"Open"** in the dialog
@@ -61,10 +63,13 @@ Since this app is not code-signed with an Apple Developer certificate, macOS on 
 **Method 3 - Terminal (Advanced):**
 
 If you're comfortable with the terminal, you can remove the quarantine flag:
+
+
 ```bash
 # After moving to Applications folder
 xattr -cr /Applications/OnionPress.app
 ```
+
 This removes macOS's quarantine attribute and allows the app to launch without warnings.
 
 ## Usage
@@ -72,6 +77,7 @@ This removes macOS's quarantine attribute and allows the app to launch without w
 ### Menu Bar Controls
 
 Once installed, OnionPress appears in your menu bar with an onion icon:
+
 - 🟣 **Purple** = running and available
 - 🟡 **Yellow** = starting or reconnecting
 - 🔴 **Red** = stopped or offline
@@ -94,12 +100,15 @@ Menu items:
 
 **Manual Updates** (Recommended):
 Click "Check for Updates..." in the menu to:
+
 1. Check for new OnionPress app versions
 2. Download updated WordPress, MariaDB, and Tor container images
 3. Apply security patches and new features
 
 **Automatic Updates** (Optional):
 Enable automatic Docker image updates on launch by editing `~/.onionpress/config`:
+
+
 ```bash
 UPDATE_ON_LAUNCH=yes
 ```
@@ -111,11 +120,14 @@ When enabled, onionpress will check for and download updated container images ea
 ### Launch on Login
 
 Have your WordPress site start automatically when you log in to macOS by editing `~/.onionpress/config`:
+
+
 ```bash
 LAUNCH_ON_LOGIN=yes
 ```
 
 When enabled:
+
 - OnionPress automatically launches when you log in
 - Your WordPress site starts automatically in the background
 - The menu bar app appears and shows your status
@@ -138,12 +150,14 @@ The app automatically syncs this setting with macOS login items. You can also ma
 OnionPress can create a full backup of your site including Tor keys (your .onion address), the WordPress database, and all wp-content (themes, plugins, uploads).
 
 **To backup:**
+
 1. Click "Backup..." in the menu bar
 2. Enter your WordPress admin credentials (the password encrypts the backup)
 3. Choose a save location
 4. A zip file is created containing everything needed to restore
 
 **To restore:**
+
 1. Click "Restore..." in the menu bar
 2. Select a backup zip file
 3. Enter the password used when the backup was created
@@ -161,6 +175,8 @@ OnionPress automatically installs and activates the [Internet Archive Wayback Ma
 - Archiving your own posts on every update
 
 **The plugin is enabled by default.** To disable automatic installation, edit `~/.onionpress/config` before first launch:
+
+
 ```bash
 INSTALL_IA_PLUGIN=no
 ```
@@ -202,11 +218,13 @@ These plugins are optimized for the Tor network's slower speeds and privacy-focu
 ### Local Testing
 
 For testing purposes, your WordPress site is also available at:
-- http://localhost:8080 (only accessible from your Mac)
+
+- [http://localhost:8080](http://localhost:8080) (only accessible from your Mac)
 
 ## Architecture
 
 onionpress uses:
+
 - **WordPress**: Latest official WordPress container
 - **MariaDB**: Latest MariaDB for the database
 - **Tor**: Onion service container that exposes WordPress as a .onion site
@@ -216,12 +234,14 @@ onionpress uses:
 - **Docker CLI**: Container management tools (bundled)
 
 All data is stored in:
+
 - `~/.onionpress/` - Application data, logs, config, and Colima VM
 - Docker volumes for WordPress, database, and Tor keys
 
 ## Building from Source
 
 To build the DMG installer:
+
 
 ```bash
 cd onionpress
@@ -233,16 +253,21 @@ This will create `onionpress.dmg` in the `build/` directory.
 ## Troubleshooting
 
 ### "macOS version too old"
+
 OnionPress requires macOS 13 (Ventura) or later for Apple's native virtualization framework.
 
 ### Containers won't start
+
 Check the logs via the menu bar app or run:
+
+
 ```bash
 tail -f ~/.onionpress/onionpress.log
 tail -f ~/.onionpress/colima/colima.log
 ```
 
 ### Onion address not generating
+
 Wait 30-60 seconds for Tor to generate your onion address. Check logs if it takes longer.
 
 ## Security Notes
@@ -253,18 +278,20 @@ Wait 30-60 seconds for Tor to generate your onion address. Check logs if it take
 
 ## Uninstalling
 
-1. Click Uninstall from the menu bar app 
+1. Click Uninstall from the menu bar app
 2. Quit OnionPress
 3. Move `OnionPress.app` to Trash
-   or
-1. Quit OnionPress
-2. Move `OnionPress.app` to Trash
-3. Remove data directory: `rm -rf ~/.onionpress`
-4. Remove Docker volumes:
-   ```bash
-   docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
-   ```
-5. Reboot
+or
+4. Quit OnionPress
+5. Move `OnionPress.app` to Trash
+6. Remove data directory: `rm -rf ~/.onionpress`
+7. Remove Docker volumes:
+
+```bash
+docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
+```
+
+1. Reboot
 
 ## License
 
@@ -275,6 +302,7 @@ AGPL 3 License - See LICENSE file for details
 A Decentralized Web project
 
 Built with:
+
 - [WordPress](https://wordpress.org/) - Open source content management system
 - [Tor Project](https://www.torproject.org/) - Anonymous communication network
 - [Colima](https://github.com/abiosoft/colima) - Container runtime for macOS
