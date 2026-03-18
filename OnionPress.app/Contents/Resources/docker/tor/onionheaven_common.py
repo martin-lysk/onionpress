@@ -491,44 +491,44 @@ def invalidate_farm_cache():
 
 
 def _discover_takeover_containers(conn):
-    """Discover running takeover containers and register any missing from DB.
+    """Get active takeover containers from the DB.
 
-    Results are cached for FARM_CACHE_TTL seconds to avoid repeated DNS
-    lookups (10 lookups per call × N calls per pass was a major bottleneck).
+    Takeover workers register themselves on startup and send heartbeats
+    every 30s. Containers with stale heartbeats (>120s) are marked inactive.
+    No DNS probing — the DB is the single source of truth.
     """
     global _farm_containers_cache, _farm_cache_time
-    import socket as _sock
 
-    now = time.monotonic()
-    if _farm_containers_cache is not None and (now - _farm_cache_time) < FARM_CACHE_TTL:
+    now_mono = time.monotonic()
+    if _farm_containers_cache is not None and (now_mono - _farm_cache_time) < FARM_CACHE_TTL:
         return
 
-    for idx in range(10):  # check up to 10 takeover containers
-        name = f"onionheaven-takeover-{idx}"
-        try:
-            _sock.getaddrinfo(name, 9050, proto=_sock.IPPROTO_TCP)
-        except _sock.gaierror:
-            continue
-        try:
-            existing = conn.execute(
-                "SELECT 1 FROM takeover_containers WHERE container_name = ?",
-                (name,)
-            ).fetchone()
-            if not existing:
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                conn.execute(
-                    "INSERT INTO takeover_containers "
-                    "(container_name, max_services, active_services, last_heartbeat, status) "
-                    "VALUES (?, 10, 0, ?, 'active')",
-                    (name, ts)
-                )
-                db_commit_with_retry(conn)
-                log(f"Discovered running takeover container not in DB: {name}")
-        except Exception as e:
-            log(f"Warning: takeover container discovery failed for {name}: {e}")
+    # Mark containers with stale heartbeats as inactive
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        stale = conn.execute(
+            "SELECT container_name, last_heartbeat FROM takeover_containers "
+            "WHERE status = 'active'"
+        ).fetchall()
+        for row in stale:
+            if row["last_heartbeat"]:
+                try:
+                    lhb = datetime.fromisoformat(row["last_heartbeat"].replace("Z", "+00:00"))
+                    elapsed = (datetime.now(timezone.utc) - lhb).total_seconds()
+                    if elapsed > 120:
+                        conn.execute(
+                            "UPDATE takeover_containers SET status = 'inactive' "
+                            "WHERE container_name = ?",
+                            (row["container_name"],)
+                        )
+                        db_commit_with_retry(conn)
+                        log(f"Marked {row['container_name']} as inactive (heartbeat stale {elapsed:.0f}s)")
+                except (ValueError, TypeError):
+                    pass
+    except sqlite3.OperationalError:
+        pass
 
-    _farm_cache_time = now
-    # Cache the container list
+    _farm_cache_time = now_mono
     try:
         rows = conn.execute(
             "SELECT container_name FROM takeover_containers "
