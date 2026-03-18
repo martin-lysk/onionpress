@@ -63,19 +63,31 @@ def startup_reconciliation(conn):
 
     For Arti: also cleans orphaned toml entries not backed by DB rows.
     """
-    stale = conn.execute(
-        "SELECT DISTINCT content_address FROM registry "
-        "WHERE takeover_container = ? AND status = 'taken-over'",
-        (CONTAINER_NAME,)
-    ).fetchall()
+    count = 0
+    while True:
+        row = conn.execute(
+            "SELECT DISTINCT content_address FROM registry "
+            "WHERE takeover_container = ? AND status = 'taken-over' LIMIT 1",
+            (CONTAINER_NAME,)
+        ).fetchone()
+        if not row:
+            break
+        addr = row[0]
+        _takeover_local(addr, no_sighup=True)
+        # Clear takeover_pending so we don't re-process in the main loop
+        conn.execute(
+            "UPDATE registry SET takeover_pending = NULL "
+            "WHERE content_address = ? AND takeover_container = ?",
+            (addr, CONTAINER_NAME)
+        )
+        db_commit_with_retry(conn)
+        count += 1
+        log(f"  re-added takeover for {addr}")
+        time.sleep(5)
 
-    if stale:
-        addrs = [row[0] for row in stale]
-        log(f"takeover-worker: re-adding {len(addrs)} taken-over service(s) after restart")
-        for addr in addrs:
-            _takeover_local(addr, no_sighup=True)
-            log(f"  re-added takeover for {addr}")
-        flush_sighup_tor(force=True)  # flush for Arti; no-op for C Tor (uses control port)
+    if count > 0:
+        flush_sighup_tor(force=True)  # Arti only
+        log(f"takeover-worker: re-added {count} taken-over service(s) after restart")
 
     # Clean orphaned services from Arti toml — entries not backed by DB rows
     _clean_orphaned_services(conn)
@@ -234,17 +246,20 @@ def process_takeovers(conn):
     to publish each descriptor before starting the next.
     Arti: batches all config changes then sends one SIGHUP at the end.
     """
-    rows = conn.execute(
-        "SELECT content_address, healthcheck_address FROM registry "
-        "WHERE takeover_container = ? AND takeover_pending IS NOT NULL",
-        (CONTAINER_NAME,)
-    ).fetchall()
-
-    if not rows:
-        return 0
-
     count = 0
-    for row in rows:
+    while True:
+        # Fetch one pending row at a time — re-queries each iteration so we
+        # never act on stale data (e.g., a row released by /online mid-batch).
+        row = conn.execute(
+            "SELECT content_address, healthcheck_address FROM registry "
+            "WHERE takeover_container = ? AND takeover_pending IS NOT NULL "
+            "AND status = 'taken-over' LIMIT 1",
+            (CONTAINER_NAME,)
+        ).fetchone()
+
+        if not row:
+            break
+
         ca = row["content_address"]
         ha = row["healthcheck_address"]
         log(f"takeover-worker: executing takeover for {ca}")
@@ -260,9 +275,7 @@ def process_takeovers(conn):
         count += 1
 
         # Pause between services to let Tor publish each descriptor
-        # before starting the next (avoids overwhelming HsDir uploads)
-        if count < len(rows):
-            time.sleep(5)
+        time.sleep(5)
 
     if count > 0:
         flush_sighup_tor(force=True)  # Arti only; no-op for C Tor
@@ -273,17 +286,18 @@ def process_takeovers(conn):
 
 def process_releases(conn):
     """Process pending release requests."""
-    rows = conn.execute(
-        "SELECT content_address, healthcheck_address FROM registry "
-        "WHERE takeover_container = ? AND release_pending IS NOT NULL",
-        (CONTAINER_NAME,)
-    ).fetchall()
-
-    if not rows:
-        return 0
-
     count = 0
-    for row in rows:
+    while True:
+        # Fetch one pending release at a time — fresh query each iteration.
+        row = conn.execute(
+            "SELECT content_address, healthcheck_address FROM registry "
+            "WHERE takeover_container = ? AND release_pending IS NOT NULL LIMIT 1",
+            (CONTAINER_NAME,)
+        ).fetchone()
+
+        if not row:
+            break
+
         ca = row["content_address"]
         ha = row["healthcheck_address"]
         log(f"takeover-worker: executing release for {ca}")

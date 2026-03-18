@@ -267,30 +267,42 @@ def main():
             # Invalidate per-pass caches (farm mode, container discovery)
             invalidate_farm_cache()
 
-            # Get active entries
-            rows = conn.execute(
-                "SELECT * FROM registry WHERE unregistered_at IS NULL ORDER BY registered_at"
+            # Get list of active entry keys (content_address + healthcheck_address).
+            # We only fetch the keys here — each entry is re-queried fresh before
+            # acting on it, so we never act on stale data from a snapshot.
+            entry_keys = conn.execute(
+                "SELECT content_address, healthcheck_address FROM registry "
+                "WHERE unregistered_at IS NULL ORDER BY registered_at"
             ).fetchall()
 
-            if not rows:
+            if not entry_keys:
                 log("heartbeat pass complete — 0 entries in 0.0s")
                 conn.close()
                 wall_sleep(HEARTBEAT_INTERVAL)
                 continue
 
             pass_start = datetime.now(timezone.utc)
-            entries = [dict(row) for row in rows]
-            now = datetime.now(timezone.utc)
-            now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
             stale_count = 0
             audit_count = 0
             false_positive_count = 0
             stale_cleanup_count = 0
 
-            for entry in entries:
-                ca = entry["content_address"]
-                ha = entry["healthcheck_address"]
+            for key_row in entry_keys:
+                ca = key_row["content_address"]
+                ha = key_row["healthcheck_address"]
+
+                # Re-query this entry fresh — it may have changed since we fetched the key list
+                now = datetime.now(timezone.utc)
+                now_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                entry = conn.execute(
+                    "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ? "
+                    "AND unregistered_at IS NULL",
+                    (ca, ha)
+                ).fetchone()
+                if not entry:
+                    continue  # entry was unregistered or removed since we fetched keys
+                entry = dict(entry)
 
                 if entry["status"] == "online":
                     # Check if heartbeat is stale
@@ -425,10 +437,10 @@ def main():
                 flush_sighup_tor()
 
             # Check farm scaling (takeover workers only — no more poll workers)
-            check_farm_scaling(conn, len(entries))
+            check_farm_scaling(conn, len(entry_keys))
 
             elapsed = (datetime.now(timezone.utc) - pass_start).total_seconds()
-            parts = [f"{len(entries)} entries"]
+            parts = [f"{len(entry_keys)} entries"]
             if stale_count:
                 parts.append(f"{stale_count} takeovers")
             if audit_count:
