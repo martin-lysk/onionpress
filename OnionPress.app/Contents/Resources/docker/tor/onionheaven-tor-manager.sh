@@ -204,11 +204,18 @@ do_release_arti() {
 CTOR_CONTROL_PORT="127.0.0.1:9051"
 
 # Send a command to C Tor's control port via netcat.
+# Authenticates with the cookie file first.
 # Returns the response on stdout.  Exits non-zero on failure.
 ctor_control() {
     local cmd="$1"
+    local cookie_hex
+    cookie_hex=$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d '\n')
+    if [ -z "$cookie_hex" ]; then
+        echo "ERROR: Cannot read control auth cookie at /var/lib/tor/control_auth_cookie"
+        return 1
+    fi
     local response
-    response=$(printf '%s\r\nQUIT\r\n' "$cmd" | nc -w 5 127.0.0.1 9051 2>/dev/null)
+    response=$(printf 'AUTHENTICATE %s\r\n%s\r\nQUIT\r\n' "$cookie_hex" "$cmd" | nc -w 5 127.0.0.1 9051 2>/dev/null)
     if [ $? -ne 0 ] || [ -z "$response" ]; then
         echo "ERROR: Control port not responding at ${CTOR_CONTROL_PORT}"
         return 1
@@ -238,11 +245,7 @@ do_takeover_ctor() {
         exit 1
     fi
 
-    # Service ID is the address without .onion
-    local service_id
-    service_id=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//')
-
-    # ADD_ONION: create ephemeral hidden service via control port
+    # ADD_ONION: create ephemeral hidden service via control port (instant, no SIGHUP)
     local response
     response=$(ctor_control "ADD_ONION ED25519-V3:${key_b64} Port=80,127.0.0.1:${REDIRECT_PORT}")
     if echo "$response" | grep -q "^250 "; then
@@ -255,7 +258,26 @@ do_takeover_ctor() {
         exit 1
     fi
 
-    echo "Takeover complete for ${CONTENT_ADDRESS} (C Tor control port)"
+    # Also write to torrc for persistence across restarts.
+    # C Tor loads these on startup, so the service is available immediately
+    # without waiting for the takeover worker to reconcile.
+    mkdir -p "$HS_SERVICE_DIR"
+    python3 /key-convert.py arti-to-ctor "$key_file" "$HS_SERVICE_DIR" 2>/dev/null || true
+    chown -R debian-tor:debian-tor "$HS_SERVICE_DIR" 2>/dev/null || chown -R tor:tor "$HS_SERVICE_DIR" 2>/dev/null || true
+    chmod 700 "$HS_SERVICE_DIR"
+    chmod 600 "$HS_SERVICE_DIR"/hs_ed25519_secret_key "$HS_SERVICE_DIR"/hs_ed25519_public_key 2>/dev/null || true
+
+    local marker="# onionheaven:${CONTENT_ADDRESS}"
+    if ! grep -q "$marker" "$CTOR_TORRC" 2>/dev/null; then
+        cat >> "$CTOR_TORRC" << EOF
+
+${marker}
+HiddenServiceDir ${HS_SERVICE_DIR}
+HiddenServicePort 80 127.0.0.1:${REDIRECT_PORT}
+EOF
+    fi
+
+    echo "Takeover complete for ${CONTENT_ADDRESS} (C Tor control port + torrc)"
 }
 
 do_release_ctor() {
@@ -263,7 +285,7 @@ do_release_ctor() {
     local service_id
     service_id=$(echo "$CONTENT_ADDRESS" | sed 's/\.onion$//')
 
-    # DEL_ONION: remove ephemeral hidden service via control port
+    # DEL_ONION: remove ephemeral hidden service via control port (instant, no SIGHUP)
     local response
     response=$(ctor_control "DEL_ONION ${service_id}")
     if echo "$response" | grep -q "^250 "; then
@@ -274,7 +296,25 @@ do_release_ctor() {
         # Not fatal — service may have already been removed (restart, etc.)
     fi
 
-    echo "Release complete for ${CONTENT_ADDRESS} (C Tor control port)"
+    # Also remove from torrc and clean up key files
+    local marker="# onionheaven:${CONTENT_ADDRESS}"
+    if grep -q "$marker" "$CTOR_TORRC" 2>/dev/null; then
+        local tmp_torrc="${CTOR_TORRC}.tmp"
+        awk -v marker="$marker" '
+        BEGIN { skip = 0 }
+        $0 == marker { skip = 2; next }
+        skip > 0 { skip--; next }
+        { print }
+        ' "$CTOR_TORRC" > "$tmp_torrc"
+        sed -i '/^$/N;/^\n$/d' "$tmp_torrc" 2>/dev/null || true
+        mv "$tmp_torrc" "$CTOR_TORRC"
+    fi
+
+    if [ -d "$HS_SERVICE_DIR" ]; then
+        rm -rf "$HS_SERVICE_DIR"
+    fi
+
+    echo "Release complete for ${CONTENT_ADDRESS} (C Tor control port + torrc)"
 }
 
 # ==================== Dispatch ====================
