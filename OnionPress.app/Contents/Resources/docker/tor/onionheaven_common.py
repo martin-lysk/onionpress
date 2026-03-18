@@ -771,10 +771,13 @@ def _takeover_local(content_address, no_sighup=False):
         )
         if result.returncode == 0:
             log(f"Takeover complete for {content_address}")
+            return True
         else:
             log(f"Takeover failed for {content_address}: {result.stderr.strip()}")
+            return False
     except Exception as e:
-        log(f"Arti takeover error for {content_address}: {e}")
+        log(f"Takeover error for {content_address}: {e}")
+        return False
 
     if not no_sighup:
         sighup_tor()
@@ -851,11 +854,14 @@ def _release_local(content_address, no_sighup=False):
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
-            log(f"Arti release complete for {content_address}")
+            log(f"Release complete for {content_address}")
+            return True
         else:
-            log(f"Arti release failed for {content_address}: {result.stderr.strip()}")
+            log(f"Release failed for {content_address}: {result.stderr.strip()}")
+            return False
     except Exception as e:
-        log(f"Arti release error for {content_address}: {e}")
+        log(f"Release error for {content_address}: {e}")
+        return False
 
     if not no_sighup:
         sighup_tor()

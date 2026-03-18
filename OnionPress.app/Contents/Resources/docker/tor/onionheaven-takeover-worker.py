@@ -263,19 +263,23 @@ def process_takeovers(conn):
         ca = row["content_address"]
         ha = row["healthcheck_address"]
         log(f"takeover-worker: executing takeover for {ca}")
-        _takeover_local(ca, no_sighup=True)
+        ok = _takeover_local(ca, no_sighup=True)
 
-        # Clear pending flag
-        conn.execute(
-            "UPDATE registry SET takeover_pending = NULL "
-            "WHERE content_address = ? AND healthcheck_address = ?",
-            (ca, ha)
-        )
-        db_commit_with_retry(conn)
-        count += 1
-
-        # Pause between services to let Tor publish each descriptor
-        time.sleep(5)
+        if ok:
+            # Clear pending flag — takeover succeeded
+            conn.execute(
+                "UPDATE registry SET takeover_pending = NULL "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (ca, ha)
+            )
+            db_commit_with_retry(conn)
+            count += 1
+            # Pause between services to let Tor publish each descriptor
+            time.sleep(5)
+        else:
+            # Leave takeover_pending set — will retry next cycle
+            log(f"takeover-worker: will retry {ca} next cycle")
+            break  # stop this batch, retry after LOOP_INTERVAL
 
     if count > 0:
         flush_sighup_tor(force=True)  # Arti only; no-op for C Tor
@@ -301,16 +305,20 @@ def process_releases(conn):
         ca = row["content_address"]
         ha = row["healthcheck_address"]
         log(f"takeover-worker: executing release for {ca}")
-        _release_local(ca, no_sighup=True)
+        ok = _release_local(ca, no_sighup=True)
 
-        # Clear pending and assignment flags
-        conn.execute(
-            "UPDATE registry SET release_pending = NULL, takeover_container = NULL "
-            "WHERE content_address = ? AND healthcheck_address = ?",
-            (ca, ha)
-        )
-        db_commit_with_retry(conn)
-        count += 1
+        if ok:
+            # Clear pending and assignment flags
+            conn.execute(
+                "UPDATE registry SET release_pending = NULL, takeover_container = NULL "
+                "WHERE content_address = ? AND healthcheck_address = ?",
+                (ca, ha)
+            )
+            db_commit_with_retry(conn)
+            count += 1
+        else:
+            log(f"takeover-worker: will retry release for {ca} next cycle")
+            break
 
     if count > 0:
         flush_sighup_tor()  # Arti only; no-op for C Tor
