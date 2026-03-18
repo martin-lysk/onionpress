@@ -568,16 +568,25 @@ def assign_takeover_container(conn):
         _takeover_rr_containers = containers
         _takeover_rr_cycle = itertools.cycle(containers)
 
-    # Try each container once — skip any that are full
+    # Try each container once — skip any that are full.
+    # Count assigned rows in the DB (not just active_services) to avoid
+    # over-assigning during a single heartbeat pass before the worker updates.
     for _ in range(len(containers)):
         candidate = next(_takeover_rr_cycle)
         try:
             row = conn.execute(
-                "SELECT active_services, max_services FROM takeover_containers "
+                "SELECT max_services FROM takeover_containers "
                 "WHERE container_name = ? AND status = 'active'",
                 (candidate,)
             ).fetchone()
-            if row and row["active_services"] < row["max_services"]:
+            if not row:
+                continue
+            assigned = conn.execute(
+                "SELECT COUNT(*) FROM registry "
+                "WHERE takeover_container = ? AND status = 'taken-over'",
+                (candidate,)
+            ).fetchone()[0]
+            if assigned < row["max_services"]:
                 return candidate
         except sqlite3.OperationalError:
             continue
@@ -588,48 +597,36 @@ def assign_takeover_container(conn):
 def check_farm_scaling(conn, active_entries):
     """Check if farm needs more takeover workers and write scale requests.
 
-    Called by the heartbeat monitor each cycle. Requests 2 new containers
-    (fulfilled by the host-side farm monitor) when ALL existing containers
-    are at their max_services limit.
+    Called by the heartbeat monitor each cycle. Checks if there are unassigned
+    taken-over entries that need a container. Each scale request creates 2 new
+    containers (fulfilled by the host-side farm monitor).
 
     active_entries: number of active registry entries this cycle.
     """
     try:
-        takeover_rows = conn.execute(
-            "SELECT container_name, max_services, active_services FROM takeover_containers "
-            "WHERE status = 'active'"
-        ).fetchall()
+        # Count taken-over entries that have no container assigned
+        unassigned = conn.execute(
+            "SELECT COUNT(*) FROM registry "
+            "WHERE status = 'taken-over' AND takeover_container IS NULL AND unregistered_at IS NULL"
+        ).fetchone()[0]
 
-        need_scaleup = False
-        if not takeover_rows:
-            # No workers exist — check if any takeovers are pending
-            pending_takeovers = conn.execute(
-                "SELECT COUNT(*) FROM registry WHERE status = 'taken-over'"
-            ).fetchone()[0]
-            if pending_takeovers > 0:
-                need_scaleup = True
-                log(f"Farm scale-up needed: no takeover workers but {pending_takeovers} taken-over entries")
-        else:
-            # Scale up when ALL containers are at max_services
-            all_full = all(r["active_services"] >= r["max_services"] for r in takeover_rows)
-            if all_full:
-                need_scaleup = True
+        if unassigned == 0:
+            return
 
-        if need_scaleup:
-            pending = conn.execute(
-                "SELECT COUNT(*) FROM farm_scale_requests "
-                "WHERE worker_type = 'takeover' AND fulfilled_at IS NULL"
-            ).fetchone()[0]
-            if pending == 0:
-                total_active = sum(r["active_services"] for r in takeover_rows) if takeover_rows else 0
-                total_max = sum(r["max_services"] for r in takeover_rows) if takeover_rows else 0
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                conn.execute(
-                    "INSERT INTO farm_scale_requests (worker_type, requested_at) VALUES ('takeover', ?)",
-                    (now,)
-                )
-                db_commit_with_retry(conn)
-                log(f"Farm scale-up requested: {len(takeover_rows)} workers full ({total_active}/{total_max})")
+        # Check if there are already unfulfilled scale requests
+        pending_requests = conn.execute(
+            "SELECT COUNT(*) FROM farm_scale_requests "
+            "WHERE worker_type = 'takeover' AND fulfilled_at IS NULL"
+        ).fetchone()[0]
+
+        if pending_requests == 0:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute(
+                "INSERT INTO farm_scale_requests (worker_type, requested_at) VALUES ('takeover', ?)",
+                (now,)
+            )
+            db_commit_with_retry(conn)
+            log(f"Farm scale-up requested: {unassigned} unassigned taken-over entries need containers")
     except sqlite3.OperationalError:
         pass
 

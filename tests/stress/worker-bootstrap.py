@@ -32,32 +32,54 @@ USE_CTOR = os.environ.get("TOR_IMPL", "arti").lower() == "tor"
 CTOR_HS_BASE = "/var/lib/tor/hidden_service"
 
 
+def ctor_control(cmd):
+    """Send a command to C Tor's control port. Returns the full response."""
+    result = subprocess.run(
+        ["sh", "-c",
+         f'cookie=$(xxd -p /var/lib/tor/control_auth_cookie | tr -d "\\n"); '
+         f'printf "AUTHENTICATE %s\\r\\n{cmd}\\r\\nQUIT\\r\\n" "$cookie" | '
+         f'nc -w 5 127.0.0.1 9051'],
+        capture_output=True, text=True, timeout=15,
+    )
+    return result.stdout
+
+
+def ctor_add_onion(port):
+    """Create an ephemeral onion service via ADD_ONION NEW:ED25519-V3.
+
+    Returns (address, privkey_b64) or (None, None) on failure.
+    The address includes .onion suffix. The privkey is the raw base64
+    key that can be used with ADD_ONION ED25519-V3:<key> to re-add.
+    """
+    response = ctor_control(f"ADD_ONION NEW:ED25519-V3 Port=80,127.0.0.1:{port}")
+    service_id = None
+    privkey_b64 = None
+    for line in response.splitlines():
+        if line.startswith("250-ServiceID="):
+            service_id = line.split("=", 1)[1].strip()
+        elif line.startswith("250-PrivateKey=ED25519-V3:"):
+            privkey_b64 = line.split(":", 2)[2].strip()
+    if service_id and privkey_b64:
+        return f"{service_id}.onion", privkey_b64
+    return None, None
+
+
 def get_onion_address(nickname):
-    """Get .onion address. Uses hostname file for C Tor, Arti CLI for Arti."""
-    if USE_CTOR:
-        hostname_file = f"{CTOR_HS_BASE}/{nickname}/hostname"
-        for attempt in range(180):  # up to 6 minutes
-            if os.path.exists(hostname_file):
-                addr = open(hostname_file).read().strip()
-                if addr and addr.endswith(".onion"):
-                    return addr
-            time.sleep(2)
-        return None
-    else:
-        for attempt in range(180):  # up to 6 minutes
-            try:
-                result = subprocess.run(
-                    ["su", "-s", "/bin/sh", "arti", "-c",
-                     f"arti hss --nickname {nickname} onion-address -c {ARTI_TOML}"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                addr = result.stdout.strip()
-                if addr and addr.endswith(".onion"):
-                    return addr
-            except Exception:
-                pass
-            time.sleep(2)
-        return None
+    """Get .onion address for Arti (reads from Arti CLI). Not used for C Tor."""
+    for attempt in range(180):  # up to 6 minutes
+        try:
+            result = subprocess.run(
+                ["su", "-s", "/bin/sh", "arti", "-c",
+                 f"arti hss --nickname {nickname} onion-address -c {ARTI_TOML}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            addr = result.stdout.strip()
+            if addr and addr.endswith(".onion"):
+                return addr
+        except Exception:
+            pass
+        time.sleep(2)
+    return None
 
 
 def parse_openssh_pem(path):
@@ -181,61 +203,86 @@ def wait_for_socks():
 
 
 def bootstrap_one_worker(i):
-    """Bootstrap a single worker: wait for address, read keys, register over Tor."""
+    """Bootstrap a single worker: create onion service, read keys, register over Tor."""
     content_nick = f"w{CONTAINER_IDX}_{i}_content"
     hc_nick = f"w{CONTAINER_IDX}_{i}_hc"
     global_idx = CONTAINER_IDX * NUM_WORKERS + i
-
-    print(f"[worker {i}] Waiting for Arti addresses...", flush=True)
-    content_addr = get_onion_address(content_nick)
-    if NO_HEALTHCHECK:
-        # Generate a dummy healthcheck address (not published as onion service)
-        hc_addr = content_addr.replace(content_addr[:8], "hc" + content_addr[2:8])
-    else:
-        hc_addr = get_onion_address(hc_nick)
-
-    if not content_addr or not hc_addr:
-        print(f"[worker {i}] ERROR: timed out waiting for addresses", flush=True)
-        return {
-            "global_index": global_idx, "local_index": i,
-            "container": CONTAINER_IDX, "registered": False,
-            "error": "address_timeout",
-        }
-
-    print(f"[worker {i}] content={content_addr} hc={hc_addr}", flush=True)
+    cp = BASE_PORT + i * 2
+    hp = BASE_PORT + i * 2 + 1
 
     if USE_CTOR:
-        # C Tor: read key from hs_ed25519_secret_key, convert to Arti PEM for registration
-        secret_path = f"{CTOR_HS_BASE}/{content_nick}/hs_ed25519_secret_key"
-        for _ in range(30):
-            if os.path.exists(secret_path):
-                break
-            time.sleep(1)
-        if not os.path.exists(secret_path):
-            print(f"[worker {i}] ERROR: C Tor secret key not found at {secret_path}", flush=True)
+        # C Tor: create services via ADD_ONION (ephemeral, DEL_ONION can remove them)
+        print(f"[worker {i}] Creating onion service via ADD_ONION...", flush=True)
+        content_addr, content_key_b64 = ctor_add_onion(cp)
+        if not content_addr:
+            print(f"[worker {i}] ERROR: ADD_ONION failed for content service", flush=True)
             return {
                 "global_index": global_idx, "local_index": i,
-                "container": CONTAINER_IDX,
-                "content_address": content_addr, "healthcheck_address": hc_addr,
-                "registered": False, "error": "ctor_key_not_found",
+                "container": CONTAINER_IDX, "registered": False,
+                "error": "add_onion_failed",
             }
-        # Convert C Tor key to Arti PEM using key-convert.py
-        pem_path = f"/tmp/{content_nick}.pem"
-        try:
-            subprocess.run(
-                ["python3", "/key-convert.py", "ctor-to-arti", secret_path, pem_path],
-                capture_output=True, text=True, timeout=10, check=True,
-            )
-        except Exception as e:
-            print(f"[worker {i}] ERROR: key conversion failed: {e}", flush=True)
-            return {
-                "global_index": global_idx, "local_index": i,
-                "container": CONTAINER_IDX,
-                "content_address": content_addr, "healthcheck_address": hc_addr,
-                "registered": False, "error": f"key_convert: {e}",
-            }
+
+        if NO_HEALTHCHECK:
+            hc_addr = content_addr.replace(content_addr[:8], "hc" + content_addr[2:8])
+        else:
+            hc_addr, _ = ctor_add_onion(hp)
+            if not hc_addr:
+                print(f"[worker {i}] ERROR: ADD_ONION failed for healthcheck service", flush=True)
+                return {
+                    "global_index": global_idx, "local_index": i,
+                    "container": CONTAINER_IDX, "registered": False,
+                    "error": "add_onion_hc_failed",
+                }
+
+        print(f"[worker {i}] content={content_addr} hc={hc_addr}", flush=True)
+
+        # Build Arti PEM from the raw key for OnionHeaven registration
+        # The raw key from ADD_ONION is a 64-byte expanded ed25519 key in base64
+        raw_key = base64.b64decode(content_key_b64)
+        # We need pubkey too — derive from expanded key using onion_auth
+        import onion_auth
+        a_bytes = raw_key[:32]
+        a = int.from_bytes(a_bytes, 'little')
+        A = onion_auth._scalar_mult(a, onion_auth._B)
+        pubkey = onion_auth._encode_point(A)
+        privkey = raw_key  # 64-byte expanded key
+
+        # Build Arti PEM from raw key for OnionHeaven registration.
+        # Write C Tor key files to a temp dir, then convert to PEM.
+        key_dir = f"/tmp/ctor_keys_{CONTAINER_IDX}_{i}"
+        os.makedirs(key_dir, exist_ok=True)
+        with open(f"{key_dir}/hs_ed25519_secret_key", "wb") as f:
+            f.write(b"== ed25519v1-secret: type0 ==\x00\x00\x00" + raw_key)
+        with open(f"{key_dir}/hs_ed25519_public_key", "wb") as f:
+            f.write(b"== ed25519v1-public: type0 ==\x00\x00\x00" + pubkey)
+        pem_path = f"/tmp/w{CONTAINER_IDX}_{i}_content.pem"
+        subprocess.run(
+            ["python3", "/key-convert.py", "ctor-to-arti",
+             f"{key_dir}/hs_ed25519_secret_key", pem_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        with open(pem_path, "rb") as f:
+            pem_b64 = base64.b64encode(f.read()).decode()
+
     else:
-        # Arti: read PEM directly
+        # Arti: wait for address from Arti CLI
+        print(f"[worker {i}] Waiting for Arti addresses...", flush=True)
+        content_addr = get_onion_address(content_nick)
+        if NO_HEALTHCHECK:
+            hc_addr = content_addr.replace(content_addr[:8], "hc" + content_addr[2:8])
+        else:
+            hc_addr = get_onion_address(hc_nick)
+
+        if not content_addr or not hc_addr:
+            print(f"[worker {i}] ERROR: timed out waiting for addresses", flush=True)
+            return {
+                "global_index": global_idx, "local_index": i,
+                "container": CONTAINER_IDX, "registered": False,
+                "error": "address_timeout",
+            }
+
+        print(f"[worker {i}] content={content_addr} hc={hc_addr}", flush=True)
+
         pem_path = f"{KEYSTORE_BASE}/{content_nick}/ks_hs_id.ed25519_expanded_private"
         for _ in range(30):
             if os.path.exists(pem_path):
@@ -250,20 +297,20 @@ def bootstrap_one_worker(i):
                 "registered": False, "error": "pem_not_found",
             }
 
-    try:
-        pubkey, privkey = parse_openssh_pem(pem_path)
-    except Exception as e:
-        print(f"[worker {i}] ERROR: failed to parse PEM: {e}", flush=True)
-        return {
-            "global_index": global_idx, "local_index": i,
-            "container": CONTAINER_IDX,
-            "content_address": content_addr, "healthcheck_address": hc_addr,
-            "registered": False, "error": f"pem_parse: {e}",
-        }
+        try:
+            pubkey, privkey = parse_openssh_pem(pem_path)
+        except Exception as e:
+            print(f"[worker {i}] ERROR: failed to parse PEM: {e}", flush=True)
+            return {
+                "global_index": global_idx, "local_index": i,
+                "container": CONTAINER_IDX,
+                "content_address": content_addr, "healthcheck_address": hc_addr,
+                "registered": False, "error": f"pem_parse: {e}",
+            }
 
-    with open(pem_path, "rb") as f:
-        pem_data = f.read()
-    pem_b64 = base64.b64encode(pem_data).decode()
+        with open(pem_path, "rb") as f:
+            pem_data = f.read()
+        pem_b64 = base64.b64encode(pem_data).decode()
 
     print(f"[worker {i}] Registering with OnionHeaven over Tor...", flush=True)
     result = register_with_onionheaven(content_addr, hc_addr, privkey, pubkey, pem_b64, worker_id=global_idx)
@@ -281,11 +328,12 @@ def bootstrap_one_worker(i):
         "global_index": global_idx, "local_index": i,
         "container": CONTAINER_IDX,
         "content_address": content_addr, "healthcheck_address": hc_addr,
-        "content_port": BASE_PORT + i * 2,
-        "hc_port": BASE_PORT + i * 2 + 1,
+        "content_port": cp,
+        "hc_port": hp,
         "registered": ok,
         "privkey_b64": base64.b64encode(privkey).decode(),
         "pubkey_b64": base64.b64encode(pubkey).decode(),
+        "ctor_key_b64": content_key_b64 if USE_CTOR else "",
     }
 
 

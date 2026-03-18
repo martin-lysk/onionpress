@@ -397,7 +397,9 @@ start_worker_container() {
     docker_cmd rm -f "$ctr_name" 2>/dev/null || true
 
     if [ "$TOR_IMPL" = "tor" ]; then
-        # ── C Tor: generate torrc ──
+        # ── C Tor: generate torrc (SOCKS + control port only) ──
+        # Onion services are created via ADD_ONION after bootstrap,
+        # so DEL_ONION can remove them without SIGHUP.
         local torrc="${OUTPUT_DIR}/${ctr_name}-torrc"
         cat > "$torrc" << 'TORRC_HEAD'
 SocksPort 127.0.0.1:9050
@@ -406,21 +408,6 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_HEAD
-
-        for i in $(seq 0 $((workers_in_ctr - 1))); do
-            local cp=$((BASE_PORT + i * 2))
-            local hp=$((BASE_PORT + i * 2 + 1))
-            cat >> "$torrc" << EOF
-HiddenServiceDir /var/lib/tor/hidden_service/w${idx}_${i}_content
-HiddenServicePort 80 127.0.0.1:${cp}
-EOF
-            if [ "$NO_HEALTHCHECK" != true ]; then
-                cat >> "$torrc" << EOF
-HiddenServiceDir /var/lib/tor/hidden_service/w${idx}_${i}_hc
-HiddenServicePort 80 127.0.0.1:${hp}
-EOF
-            fi
-        done
     else
         # ── Arti: generate arti.toml ──
         local arti_conf="${OUTPUT_DIR}/${ctr_name}-arti.toml"
@@ -499,23 +486,19 @@ set -e
 # Install Python + curl + netcat/xxd (for control port ADD_ONION/DEL_ONION)
 apt-get update -qq && apt-get install -y -qq python3-minimal curl netcat-openbsd xxd >/dev/null 2>&1
 
-# Prepare C Tor data dirs
+# Prepare C Tor data dir (no HiddenServiceDir — services created via ADD_ONION)
 mkdir -p /var/lib/tor
-for i in \$(seq 0 $((workers_in_ctr - 1))); do
-    mkdir -p /var/lib/tor/hidden_service/w${idx}_\${i}_content
-    chmod 700 /var/lib/tor/hidden_service/w${idx}_\${i}_content
-done
 chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
 chmod 700 /var/lib/tor
 
 # Start Python HTTP server
 python3 /worker-server.py ${BASE_PORT} ${workers_in_ctr} &
 
-# Start C Tor
+# Start C Tor (SOCKS + control port only, no onion services in torrc)
 su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
 TOR_PID=\$!
 
-# Wait for keys, then self-register with OnionHeaven over Tor
+# Wait for bootstrap, create services via ADD_ONION, then register with OnionHeaven
 STRESS_VERSION="${STRESS_VERSION}" NO_HEALTHCHECK="${NO_HEALTHCHECK}" TOR_IMPL=tor python3 -u /worker-bootstrap.py "${ONIONHEAVEN_ADDR}" ${idx} ${workers_in_ctr} ${BASE_PORT} > /bootstrap.log 2>&1 &
 
 wait \$TOR_PID
@@ -1202,13 +1185,11 @@ enable_workers() {
         local content_nick="w${ctr_idx}_${local_idx}_content"
         local hc_nick="w${ctr_idx}_${local_idx}_hc"
         if [ "$TOR_IMPL" = "tor" ]; then
-            # C Tor: ADD_ONION via control port — re-adds only these services,
-            # no SIGHUP, no descriptor re-publish for the other services.
+            # C Tor: ADD_ONION via control port — re-adds only these services.
+            # Read the saved ctor_key_b64 from worker-info.json (saved during bootstrap).
             docker_cmd exec "$ctr_name" sh -c "
                 cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
-                # Read the secret key, extract raw 64-byte expanded key as base64
-                content_key=\$(python3 /key-convert.py pem-to-ed25519-base64 /tmp/w${ctr_idx}_${local_idx}_content.pem 2>/dev/null || \
-                    python3 -c \"import base64; f=open('/var/lib/tor/hidden_service/${content_nick}/hs_ed25519_secret_key','rb'); d=f.read(); print(base64.b64encode(d[32:]).decode())\" 2>/dev/null)
+                content_key=\$(python3 -c \"import json; w=[x for x in json.load(open('/worker-info.json')) if x.get('local_index')==${local_idx}]; print(w[0].get('ctor_key_b64','') if w else '')\" 2>/dev/null)
                 if [ -n \"\$content_key\" ]; then
                     printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
                 fi
@@ -1332,8 +1313,7 @@ enable_workers_silent() {
             # C Tor: ADD_ONION via control port — re-adds only these services
             docker_cmd exec "$ctr_name" sh -c "
                 cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
-                content_key=\$(python3 /key-convert.py pem-to-ed25519-base64 /tmp/w${ctr_idx}_${local_idx}_content.pem 2>/dev/null || \
-                    python3 -c \"import base64; f=open('/var/lib/tor/hidden_service/${content_nick}/hs_ed25519_secret_key','rb'); d=f.read(); print(base64.b64encode(d[32:]).decode())\" 2>/dev/null)
+                content_key=\$(python3 -c \"import json; w=[x for x in json.load(open('/worker-info.json')) if x.get('local_index')==${local_idx}]; print(w[0].get('ctor_key_b64','') if w else '')\" 2>/dev/null)
                 if [ -n \"\$content_key\" ]; then
                     printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
                 fi

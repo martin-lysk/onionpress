@@ -245,7 +245,9 @@ do_takeover_ctor() {
         exit 1
     fi
 
-    # ADD_ONION: create ephemeral hidden service via control port (instant, no SIGHUP)
+    # ADD_ONION: create ephemeral hidden service via control port (instant, no SIGHUP).
+    # Purely ephemeral — no torrc, no key files on disk. The registry DB is the
+    # source of truth; on restart, the takeover worker re-ADDs from the DB.
     local response
     response=$(ctor_control "ADD_ONION ED25519-V3:${key_b64} Port=80,127.0.0.1:${REDIRECT_PORT}")
     if echo "$response" | grep -q "^250 "; then
@@ -258,26 +260,7 @@ do_takeover_ctor() {
         exit 1
     fi
 
-    # Also write to torrc for persistence across restarts.
-    # C Tor loads these on startup, so the service is available immediately
-    # without waiting for the takeover worker to reconcile.
-    mkdir -p "$HS_SERVICE_DIR"
-    python3 /key-convert.py arti-to-ctor "$key_file" "$HS_SERVICE_DIR" 2>/dev/null || true
-    chown -R debian-tor:debian-tor "$HS_SERVICE_DIR" 2>/dev/null || chown -R tor:tor "$HS_SERVICE_DIR" 2>/dev/null || true
-    chmod 700 "$HS_SERVICE_DIR"
-    chmod 600 "$HS_SERVICE_DIR"/hs_ed25519_secret_key "$HS_SERVICE_DIR"/hs_ed25519_public_key 2>/dev/null || true
-
-    local marker="# onionheaven:${CONTENT_ADDRESS}"
-    if ! grep -q "$marker" "$CTOR_TORRC" 2>/dev/null; then
-        cat >> "$CTOR_TORRC" << EOF
-
-${marker}
-HiddenServiceDir ${HS_SERVICE_DIR}
-HiddenServicePort 80 127.0.0.1:${REDIRECT_PORT}
-EOF
-    fi
-
-    echo "Takeover complete for ${CONTENT_ADDRESS} (C Tor control port + torrc)"
+    echo "Takeover complete for ${CONTENT_ADDRESS} (C Tor ADD_ONION)"
 }
 
 do_release_ctor() {
@@ -296,25 +279,7 @@ do_release_ctor() {
         # Not fatal — service may have already been removed (restart, etc.)
     fi
 
-    # Also remove from torrc and clean up key files
-    local marker="# onionheaven:${CONTENT_ADDRESS}"
-    if grep -q "$marker" "$CTOR_TORRC" 2>/dev/null; then
-        local tmp_torrc="${CTOR_TORRC}.tmp"
-        awk -v marker="$marker" '
-        BEGIN { skip = 0 }
-        $0 == marker { skip = 2; next }
-        skip > 0 { skip--; next }
-        { print }
-        ' "$CTOR_TORRC" > "$tmp_torrc"
-        sed -i '/^$/N;/^\n$/d' "$tmp_torrc" 2>/dev/null || true
-        mv "$tmp_torrc" "$CTOR_TORRC"
-    fi
-
-    if [ -d "$HS_SERVICE_DIR" ]; then
-        rm -rf "$HS_SERVICE_DIR"
-    fi
-
-    echo "Release complete for ${CONTENT_ADDRESS} (C Tor control port + torrc)"
+    echo "Release complete for ${CONTENT_ADDRESS} (C Tor DEL_ONION)"
 }
 
 # ==================== Dispatch ====================

@@ -29,6 +29,7 @@ from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, flush_sighup_tor,
     is_farm_mode, check_farm_scaling, invalidate_farm_cache,
+    assign_takeover_container, get_takeover_containers,
     _check_arti_key_errors,
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, TOR_MANAGER,
 )
@@ -147,16 +148,17 @@ def startup_reconciliation(conn):
 
     if re_takeover_addrs:
         if is_farm_mode(conn):
-            # Farm mode: takeover workers handle their own reconciliation via ADD_ONION.
-            # Just ensure the DB rows have takeover_pending set so workers pick them up.
-            log(f"startup reconciliation: {len(re_takeover_addrs)} takeover(s) pending — farm workers will re-add")
-            for addr in re_takeover_addrs:
-                conn.execute(
-                    "UPDATE registry SET takeover_pending = ? "
-                    "WHERE content_address = ? AND status = 'taken-over' AND unregistered_at IS NULL",
-                    (now, addr)
-                )
+            # Farm mode: clear all container assignments and set takeover_pending.
+            # The normal takeover path (assign_takeover_container → worker pickup)
+            # handles reassignment. This is simpler than trying to figure out which
+            # containers survived — just let the system re-do all assignments.
+            conn.execute(
+                "UPDATE registry SET takeover_container = NULL, takeover_pending = ? "
+                "WHERE status = 'taken-over' AND unregistered_at IS NULL",
+                (now,)
+            )
             db_commit_with_retry(conn)
+            log(f"startup reconciliation: cleared assignments for {len(re_takeover_addrs)} takeover(s) — will be reassigned to live workers")
         else:
             log(f"startup reconciliation: re-executing {len(re_takeover_addrs)} takeover(s) locally")
             for addr in re_takeover_addrs:
@@ -327,6 +329,18 @@ def main():
                         takeover_function(conn, ca, ha, force=False)
 
                 elif entry["status"] == "taken-over":
+                    # Unassigned taken-over entry — assign to a container so it gets ADD_ONION'd.
+                    # This happens after restart when reconciliation clears assignments.
+                    if entry.get("takeover_pending") and not entry.get("takeover_container"):
+                        container = assign_takeover_container(conn)
+                        if container:
+                            conn.execute(
+                                "UPDATE registry SET takeover_container = ? "
+                                "WHERE content_address = ? AND healthcheck_address = ?",
+                                (container, ca, ha)
+                            )
+                            db_commit_with_retry(conn)
+
                     # If another row for the same content_address is online, release this takeover.
                     # This happens when an instance re-registers with a new healthcheck address.
                     sibling_online = conn.execute(

@@ -228,11 +228,11 @@ def _sanitize_toml(toml_path):
 
 
 def process_takeovers(conn):
-    """Process ALL pending takeover requests in one batch with a single SIGHUP.
+    """Process pending takeover requests one at a time with a pause between each.
 
-    Instead of SIGHUP per takeover (5s rate limit each = minutes for large batches),
-    copies all keys and updates toml first, then sends one SIGHUP at the end.
-    This makes takeover time O(1) for SIGHUP regardless of batch size.
+    C Tor: each ADD_ONION is instant and independent — the pause gives Tor time
+    to publish each descriptor before starting the next.
+    Arti: batches all config changes then sends one SIGHUP at the end.
     """
     rows = conn.execute(
         "SELECT content_address, healthcheck_address FROM registry "
@@ -259,9 +259,13 @@ def process_takeovers(conn):
         db_commit_with_retry(conn)
         count += 1
 
+        # Pause between services to let Tor publish each descriptor
+        # before starting the next (avoids overwhelming HsDir uploads)
+        if count < len(rows):
+            time.sleep(5)
+
     if count > 0:
-        log(f"takeover-worker: batch SIGHUP for {count} takeover(s)")
-        flush_sighup_tor(force=True)
+        flush_sighup_tor(force=True)  # Arti only; no-op for C Tor
         update_active_count(conn)
     return count
 
