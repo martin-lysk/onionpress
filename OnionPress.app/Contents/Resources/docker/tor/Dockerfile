@@ -7,13 +7,13 @@ RUN cargo install arti --locked --features onion-service-service,static-sqlite
 # Stage 2: Runtime (must match builder's glibc — rust:latest uses trixie)
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    socat openssl ca-certificates sqlite3 python3 curl wget procps tor netcat-openbsd \
+    socat openssl ca-certificates sqlite3 python3 curl wget procps tor netcat-openbsd xxd \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd -r -m -s /bin/false arti
 COPY --from=builder /usr/local/cargo/bin/arti /usr/local/bin/arti
 
 # Cache-bust: changing this value forces rebuild of all COPY layers below
-ARG CACHEBUST=2026-03-15b
+ARG CACHEBUST=2026-03-18a
 COPY arti.toml /etc/arti/arti.toml
 COPY arti-polling.toml /etc/arti/arti-polling.toml
 COPY arti-onionheaven.toml /etc/arti/arti-onionheaven.toml
