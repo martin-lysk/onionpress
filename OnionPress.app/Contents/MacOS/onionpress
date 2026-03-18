@@ -194,7 +194,7 @@ _start_takeover_worker() {
         -e TOR_IMPL="${TOR_IMPL:-tor}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
-        -e MAX_TAKEOVER_SERVICES=3 \
+        -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-10}" \
         -v "${vol}:/var/lib/arti/" \
         -v "onionpress-persistent-data:/var/lib/onionpress" \
         --restart unless-stopped \
