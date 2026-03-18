@@ -2109,9 +2109,14 @@ run_worker() {
         # A1: Takeover — /offline + disable, then wait for 302s
         phase_start "A.1" "Graceful takeover: /offline + disable ${FAILING} sites, wait for takeover (est. 1-2m)"
         scenario_ts=$(date +%s)
-        log "Phase A.1: Graceful offline — sending /offline + disabling responders for ${FAILING} sites..."
-        notify_offline "$fail_start" "$FAILING"
+        log "Phase A.1: Graceful offline — disabling responders + sending /offline for ${FAILING} sites..."
+        # Disable HTTP responders FIRST — this stops the heartbeat loop from
+        # sending /online (is_worker_enabled check fails). Then DEL_ONION the
+        # services. Wait briefly for any in-flight heartbeat to complete before
+        # sending /offline to trigger takeover.
         disable_workers "$fail_start" "$FAILING"
+        sleep 5
+        notify_offline "$fail_start" "$FAILING"
         flush_client_descriptor_cache
         log "Phase A.1: Waiting for takeovers..."
         if ! wait_for_takeover "$FAILING" 600; then
