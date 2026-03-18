@@ -249,7 +249,7 @@ do_takeover_ctor() {
     # Purely ephemeral — no torrc, no key files on disk. The registry DB is the
     # source of truth; on restart, the takeover worker re-ADDs from the DB.
     local response
-    response=$(ctor_control "ADD_ONION ED25519-V3:${key_b64} Port=80,127.0.0.1:${REDIRECT_PORT}")
+    response=$(ctor_control "ADD_ONION ED25519-V3:${key_b64} Flags=Detach Port=80,127.0.0.1:${REDIRECT_PORT}")
     if echo "$response" | grep -q "^250 "; then
         echo "ADD_ONION succeeded for ${CONTENT_ADDRESS}"
     elif echo "$response" | grep -q "Onion address collision"; then

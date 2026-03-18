@@ -1191,7 +1191,7 @@ enable_workers() {
                 cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
                 content_key=\$(python3 -c \"import json; w=[x for x in json.load(open('/worker-info.json')) if x.get('local_index')==${local_idx}]; print(w[0].get('ctor_key_b64','') if w else '')\" 2>/dev/null)
                 if [ -n \"\$content_key\" ]; then
-                    printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
+                    printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Flags=Detach Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
                 fi
             " 2>/dev/null || true
         else
@@ -1315,7 +1315,7 @@ enable_workers_silent() {
                 cookie=\$(xxd -p /var/lib/tor/control_auth_cookie | tr -d '\n')
                 content_key=\$(python3 -c \"import json; w=[x for x in json.load(open('/worker-info.json')) if x.get('local_index')==${local_idx}]; print(w[0].get('ctor_key_b64','') if w else '')\" 2>/dev/null)
                 if [ -n \"\$content_key\" ]; then
-                    printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
+                    printf 'AUTHENTICATE %s\r\nADD_ONION ED25519-V3:%s Flags=Detach Port=80,127.0.0.1:${cp}\r\nQUIT\r\n' \"\$cookie\" \"\$content_key\" | nc -w 5 127.0.0.1 9051 >/dev/null 2>&1
                 fi
             " 2>/dev/null || true
         else

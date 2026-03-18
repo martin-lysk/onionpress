@@ -72,13 +72,16 @@ _last_sighup_time = 0.0
 _sighup_pending = False
 
 
-def sighup_tor():
-    """Send SIGHUP to Tor if at least SIGHUP_MIN_INTERVAL seconds have passed.
+def _is_ctor():
+    """Check if we're running C Tor (not Arti). SIGHUP is harmful for C Tor
+    with ephemeral ADD_ONION services — it re-reads the torrc and kills them."""
+    return os.environ.get("TOR_IMPL", "tor").lower() == "tor"
 
-    If called too soon after the last SIGHUP, marks it as pending.
-    Call flush_sighup_tor() at the end of a batch to ensure the
-    final SIGHUP is sent.
-    """
+
+def sighup_tor():
+    """Send SIGHUP to Arti. No-op for C Tor (would kill ephemeral services)."""
+    if _is_ctor():
+        return
     global _last_sighup_time, _sighup_pending
     import time as _time
     now = _time.monotonic()
@@ -93,12 +96,9 @@ def sighup_tor():
 
 
 def flush_sighup_tor(force=False):
-    """Send a final SIGHUP if one is pending or forced.
-
-    Call after a batch of changes. Use force=True when the batch used
-    no_sighup=True (which bypasses sighup_tor(), so the
-    pending flag was never set).
-    """
+    """Send a final SIGHUP if pending. No-op for C Tor."""
+    if _is_ctor():
+        return
     global _sighup_pending, _last_sighup_time
     import time as _time
     if _sighup_pending or force:
@@ -121,7 +121,7 @@ def _do_sighup():
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
-            log(f"SIGHUP sent to Arti")
+            log(f"SIGHUP sent to Tor")
         else:
             log(f"SIGHUP failed: {result.stderr.strip()}")
     except Exception as e:
@@ -734,21 +734,21 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
 
 
 def _takeover_local(content_address, no_sighup=False):
-    """Execute takeover via local tor-manager (legacy/worker mode).
+    """Execute takeover via local tor-manager.
 
-    If no_sighup=True, skips the SIGHUP — caller is responsible for
-    calling flush_sighup_tor() after a batch of takeovers.
+    C Tor: uses ADD_ONION via control port (no SIGHUP needed).
+    Arti: modifies config; if no_sighup=True, caller must call flush_sighup_tor().
     """
-    log(f"Taking over {content_address} via Arti (local)")
+    log(f"Taking over {content_address} via tor-manager (local)")
     try:
         result = subprocess.run(
             [TOR_MANAGER, "takeover", "--no-sighup", content_address],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
-            log(f"Arti takeover complete for {content_address}")
+            log(f"Takeover complete for {content_address}")
         else:
-            log(f"Arti takeover failed for {content_address}: {result.stderr.strip()}")
+            log(f"Takeover failed for {content_address}: {result.stderr.strip()}")
     except Exception as e:
         log(f"Arti takeover error for {content_address}: {e}")
 
@@ -814,7 +814,7 @@ def _release_local(content_address, no_sighup=False):
     If no_sighup=True, skips the SIGHUP — caller is responsible for
     calling flush_sighup_tor() after a batch of releases.
     """
-    log(f"Releasing {content_address} via Arti (local)")
+    log(f"Releasing {content_address} via tor-manager (local)")
     try:
         result = subprocess.run(
             [TOR_MANAGER, "release", "--no-sighup", content_address],

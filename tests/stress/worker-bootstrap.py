@@ -51,7 +51,7 @@ def ctor_add_onion(port):
     The address includes .onion suffix. The privkey is the raw base64
     key that can be used with ADD_ONION ED25519-V3:<key> to re-add.
     """
-    response = ctor_control(f"ADD_ONION NEW:ED25519-V3 Port=80,127.0.0.1:{port}")
+    response = ctor_control(f"ADD_ONION NEW:ED25519-V3 Flags=Detach Port=80,127.0.0.1:{port}")
     service_id = None
     privkey_b64 = None
     for line in response.splitlines():
