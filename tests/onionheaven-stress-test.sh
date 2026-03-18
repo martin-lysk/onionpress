@@ -832,24 +832,12 @@ parallel_check_addrs() {
     PCHECK_200=0
     PCHECK_000=0
 
-    # Build list of available stress containers to distribute checks across.
-    # Falls back to onionpress-tor-client if no stress containers are running.
-    local check_ctrs=""
-    local num_check_ctrs=0
-    for ci in $(seq 0 $((NUM_CONTAINERS - 1))); do
-        local cname="stress-worker-${ci}"
-        if docker_cmd inspect "$cname" >/dev/null 2>&1; then
-            check_ctrs="${check_ctrs} ${cname}"
-            num_check_ctrs=$((num_check_ctrs + 1))
-        fi
-    done
-    if [ "$num_check_ctrs" -eq 0 ]; then
-        check_ctrs="onionpress-tor-client"
-        num_check_ctrs=1
-    fi
-    # Convert to indexed array-like string for round-robin
-    local ctr_arr
-    ctr_arr=($check_ctrs)
+    # Use onionpress-tor-client for polling — it has established circuits
+    # for client-side descriptor lookups. Stress containers' Tor is optimized
+    # for publishing their own services, not discovering other services.
+    local check_ctrs="onionpress-tor-client"
+    local num_check_ctrs=1
+    local ctr_arr=($check_ctrs)
 
     local tmpdir
     tmpdir=$(mktemp -d)
