@@ -1149,14 +1149,10 @@ disable_workers() {
     if [ "$TOR_IMPL" != "tor" ]; then
         for ctr_name in $affected_containers; do
             docker_cmd exec "$ctr_name" sh -c "
-                signaled=false
-                for d in /proc/[0-9]*; do
-                    if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"arti\" ]; then
-                        kill -HUP \$(basename \$d) 2>/dev/null
-                        signaled=true
-                    fi
-                done
-                if [ \"\$signaled\" = false ]; then
+                arti_pid=\$(pidof arti 2>/dev/null)
+                if [ -n \"\$arti_pid\" ]; then
+                    kill -HUP \$arti_pid 2>/dev/null
+                else
                     su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
                 fi
             " 2>/dev/null || true
@@ -1271,14 +1267,10 @@ print(f'Re-registered {w[\"content_address\"]}')
     if [ "$TOR_IMPL" != "tor" ]; then
         for ctr_name in $affected_containers; do
             docker_cmd exec "$ctr_name" sh -c "
-                tor_running=false
-                for d in /proc/[0-9]*; do
-                    if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"arti\" ]; then
-                        kill -HUP \$(basename \$d) 2>/dev/null
-                        tor_running=true
-                    fi
-                done
-                if [ \"\$tor_running\" = false ]; then
+                arti_pid=\$(pidof arti 2>/dev/null)
+                if [ -n \"\$arti_pid\" ]; then
+                    kill -HUP \$arti_pid 2>/dev/null
+                else
                     su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
                 fi
             " 2>/dev/null || true
@@ -1343,14 +1335,10 @@ enable_workers_silent() {
     if [ "$TOR_IMPL" != "tor" ]; then
         for ctr_name in $affected_containers; do
             docker_cmd exec "$ctr_name" sh -c "
-                tor_running=false
-                for d in /proc/[0-9]*; do
-                    if [ \"\$(cat \$d/comm 2>/dev/null)\" = \"arti\" ]; then
-                        kill -HUP \$(basename \$d) 2>/dev/null
-                        tor_running=true
-                    fi
-                done
-                if [ \"\$tor_running\" = false ]; then
+                arti_pid=\$(pidof arti 2>/dev/null)
+                if [ -n \"\$arti_pid\" ]; then
+                    kill -HUP \$arti_pid 2>/dev/null
+                else
                     su -s /bin/sh arti -c 'arti proxy -c /etc/arti/arti.toml' &
                 fi
             " 2>/dev/null || true
