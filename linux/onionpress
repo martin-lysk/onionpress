@@ -364,6 +364,34 @@ os.chmod(output_path, 0o600)
         return 1
     fi
 
+    # Write C Tor format key (hs_ed25519_secret_key): 32-byte header + 64-byte expanded key
+    python3 -c "
+import binascii, os, sys
+hex_key = sys.argv[1]
+output_path = sys.argv[2]
+key_bytes = binascii.unhexlify(hex_key)
+header = b'== ed25519v1-secret: type0 ==\x00\x00\x00'
+with open(output_path, 'wb') as f:
+    f.write(header + key_bytes)
+os.chmod(output_path, 0o600)
+" "$hex_key" "$output_dir/hs_ed25519_secret_key"
+
+    if [ $? -ne 0 ]; then
+        echo "WARNING: Failed to write C Tor key file (Arti key still available)" >&2
+    fi
+
+    # Write C Tor public key (hs_ed25519_public_key): 32-byte header + 32-byte pubkey
+    python3 -c "
+import binascii, os, sys
+hex_pubkey = sys.argv[1]
+output_path = sys.argv[2]
+pubkey = binascii.unhexlify(hex_pubkey)
+header = b'== ed25519v1-public: type0 ==\x00\x00\x00'
+with open(output_path, 'wb') as f:
+    f.write(header + pubkey)
+os.chmod(output_path, 0o644)
+" "$hex_pubkey" "$output_dir/hs_ed25519_public_key"
+
     echo "$address" > "$output_dir/hostname"
     chmod 644 "$output_dir/hostname"
 
@@ -1417,17 +1445,40 @@ start_containers() {
     fi
 
     if [ -n "$VANITY_DIR" ]; then
-        # Always sync imported key to arti-state volume (ensures key survives restarts)
+        # Sync imported key to Arti state volume
         docker volume create onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
         if ! docker run --rm \
             -v onionpress-arti-state:/dest \
             --mount type=bind,source="$VANITY_DIR",target=/src \
             alpine sh -c 'mkdir -p /dest/state/keystore/hss/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/state/keystore/hss/wordpress/ && chown -R 100:100 /dest/state && chmod 700 /dest/state /dest/state/keystore /dest/state/keystore/hss /dest/state/keystore/hss/wordpress && chmod 600 /dest/state/keystore/hss/wordpress/*' >> "$LOG_FILE" 2>&1; then
-            log "ERROR: Failed to copy address key to arti-state volume"
-            return 1
+            log "WARNING: Failed to copy address key to arti-state volume"
+        fi
+        log "Address key installed to arti-state volume"
+
+        # Sync imported key to C Tor state volume (for TOR_IMPL=tor)
+        if [ -f "$VANITY_DIR/hs_ed25519_secret_key" ]; then
+            docker volume create onionpress-tor-state >> "$LOG_FILE" 2>&1 || true
+            if docker run --rm \
+                -v onionpress-tor-state:/dest \
+                --mount type=bind,source="$VANITY_DIR",target=/src \
+                alpine sh -c '
+                    mkdir -p /dest/hidden_service/wordpress/authorized_clients
+                    cp /src/hs_ed25519_secret_key /dest/hidden_service/wordpress/
+                    cp /src/hs_ed25519_public_key /dest/hidden_service/wordpress/ 2>/dev/null || true
+                    cp /src/hostname /dest/hidden_service/wordpress/
+                    chown -R 100:100 /dest/hidden_service
+                    chmod 700 /dest/hidden_service /dest/hidden_service/wordpress
+                    chmod 600 /dest/hidden_service/wordpress/hs_ed25519_secret_key
+                    chmod 644 /dest/hidden_service/wordpress/hostname
+                ' >> "$LOG_FILE" 2>&1; then
+                log "Address key installed to tor-state volume (C Tor)"
+            else
+                log "WARNING: Failed to copy address key to tor-state volume"
+            fi
+        else
+            log "WARNING: No C Tor key file (hs_ed25519_secret_key) -- C Tor will generate a random address"
         fi
 
-        log "Address key installed to arti-state volume"
         log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
     elif $FIRST_RUN; then
         log "No imported key found -- using random onion address"
@@ -1490,8 +1541,17 @@ start_containers() {
             # Now that WP is installed, start Tor
             docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
         else
-            # Non-interactive (systemd) — wait for user to run setup
-            log "WordPress not yet installed -- run 'onionpress setup' or visit http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}"
+            # Non-interactive (systemd) — auto-setup with generated credentials
+            log "WordPress not yet installed -- running automatic setup"
+            local auto_pass
+            auto_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
+            setup_wordpress_interactive --user admin --pass "$auto_pass" --title "OnionPress"
+            log "Auto-generated admin password saved to $DATA_DIR/wp-admin-password"
+            echo "$auto_pass" > "$DATA_DIR/wp-admin-password"
+            chmod 600 "$DATA_DIR/wp-admin-password"
+            log "WordPress auto-setup complete (user: admin, password in $DATA_DIR/wp-admin-password)"
+            # Now start Tor
+            docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
         fi
     fi
 
