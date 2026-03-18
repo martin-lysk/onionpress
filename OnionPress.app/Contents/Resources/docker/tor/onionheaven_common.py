@@ -597,9 +597,10 @@ def assign_takeover_container(conn):
 def check_farm_scaling(conn, active_entries):
     """Check if farm needs more takeover workers and write scale requests.
 
-    Called by the heartbeat monitor each cycle. Checks if there are unassigned
-    taken-over entries that need a container. Each scale request creates 2 new
-    containers (fulfilled by the host-side farm monitor).
+    Called by the heartbeat monitor each cycle. Only requests new containers
+    when ALL existing containers are at max_services AND there are unassigned
+    rows. If existing containers have capacity, the unassigned rows will be
+    picked up by assign_takeover_container on the next pass.
 
     active_entries: number of active registry entries this cycle.
     """
@@ -613,7 +614,24 @@ def check_farm_scaling(conn, active_entries):
         if unassigned == 0:
             return
 
-        # Check if there are already unfulfilled scale requests
+        # Check if existing containers have capacity
+        containers = conn.execute(
+            "SELECT container_name, max_services FROM takeover_containers "
+            "WHERE status = 'active'"
+        ).fetchall()
+
+        if containers:
+            for ctr in containers:
+                assigned = conn.execute(
+                    "SELECT COUNT(*) FROM registry "
+                    "WHERE takeover_container = ? AND status = 'taken-over'",
+                    (ctr["container_name"],)
+                ).fetchone()[0]
+                if assigned < ctr["max_services"]:
+                    # There's room — don't scale, assignment will happen next pass
+                    return
+
+        # No containers or all full — request scale-up
         pending_requests = conn.execute(
             "SELECT COUNT(*) FROM farm_scale_requests "
             "WHERE worker_type = 'takeover' AND fulfilled_at IS NULL"
@@ -626,7 +644,7 @@ def check_farm_scaling(conn, active_entries):
                 (now,)
             )
             db_commit_with_retry(conn)
-            log(f"Farm scale-up requested: {unassigned} unassigned taken-over entries need containers")
+            log(f"Farm scale-up requested: {unassigned} unassigned, all {len(containers)} containers full")
     except sqlite3.OperationalError:
         pass
 
