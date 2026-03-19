@@ -4,7 +4,7 @@
   **[Product Page](https://brewsterkahle.github.io/onionpress/)**
 </div>
 
-# OnionPresss
+# OnionPress
 
 **Run your own website from your Mac. Just Works. Free, forever.**
 
